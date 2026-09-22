@@ -1650,9 +1650,18 @@ git commit -m "feat: argon2id passwords, sessions and the restricted session gua
 - Create: `internal/infra/gateway/service.go`, `internal/infra/gateway/config.go`, `internal/infra/gateway/faketest/executor.go`
 - Test: `internal/infra/gateway/service_test.go`
 
+
 **Interfaces:**
 - Produces: `gateway.New(p Params) (*Gateway, error)`; `(*Gateway).Run(ctx) error`; `(*Gateway).WaitReload(ctx) error`; `(*Gateway).PushConfig(*cliproxyconfig.Config) error`; `(*Gateway).CurrentConfig() *cliproxyconfig.Config`; `faketest.Executor` implementing `coreauth.ProviderExecutor`.
 - Consumes: `config.Config` from Task 1.
+- **Production wiring:** supply the core auth manager here, not only in tests — Task 18 and
+  Plan B need a handle to it (`List`, `Update`, `Remove`, `ForceRefreshAuth`) and `Service`
+  exposes no getter. When you supply your own, replicate what the builder's default path does
+  (`builder.go:253-266`): cast the token store to `interface{ SetBaseDir(string) }` and set it
+  to `cfg.AuthDir`, and cast it to `coreauth.CooldownStateStoreProvider`, passing the result to
+  `WithCooldownStateStore`. Known cost: `newRoutingSelector` is unexported, so a
+  self-supplied manager falls back to `RoundRobinSelector` and the routing-strategy setting
+  becomes inert. Accepted for now; revisit if routing strategy is ever exposed in the admin UI.
 
 - [ ] **Step 1: Write the fake provider executor**
 
@@ -2579,12 +2588,24 @@ git commit -m "feat: OIDC sign-in gated by group and sign-up policy"
 
 ```go
 // internal/app/bootstrap_test.go
+package app_test // external test package: internal/infra/postgres imports internal/app,
+                 // so an in-package test cannot reach the repositories without a cycle.
+
+import (
+	"context"
+	"testing"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+)
+
 func TestBootstrapCreatesAdminWithMustChangePassword(t *testing.T) {
 	ctx := context.Background()
 	pool := postgres.NewTestPool(t)
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 
-	secret, err := Bootstrap(ctx, users, passwords, "admin@example.com")
+	secret, err := app.Bootstrap(ctx, users, passwords, "admin@example.com")
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
@@ -2609,10 +2630,10 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 	pool := postgres.NewTestPool(t)
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 
-	if _, err := Bootstrap(ctx, users, passwords, "admin@example.com"); err != nil {
+	if _, err := app.Bootstrap(ctx, users, passwords, "admin@example.com"); err != nil {
 		t.Fatalf("first bootstrap: %v", err)
 	}
-	secret, err := Bootstrap(ctx, users, passwords, "admin@example.com")
+	secret, err := app.Bootstrap(ctx, users, passwords, "admin@example.com")
 	if err != nil {
 		t.Fatalf("second bootstrap: %v", err)
 	}
@@ -2620,26 +2641,39 @@ func TestBootstrapIsIdempotent(t *testing.T) {
 		t.Fatal("second bootstrap must not issue a new password")
 	}
 }
+```
 
+```go
 // internal/app/throttle_test.go
+package app_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+)
+
 func TestLockoutAfterRepeatedFailures(t *testing.T) {
 	ctx := context.Background()
-	th := NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
+	th := app.NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
 
 	for i := 0; i < 3; i++ {
 		if err := th.Fail(ctx, "user@example.com"); err != nil {
 			t.Fatalf("Fail: %v", err)
 		}
 	}
-	err := th.Check(ctx, "user@example.com")
-	if !errors.Is(err, ErrLockedOut) {
+	if err := th.Check(ctx, "user@example.com"); !errors.Is(err, app.ErrLockedOut) {
 		t.Fatalf("err = %v, want ErrLockedOut", err)
 	}
 }
 
 func TestSuccessfulSignInResetsFailures(t *testing.T) {
 	ctx := context.Background()
-	th := NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
+	th := app.NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
 
 	_ = th.Fail(ctx, "user@example.com")
 	_ = th.Fail(ctx, "user@example.com")
