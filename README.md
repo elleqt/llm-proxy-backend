@@ -187,7 +187,7 @@ services:
       # creates it and prints a one-time password in its log. Empty disables this.
       LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
       # Where clients reach the proxied API; shown on the Connect page. Behind a
-      # reverse proxy: https://api.llm.example.com.
+      # reverse proxy: https://llm-proxy.example.com.
       LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
       # false only because this stack serves the web interface over plain http, where
       # a Secure cookie would not be sent back. Behind TLS, set it to true.
@@ -465,12 +465,12 @@ The override tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:l
 
 ![Connect page](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/connect.png)
 
-The web UI's **Connect** page shows the same snippets with your key and your deployment's API URL filled in. Below, `https://api.llm.example.com` is `LLMPROXY_PUBLIC_API_URL`.
+The web UI's **Connect** page shows the same snippets with your key and your deployment's API URL filled in. Below, `https://llm-proxy.example.com` is `LLMPROXY_PUBLIC_API_URL`.
 
 **Claude Code**: the base URL has no `/v1`.
 
 ```sh
-export ANTHROPIC_BASE_URL="https://api.llm.example.com"
+export ANTHROPIC_BASE_URL="https://llm-proxy.example.com"
 export ANTHROPIC_AUTH_TOKEN="sk-..."
 claude
 ```
@@ -480,22 +480,22 @@ claude
 ```yaml
 providers:
   anthropic:
-    baseUrl: https://api.llm.example.com
+    baseUrl: https://llm-proxy.example.com
     apiKey: "sk-..."
     api: anthropic-messages
     authHeader: true
     compat:
       supportsEagerToolInputStreaming: true
   openai-codex:
-    baseUrl: https://api.llm.example.com/backend-api
+    baseUrl: https://llm-proxy.example.com/backend-api
     apiKey: "sk-..."
     authHeader: true
 ```
 
-**OpenAI-compatible clients**: use `https://api.llm.example.com/v1` as the base URL and the key as the API key.
+**OpenAI-compatible clients**: use `https://llm-proxy.example.com/v1` as the base URL and the key as the API key.
 
 ```sh
-curl https://api.llm.example.com/v1/chat/completions \
+curl https://llm-proxy.example.com/v1/chat/completions \
   -H "Authorization: Bearer sk-..." \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-5", "messages": [{"role": "user", "content": "Hello"}]}'
@@ -584,15 +584,17 @@ Rules are checked at startup. A malformed rule stops the backend with an error t
 
 Put a TLS reverse proxy (Caddy, Traefik, nginx, …) in front of the stack, with two hostnames:
 
-| Hostname | Route to | Serves |
+| Hostname | What it is | Route to |
 |---|---|---|
-| `llm.example.com` | `frontend` container, port `8080` (published on host `8081`) | web UI and `/api/*` |
-| `api.llm.example.com` | `backend` container, port `8080` (published on host `8080`) | the proxied LLM API |
+| `llm.example.com` | The **web interface** people open in a browser: cabinet, admin panel, sign-in. The frontend's nginx serves the UI and forwards `/api/*` to the backend's web API inside the Docker network; the web API itself is never exposed | `frontend` container, port `8080` (published on host port `8081`) |
+| `llm-proxy.example.com` | The **LLM proxy API** that clients use (Claude Code, omp, OpenAI SDKs) with their `sk-…` keys. This is `LLMPROXY_PUBLIC_API_URL` | the backend's gateway listener, container port `8080` (published on host port `8080`) |
+
+Both names can point at the same server and the same reverse proxy; only the routing by hostname differs.
 
 Keep `docker-compose.yml` as it is and put the production settings in `.env`:
 
 ```sh
-LLMPROXY_PUBLIC_API_URL=https://api.llm.example.com
+LLMPROXY_PUBLIC_API_URL=https://llm-proxy.example.com
 # Behind TLS, cookies must be Secure.
 LLMPROXY_COOKIE_SECURE=true
 # Publish both ports on loopback only, for a reverse proxy on the same host.

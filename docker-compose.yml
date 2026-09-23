@@ -52,7 +52,7 @@ services:
       # creates it and prints a one-time password in its log. Empty disables this.
       LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
       # Where clients reach the proxied API; shown on the Connect page. Behind a
-      # reverse proxy: https://api.llm.example.com.
+      # reverse proxy: https://llm-proxy.example.com.
       LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
       # false only because this stack serves the web interface over plain http, where
       # a Secure cookie would not be sent back. Behind TLS, set it to true.
