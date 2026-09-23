@@ -43,6 +43,9 @@ services:
       LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
       LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL:-}
       LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
+      # on (the default) fetches upstream's model catalogue from the internet at
+      # start and every three hours; off keeps the one compiled into the build.
+      LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
       # Where clients reach the proxied API; shown in the cabinet's connection
       # instructions. A local default - every deployment overrides it.
       LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}

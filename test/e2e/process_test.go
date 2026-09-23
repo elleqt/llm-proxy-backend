@@ -4,12 +4,17 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
@@ -221,5 +226,106 @@ func TestLocalLoginOffLeavesOnlyFederatedSignIn(t *testing.T) {
 	}
 	if out := p.out.String(); !strings.Contains(out, "LLMPROXY_LOCAL_LOGIN is false") {
 		t.Fatalf("no warning that the bootstrap administrator cannot sign in:\n%s", out)
+	}
+}
+
+// catalogueHost is where upstream's model catalogue updaters fetch from first
+// (internal/registry model_updater.go modelsURLs, v7.3.12), as a CONNECT asks
+// for it.
+const catalogueHost = "raw.githubusercontent.com:443"
+
+// updaterStarts is what each of upstream's three model catalogue updaters logs
+// once its first fetch is over, failed or not.
+var updaterStarts = []string{
+	"periodic model refresh started",
+	"periodic Codex client model refresh started",
+	"periodic Devin model refresh started",
+}
+
+// refusingProxy is an HTTP(S) proxy that refuses every request with 502 and
+// records the hosts asked for, so nothing the process sends through it reaches
+// the internet.
+type refusingProxy struct {
+	mu    sync.Mutex
+	hosts []string
+}
+
+func (p *refusingProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	p.mu.Lock()
+	p.hosts = append(p.hosts, r.Host)
+	p.mu.Unlock()
+	w.WriteHeader(http.StatusBadGateway)
+}
+
+func (p *refusingProxy) asked() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.hosts)
+}
+
+// startBehindRefusingProxy boots the process with
+// LLMPROXY_MODEL_CATALOG_UPDATES=updates and every outbound request not to a
+// loopback address sent through a refusingProxy, which a refused fetch leaves
+// the updaters to log updaterStarts at once. It returns the proxy and a hook per
+// line of updaterStarts, installed before the process boots.
+func startBehindRefusingProxy(t *testing.T, updates string) (*refusingProxy, []*logSeen) {
+	t.Helper()
+	proxy := &refusingProxy{}
+	srv := httptest.NewServer(proxy)
+	t.Cleanup(srv.Close)
+	hooks := make([]*logSeen, len(updaterStarts))
+	for i, msg := range updaterStarts {
+		hooks[i] = &logSeen{msg: msg, seen: make(chan struct{})}
+		logrus.AddHook(hooks[i])
+	}
+	startProcess(t, "", map[string]string{
+		"LLMPROXY_MODEL_CATALOG_UPDATES": updates,
+		"HTTPS_PROXY":                    srv.URL,
+		"HTTP_PROXY":                     srv.URL,
+		"NO_PROXY":                       "",
+		"no_proxy":                       "",
+	})
+	return proxy, hooks
+}
+
+// TestModelCatalogUpdatersStartWhenOn: with LLMPROXY_MODEL_CATALOG_UPDATES on,
+// the process starts all three of upstream's model catalogue updaters, which
+// fetch the published catalogue. Each updater starts once per process, so this
+// is the one boot with them on.
+func TestModelCatalogUpdatersStartWhenOn(t *testing.T) {
+	if !inFreshProcess(t) {
+		return
+	}
+	proxy, hooks := startBehindRefusingProxy(t, "on")
+	for _, h := range hooks {
+		select {
+		case <-h.seen:
+		case <-time.After(30 * time.Second):
+			t.Fatalf("upstream never logged %q", h.msg)
+		}
+	}
+	if hosts := proxy.asked(); !slices.Contains(hosts, catalogueHost) {
+		t.Fatalf("the proxy was asked for %v, not the catalogue host %s", hosts, catalogueHost)
+	}
+}
+
+// TestModelCatalogUpdatersStayOffWhenOff: with LLMPROXY_MODEL_CATALOG_UPDATES
+// off, no updater starts and nothing is fetched. On, the lines follow the start
+// within milliseconds, the fetch being refused at once.
+func TestModelCatalogUpdatersStayOffWhenOff(t *testing.T) {
+	if !inFreshProcess(t) {
+		return
+	}
+	proxy, hooks := startBehindRefusingProxy(t, "off")
+	time.Sleep(3 * time.Second)
+	for _, h := range hooks {
+		select {
+		case <-h.seen:
+			t.Fatalf("upstream logged %q with the updates off", h.msg)
+		default:
+		}
+	}
+	if hosts := proxy.asked(); len(hosts) > 0 {
+		t.Fatalf("the process fetched through the proxy with the updates off: %v", hosts)
 	}
 }

@@ -18,6 +18,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
@@ -247,6 +248,123 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(p.Config.AuthDir, grant.FileName)); err != nil {
 		t.Fatalf("the completed login's credential was not persisted: %v", err)
+	}
+}
+
+// claudeTokenFile is a login record's token storage, as upstream's
+// ClaudeTokenStorage is: the tokens live only here, not in the record's
+// Metadata, and SaveTokenToFile writes them with the metadata the store
+// injects. The token is valid for two days, so nothing tries to refresh it.
+// fail, when set, is what the write returns instead.
+type claudeTokenFile struct {
+	accessToken, refreshToken, email string
+	fail                             error
+	metadata                         map[string]any
+}
+
+func (s *claudeTokenFile) SetMetadata(m map[string]any) { s.metadata = m }
+
+func (s *claudeTokenFile) SaveTokenToFile(path string) error {
+	if s.fail != nil {
+		return s.fail
+	}
+	data := make(map[string]any, len(s.metadata)+5)
+	for k, v := range s.metadata {
+		data[k] = v
+	}
+	data["type"] = "claude"
+	data["access_token"] = s.accessToken
+	data["refresh_token"] = s.refreshToken
+	data["email"] = s.email
+	data["expired"] = time.Now().Add(48 * time.Hour).Format(time.RFC3339)
+	raw, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, raw, 0o600)
+}
+
+// storageGrant is the record upstream's Claude exchange hands the post-auth
+// hook (auth_files_provider_oauth.go RequestAnthropicToken): the tokens in
+// Storage, only the email in Metadata.
+func storageGrant(t *testing.T, storage *claudeTokenFile) *coreauth.Auth {
+	t.Helper()
+	id := "claude-" + storage.email + ".json"
+	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(id) })
+	return &coreauth.Auth{ID: id, Provider: "claude", FileName: id, Storage: storage, Metadata: map[string]any{"email": storage.email}}
+}
+
+// TestLoginHoldsTheAccountWithItsTokens: the executors read an account's
+// token from its Metadata, but a login record carries its tokens only in
+// Storage. The account a completed login leaves in the manager must be the
+// one a restart loads from its file: tokens in Metadata, the file's path, and
+// active — or every request goes upstream without a credential until the
+// next restart.
+func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
+	p := productionParams(t)
+	r := startBooted(t, p)
+	storage := &claudeTokenFile{accessToken: "sk-ant-oat-wizard", refreshToken: "sk-ant-ort-wizard", email: "wizard@example.com"}
+	grant := storageGrant(t, storage)
+	login, _ := fakeLogin(t, func(string) *coreauth.Auth { return grant }, r.gateway.AddAccount)
+
+	session, err := login.StartLogin(context.Background(), "claude")
+	if err != nil {
+		t.Fatalf("StartLogin: %v", err)
+	}
+	account, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1"))
+	if err != nil {
+		t.Fatalf("CompleteLogin: %v", err)
+	}
+	if account.ID != grant.FileName || account.Email != storage.email {
+		t.Fatalf("CompleteLogin returned %+v, want account %s of %s", account, grant.FileName, storage.email)
+	}
+	held, ok := p.CoreAuth.GetByID(account.ID)
+	if !ok {
+		t.Fatal("the completed login's account is not held by the manager")
+	}
+	if got := held.Metadata["access_token"]; got != storage.accessToken {
+		t.Errorf("held account's Metadata[access_token] = %v, want the login's token: requests would carry no credential", got)
+	}
+	if got := held.Metadata["refresh_token"]; got != storage.refreshToken {
+		t.Errorf("held account's Metadata[refresh_token] = %v, want the login's refresh token", got)
+	}
+	if got, want := held.Attributes[coreauth.AttributePath], filepath.Join(p.Config.AuthDir, grant.FileName); got != want {
+		t.Errorf("held account's path attribute = %q, want its credential %q", got, want)
+	}
+	if held.Status != coreauth.StatusActive || held.Disabled {
+		t.Errorf("held account is status %q, disabled=%t; want active", held.Status, held.Disabled)
+	}
+	if registeredModels(account.ID) == 0 {
+		t.Error("the completed login's account has no registered models: it is not routable")
+	}
+}
+
+// TestLoginWithAnUnsavedCredentialAddsNothing: when the token store cannot
+// write the login's credential, the login fails and nothing is held,
+// routable or on disk, so no account serves traffic that a restart drops.
+func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
+	p := productionParams(t)
+	r := startBooted(t, p)
+	errWrite := errors.New("token file write refused by test")
+	storage := &claudeTokenFile{accessToken: "sk-ant-oat-unsaved", refreshToken: "sk-ant-ort-unsaved", email: "unsaved@example.com", fail: errWrite}
+	grant := storageGrant(t, storage)
+	login, _ := fakeLogin(t, func(string) *coreauth.Auth { return grant }, r.gateway.AddAccount)
+
+	session, err := login.StartLogin(context.Background(), "claude")
+	if err != nil {
+		t.Fatalf("StartLogin: %v", err)
+	}
+	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1")); !errors.Is(err, errWrite) {
+		t.Fatalf("CompleteLogin with a failing credential write = %v, want the write's error", err)
+	}
+	if got, ok := p.CoreAuth.GetByID(grant.ID); ok {
+		t.Fatalf("the unsaved login's account is held (disabled=%t)", got.Disabled)
+	}
+	if n := registeredModels(grant.ID); n != 0 {
+		t.Fatalf("the unsaved login's account has %d registered models", n)
+	}
+	if _, err := os.Stat(filepath.Join(p.Config.AuthDir, grant.FileName)); !os.IsNotExist(err) {
+		t.Fatalf("the unsaved login's credential is in the auth directory (stat: %v)", err)
 	}
 }
 
