@@ -54,6 +54,9 @@ func (l *testLog) Warnf(format string, args ...any) {
 	l.lines = append(l.lines, line)
 }
 
+func (l *testLog) Infof(format string, args ...any) {
+	l.t.Log("router log: " + fmt.Sprintf(format, args...))
+}
 func (l *testLog) text() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -101,10 +104,15 @@ type testEnv struct {
 	gateway  *mocks.ConfigPusher
 	prices   *mocks.PriceRepo
 	priceSet *mocks.PriceSink
-	accounts *mocks.VendorAccounts
-	logins   *mocks.VendorLogins
-	quota    *mocks.VendorQuota
-	acctMet  *mocks.AccountMetrics
+	// The price catalog: priceSrc is nil in Deps under withoutPriceCatalog.
+	priceCat       *mocks.PriceCatalogRepo
+	priceSrc       *mocks.PriceCatalogSource
+	priceMet       *mocks.PriceCatalogMetrics
+	noPriceCatalog bool
+	accounts       *mocks.VendorAccounts
+	logins         *mocks.VendorLogins
+	quota          *mocks.VendorQuota
+	acctMet        *mocks.AccountMetrics
 	// adminCfg is the federated sign-in the administration API is built with.
 	adminCfg app.AdminUsersConfig
 	deps     Deps
@@ -127,6 +135,9 @@ func withOIDC(e *testEnv) {
 func withRate(r RateLimit) envOption { return func(e *testEnv) { e.deps.SignInRate = r } }
 
 func withInsecureCookies(e *testEnv) { e.deps.CookieSecure = false }
+
+// withoutPriceCatalog configures no price catalog source.
+func withoutPriceCatalog(e *testEnv) { e.noPriceCatalog = true }
 
 func withAdminConfig(cfg app.AdminUsersConfig) envOption {
 	return func(e *testEnv) { e.adminCfg = cfg }
@@ -163,6 +174,9 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		gateway:  mocks.NewConfigPusher(t),
 		prices:   mocks.NewPriceRepo(t),
 		priceSet: mocks.NewPriceSink(t),
+		priceCat: mocks.NewPriceCatalogRepo(t),
+		priceSrc: mocks.NewPriceCatalogSource(t),
+		priceMet: mocks.NewPriceCatalogMetrics(t),
 		accounts: mocks.NewVendorAccounts(t),
 		logins:   mocks.NewVendorLogins(t),
 		quota:    mocks.NewVendorQuota(t),
@@ -185,7 +199,11 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	e.deps.AdminUsers = app.NewAdminUsers(e.users, e.pwds, e.idents, e.sessions, e.activity, e.deps.Tokens,
 		cheapHasher(), e.audit, e.clock, e.catalog, e.adminCfg)
 	e.deps.Settings = app.NewSettings(e.settings, e.gateway, e.audit, e.clock)
-	e.deps.Prices = app.NewPrices(e.prices, e.priceSet, e.audit, e.clock)
+	var priceSrc app.PriceCatalogSource = e.priceSrc
+	if e.noPriceCatalog {
+		priceSrc = nil
+	}
+	e.deps.Prices = app.NewPrices(e.prices, e.priceCat, priceSrc, e.priceSet, e.priceMet, e.audit, e.clock, e.log)
 	e.deps.Providers = app.NewProviders(e.accounts, e.logins, e.quota, e.acctMet, e.audit, e.clock, e.log)
 	e.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 	h, err := NewRouter(e.deps)

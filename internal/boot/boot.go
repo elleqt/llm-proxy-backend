@@ -32,6 +32,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 )
 
 // Options is what the process takes from outside its environment variables.
@@ -75,10 +76,11 @@ const (
 //
 // Boot order: configuration, migrations, the pool, repositories and the one
 // password hasher, the bootstrap administrator, the upstream boot configuration
-// from the database, metrics and the usage sink, the gateway, then the three
-// listeners, and once the gateway runs, the model catalogue updaters unless
-// LLMPROXY_MODEL_CATALOG_UPDATES is off. Nothing pushes a configuration or
-// changes an account after boot: the first change is an administrator's.
+// from the database, metrics, the price list and the usage sink, the gateway, then
+// the three listeners and the price catalog's checks, and once the gateway runs,
+// the model catalogue updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// Nothing pushes a configuration or changes an account after boot: the first
+// change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -119,6 +121,9 @@ type process struct {
 	// runs (LLMPROXY_MODEL_CATALOG_UPDATES).
 	catalogUpdates bool
 	sink           *gateway.UsageSink
+	// prices checks the price catalog every catalogInterval while serving.
+	prices          *app.Prices
+	catalogInterval time.Duration
 	// web is nil when LLMPROXY_WEB_ADDR is off.
 	web     *http.Server
 	metrics *http.Server
@@ -172,7 +177,14 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 			Help: "Panics the usage sink recovered from while recording usage.",
 		}, func() float64 { return float64(sink.Panics()) }),
 	)
-	priceList := app.NewPrices(postgres.NewPriceRepo(pool), prices, audit, clock)
+	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
+	// in force; the catalog's first check runs as serving starts.
+	var catalogSource app.PriceCatalogSource
+	if cfg.PriceCatalog.Enabled() {
+		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, opts.Version)
+	}
+	priceList := app.NewPrices(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
+		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
 		return nil, err
 	}
@@ -198,12 +210,14 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	}
 
 	p := &process{
-		log:            plog,
-		gateway:        g,
-		apiAddr:        cfg.ListenAddr,
-		catalogUpdates: cfg.ModelCatalogUpdates,
-		sink:           sink,
-		metrics:        metricsServer(cfg.MetricsAddr, meters.Handler()),
+		log:             plog,
+		gateway:         g,
+		apiAddr:         cfg.ListenAddr,
+		catalogUpdates:  cfg.ModelCatalogUpdates,
+		sink:            sink,
+		prices:          priceList,
+		catalogInterval: cfg.PriceCatalog.Interval,
+		metrics:         metricsServer(cfg.MetricsAddr, meters.Handler()),
 	}
 	if !cfg.Web.Enabled() {
 		return p, nil
@@ -316,6 +330,9 @@ type server struct {
 //   - once all have returned, the usage sink gets sinkGrace to write what it
 //     still holds, and Run closes the pool.
 //
+// The price catalog's checks run from the start and stop with the listeners: a
+// check in flight is cancelled and waited for, so none outlives the pool.
+//
 // Upstream's usage dispatch stops for good with the gateway, so the process
 // exits rather than restarting it.
 func (p *process) serve(ctx context.Context, releaseSignals func()) error {
@@ -356,6 +373,13 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 			gateway.StartModelCatalogUpdaters(gatewayCtx)
 		}
 	}()
+	catalogCtx, stopCatalog := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopCatalog()
+	catalogDone := make(chan struct{})
+	go func() {
+		defer close(catalogDone)
+		p.prices.RunCatalog(catalogCtx, p.catalogInterval)
+	}()
 
 	failed := make(chan error, len(servers))
 	for i, s := range servers {
@@ -382,7 +406,7 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	} else {
 		p.log.Printf("stopping")
 	}
-
+	stopCatalog()
 	var stopped sync.WaitGroup
 	for _, s := range servers {
 		stopped.Go(func() {
@@ -406,6 +430,7 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 		}
 	}
 	stopped.Wait()
+	<-catalogDone
 
 	dctx, cancel := context.WithTimeout(context.Background(), sinkGrace)
 	defer cancel()
@@ -437,3 +462,4 @@ func (systemClock) Now() time.Time { return time.Now().UTC() }
 type processLog struct{ l *log.Logger }
 
 func (p processLog) Warnf(format string, args ...any) { p.l.Printf("warning: "+format, args...) }
+func (p processLog) Infof(format string, args ...any) { p.l.Printf(format, args...) }

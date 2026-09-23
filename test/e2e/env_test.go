@@ -28,6 +28,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/elleqt/llm-proxy-backend/internal/boot"
+	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
@@ -178,6 +179,9 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		"LLMPROXY_SESSION_KEY":   "",
 		"LLMPROXY_OIDC_ISSUER":   "",
 		"LLMPROXY_LOCAL_LOGIN":   "",
+		// Never the network: a test that wants a catalog serves one and sets these.
+		"LLMPROXY_PRICES_CATALOG_URL":      config.PriceCatalogOff,
+		"LLMPROXY_PRICES_CATALOG_INTERVAL": "",
 		// A set one makes the gateway refuse to start.
 		"MANAGEMENT_PASSWORD": "",
 		// On, upstream's model catalogue updaters fetch from the internet; the

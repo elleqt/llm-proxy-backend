@@ -46,6 +46,10 @@ services:
       # on (the default) fetches upstream's model catalogue from the internet at
       # start and every three hours; off keeps the one compiled into the build.
       LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
+      # The price catalog (empty: oh-my-pi's model catalog; off: manual prices
+      # only) and how often it is checked (empty: 6h, at least 5m).
+      LLMPROXY_PRICES_CATALOG_URL: ${LLMPROXY_PRICES_CATALOG_URL:-}
+      LLMPROXY_PRICES_CATALOG_INTERVAL: ${LLMPROXY_PRICES_CATALOG_INTERVAL:-}
       # Where clients reach the proxied API; shown in the cabinet's connection
       # instructions. A local default - every deployment overrides it.
       LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}

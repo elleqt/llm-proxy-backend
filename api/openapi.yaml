@@ -600,15 +600,18 @@ paths:
       operationId: getPrices
       responses:
         "200":
-          description: The price list used to estimate cost in metrics.
+          description: >
+            The effective price list used to estimate cost in metrics - the catalog's
+            prices with the administrator's overrides on top - and the catalog's state.
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/ModelPrice" }
+              schema: { $ref: "#/components/schemas/PriceList" }
     put:
       tags: [admin-settings]
       operationId: replacePrices
+      summary: >
+        Replace the manual overrides. The body is the whole override list: a row it
+        omits falls back to the catalog price (or is dropped if the catalog has none).
       requestBody:
         required: true
         content:
@@ -621,13 +624,31 @@ paths:
           description: Replaced.
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: "#/components/schemas/ModelPrice" }
+              schema: { $ref: "#/components/schemas/PriceList" }
         "422":
           description: >
             `invalid_input` with `field` naming the entry and value, e.g. `[2].input` (a
             negative price) or `[3]` (a provider and model listed twice). Nothing is replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/prices/refresh:
+    post:
+      tags: [admin-settings]
+      operationId: refreshPriceCatalog
+      summary: >
+        Check the price catalog now instead of waiting for the next scheduled check.
+        The outcome is in `catalog`: a failure sets `lastError` and keeps the prices
+        in force.
+      responses:
+        "200":
+          description: Checked.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceList" }
+        "409":
+          description: "`catalog_disabled` - no catalog source is configured."
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1015,6 +1036,59 @@ components:
         output: { type: number, format: double, minimum: 0 }
         cacheRead: { type: number, format: double, minimum: 0 }
         cacheWrite: { type: number, format: double, minimum: 0 }
+
+    PriceRates:
+      type: object
+      required: [input, output, cacheRead, cacheWrite]
+      description: US dollars per million tokens.
+      properties:
+        input: { type: number, format: double, minimum: 0 }
+        output: { type: number, format: double, minimum: 0 }
+        cacheRead: { type: number, format: double, minimum: 0 }
+        cacheWrite: { type: number, format: double, minimum: 0 }
+
+    PriceEntry:
+      type: object
+      required: [provider, model, input, output, cacheRead, cacheWrite, source, updatedAt]
+      description: One price in force, in US dollars per million tokens.
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        input: { type: number, format: double, minimum: 0 }
+        output: { type: number, format: double, minimum: 0 }
+        cacheRead: { type: number, format: double, minimum: 0 }
+        cacheWrite: { type: number, format: double, minimum: 0 }
+        source:
+          type: string
+          enum: [catalog, manual]
+          description: "`manual` is an administrator's override; it wins over the catalog."
+        updatedAt: { type: string, format: date-time, description: When this row's rates last changed. }
+        catalogRates:
+          description: >
+            For a `manual` row, the catalog's rates for the same model - what removing the
+            override restores. Absent for a `catalog` row and when the catalog has no price.
+          $ref: "#/components/schemas/PriceRates"
+
+    PriceCatalog:
+      type: object
+      required: [enabled, models]
+      description: The automatically updated price catalog.
+      properties:
+        enabled: { type: boolean, description: False when no catalog source is configured. }
+        checkedAt: { type: [string, "null"], format: date-time, description: "The last successful check, whether or not the catalog had changed." }
+        changedAt: { type: [string, "null"], format: date-time, description: When the catalog prices in force last changed. }
+        models: { type: integer, minimum: 0, description: How many catalog prices are in force. }
+        lastError: { type: [string, "null"], description: "Why the last check failed; null once a check succeeds." }
+
+    PriceList:
+      type: object
+      required: [prices, catalog]
+      properties:
+        prices:
+          type: array
+          description: Ordered by provider, then model.
+          items: { $ref: "#/components/schemas/PriceEntry" }
+        catalog: { $ref: "#/components/schemas/PriceCatalog" }
 
 security:
   - session: []

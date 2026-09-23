@@ -30,6 +30,9 @@ packages:
       ConfigPusher:
       PriceRepo:
       PriceSink:
+      PriceCatalogRepo:
+      PriceCatalogSource:
+      PriceCatalogMetrics:
       VendorAccounts:
       VendorLogins:
       VendorQuota:

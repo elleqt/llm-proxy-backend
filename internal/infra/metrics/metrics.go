@@ -87,6 +87,9 @@ type Metrics struct {
 	accountFailures *prometheus.CounterVec
 	cost            *prometheus.CounterVec
 	unpriced        *prometheus.CounterVec
+	catalogChecked  prometheus.Gauge
+	catalogModels   prometheus.Gauge
+	catalogFailures prometheus.Counter
 }
 
 // Request latency runs from sub-second errors to multi-minute reasoning completions.
@@ -167,6 +170,18 @@ func New(reg Registry, opts ...Option) *Metrics {
 			Namespace: namespace, Name: "cost_unpriced_tokens_total",
 			Help: "Tokens consumed by models the price list has no price for, so absent from the cost estimate.",
 		}, []string{"provider", "model"}),
+		catalogChecked: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "price_catalog_checked_timestamp_seconds",
+			Help: "Unix time of the last successful price catalog check, whether or not the catalog had changed; 0 before the first.",
+		}),
+		catalogModels: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "price_catalog_models",
+			Help: "Catalog prices in force.",
+		}),
+		catalogFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: namespace, Name: "price_catalog_check_failures_total",
+			Help: "Price catalog checks that failed; the prices in force were kept.",
+		}),
 	}
 
 	buildInfo := prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -181,6 +196,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		m.quotaUsed, m.quotaReset, m.quotaObserved,
 		m.accountDisabled, m.accountFailures,
 		m.cost, m.unpriced,
+		m.catalogChecked, m.catalogModels, m.catalogFailures,
 		buildInfo,
 	)
 	return m
@@ -404,3 +420,15 @@ func (m *Metrics) ForgetAccount(account, provider string) {
 	m.quotaReset.DeletePartialMatch(match)
 	m.quotaObserved.DeletePartialMatch(match)
 }
+
+// SetPriceCatalog reports the catalog prices in force and the last successful
+// check; a zero checkedAt leaves the timestamp at 0 (never).
+func (m *Metrics) SetPriceCatalog(models int, checkedAt time.Time) {
+	m.catalogModels.Set(float64(models))
+	if !checkedAt.IsZero() {
+		m.catalogChecked.Set(unixSeconds(checkedAt))
+	}
+}
+
+// ObservePriceCatalogFailure counts a failed price catalog check.
+func (m *Metrics) ObservePriceCatalogFailure() { m.catalogFailures.Inc() }

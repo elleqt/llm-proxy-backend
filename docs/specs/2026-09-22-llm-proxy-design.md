@@ -414,8 +414,8 @@ user_identities    user_id, issuer, subject               ← OIDC, UNIQUE(issue
 | `quota_used_ratio`, `quota_reset_timestamp_seconds`, `quota_observed_timestamp_seconds` | переименованы в `vendor_quota_used_ratio`, `vendor_quota_reset_timestamp_seconds`, `vendor_quota_observed_timestamp_seconds`, метки `{account,provider,window}`; источник — `ResponseHeaders` |
 | `account_disabled`, `account_failures_total` | оставить, метки `{account,provider}`; теперь точные (`Auth.Disabled`, `Failed`) |
 | `tokens_total`, `requests_total` | оставить; метка-ярлык ключа заменяется меткой `user`: `tokens_total{user,provider,model,service_tier,kind}`, `requests_total{user,provider,model,stream,status}`. Метки `token` нет ни в одном семействе |
-| `cost_usd_total`, `cost_unpriced_tokens_total` | оставить (`{user,provider,model}` и `{provider,model}`); прайс — таблица в базе под админкой, а не загрузка чужого файла с внешнего репозитория |
-| `prices_loaded_timestamp_seconds`, `prices_models` | **не реализованы в бете**: таблица цен не хранит ни момента загрузки, ни числа моделей. Пустой прайс виден по росту `cost_unpriced_tokens_total` |
+| `cost_usd_total`, `cost_unpriced_tokens_total` | оставить (`{user,provider,model}` и `{provider,model}`); прайс — каталог цен с ручными ценами администратора поверх (см. «Каталог цен») |
+| `prices_loaded_timestamp_seconds`, `prices_models` | заменены на `price_catalog_checked_timestamp_seconds` (последняя успешная проверка каталога, 0 — ещё не было), `price_catalog_models` (цен каталога в силе) и `price_catalog_check_failures_total` |
 | `request_latency_ms_sum/count`, `ttft_ms_sum/count` | переделаны в гистограммы в секундах: `request_duration_seconds{provider,model,stream}`, `ttft_seconds{provider,model}`; значения поштучные, квантили настоящие |
 | `librechat_*` | не наше: телеметрия внешней панели, собирается из её собственной базы |
 
@@ -429,6 +429,45 @@ user_identities    user_id, issuer, subject               ← OIDC, UNIQUE(issue
 
 **Графики в личном кабинете считаются из Postgres**, а не из Prometheus: кабинету нужны точные
 числа и своя глубина, а не окно ретеншна системы мониторинга. Один журнал, два потребителя.
+
+### Каталог цен
+
+**Источник.** Каталог моделей oh-my-pi (MIT), `LLMPROXY_PRICES_CATALOG_URL`, по умолчанию
+`https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/catalog/src/models.json`;
+`off` выключает каталог — тогда в силе только ручные цены, а сохранённые цены каталога не
+применяются. Каталог — объект `{раздел: {модель: {…, cost: {input, output, cacheRead,
+cacheWrite}}}}` в долларах за миллион токенов; ставки берутся как есть, отсутствующая ставка
+кеша — 0; модель без `cost`, без `input` или `output`, с отрицательной/нечисловой ставкой или с
+пустым идентификатором либо управляющим символом в нём пропускается. Файл
+большой (~11 МБ): разбираются только нужные разделы, ответ больше 64 МиБ отвергается.
+
+**Сопоставление провайдеров.** `anthropic` → `claude`; `openai-codex` → `chatgpt`; `openai` →
+`chatgpt` только для моделей, которым `openai-codex` цены не дал. Остальные разделы не читаются.
+
+**Приоритет.** Действующий прайс — цены каталога (`catalog_prices`), поверх которых ручные цены
+администратора (`model_prices`, `PUT /api/admin/prices` — весь список переопределений). Ручная
+цена всегда побеждает; строка, убранная из списка, возвращается к цене каталога или исчезает.
+
+**Расписание.** Первая проверка — сразу при старте, затем каждые
+`LLMPROXY_PRICES_CATALOG_INTERVAL` (по умолчанию 6h, не меньше 5m); `POST
+/api/admin/prices/refresh` проверяет немедленно (аудит `prices.refresh`). Проверки не идут
+параллельно, запрос условный (`If-None-Match`/`If-Modified-Since`, 304 — успех без изменений),
+таймаут 2 минуты; чтение прайса проверку не ждёт. Валидаторы хранятся вместе с отпечатком
+источника (URL и версия разборщика) и отправляются, только если он совпадает, — после смены
+URL или разборщика каталог читается целиком.
+
+**Сбой.** Недоступный каталог, ответ не 2xx/304 (или 304 на безусловный запрос), неразбираемый
+файл, каталог без единой цены наших провайдеров или с одними нулевыми ценами, отказ базы
+сохранить результат — неудачная проверка: цены в силе сохраняются, причина (только код ответа,
+не более 200 байт) пишется в `lastError` (видна в админке), растёт
+`price_catalog_check_failures_total`. Успешная проверка очищает
+`lastError`. Каталог никогда не обнуляет прайс.
+
+**Приближение для записи в кеш.** `cacheWrite` каталога — цена пятиминутной записи Anthropic
+(1.25× input). Клиенты, запрашивающие часовой кеш (omp так делает, `cacheRetention: long`),
+платят 2× input, а журнал хранит одно число записанных в кеш токенов без разделения на 5m/1h —
+поэтому часовые записи этой ставкой недооцениваются. Если клиенты пользуются долгим кешем,
+администратор может переопределить модель вручную с `cacheWrite` = 2× input.
 
 ---
 
@@ -530,6 +569,9 @@ usage_events       id, at, user_id, token_id, provider, model, alias, stream, se
                    latency_ms, ttft_ms, status_code, failed, vendor_account_id
 audit_events       id, at, actor_user_id, action, target, detail, ip, user_agent
 model_prices       provider, model, input, output, cache_read, cache_write, updated_at
+                   ← ручные цены администратора, побеждают каталог
+catalog_prices     provider, model, input, output, cache_read, cache_write, updated_at
+catalog_state      etag, last_modified, fingerprint, checked_at, changed_at, last_error  ← одна строка
 settings           key, value, updated_at, updated_by
 ```
 
@@ -596,7 +638,8 @@ React + TypeScript, сборка Vite. Компоненты свои, на CSS M
 (`LLMPROXY_DATABASE_URL`), параметры OIDC (`LLMPROXY_OIDC_*`: issuer, client, redirect,
 требуемая группа, claim групп, маппинг групп в политику, политика по умолчанию, `allow_sign_up`,
 подпись кнопки входа), `LLMPROXY_LOCAL_LOGIN` (раздел 5.4), `LLMPROXY_MODEL_CATALOG_UPDATES`
-(обновление каталога моделей из сети, раздел 2), почта бутстрап-администратора,
+(обновление каталога моделей из сети, раздел 2), `LLMPROXY_PRICES_CATALOG_URL` и
+`LLMPROXY_PRICES_CATALOG_INTERVAL` (каталог цен, раздел 8), почта бутстрап-администратора,
 ключ сессий и флаг `Secure` для cookie, публичный адрес API для `/connect`, пути каталога
 грантов (`LLMPROXY_AUTH_DIR`) и рабочего каталога (`LLMPROXY_RUNTIME_DIR`). Срок жизни
 временных паролей — не настройка, а константа (раздел 5.2).

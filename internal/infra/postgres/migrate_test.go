@@ -11,15 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 )
 
-// expectedTables is every table 0001_init.sql is required to create. Spelled out
+// expectedTables is every table the migrations are required to create. Spelled out
 // rather than counted so a renamed or dropped table names itself in the failure.
 var expectedTables = []string{
 	"api_tokens",
 	"audit_events",
+	"catalog_prices",
+	"catalog_state",
 	"login_attempts",
 	"model_prices",
 	"pending_identities",
@@ -201,6 +204,38 @@ func TestMigrations(t *testing.T) {
 			if !tableExists(t, ctx, pool, table) {
 				t.Errorf("table %q was not recreated after rollback", table)
 			}
+		}
+	})
+
+	// An installation that already priced models by hand upgrades to the price
+	// catalog without losing them: they stay the manual prices, and the catalog
+	// starts empty with a state row to update. Runs after the rebuild above.
+	t.Run("0002 applies on a database with manual prices", func(t *testing.T) {
+		dsn := pool.Config().ConnString()
+		if err := postgres.MigrateDown(ctx, dsn); err != nil {
+			t.Fatalf("migrate down: %v", err)
+		}
+		if err := postgres.MigrateTo(ctx, dsn, 1); err != nil {
+			t.Fatalf("migrate to 1: %v", err)
+		}
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO model_prices (provider, model, input, output, cache_read, cache_write, updated_at)
+			 VALUES ('claude', 'claude-sonnet-5', 3, 15, 0.3, 3.75, '2026-09-01T00:00:00Z')`); err != nil {
+			t.Fatalf("insert a manual price: %v", err)
+		}
+		if err := postgres.Migrate(ctx, dsn); err != nil {
+			t.Fatalf("migrate up: %v", err)
+		}
+		manual, err := postgres.NewPriceRepo(pool).List(ctx)
+		if err != nil || len(manual) != 1 || manual[0].Model != "claude-sonnet-5" || manual[0].CacheWrite != 3.75 {
+			t.Fatalf("manual prices after the upgrade = %+v, %v; want the row kept", manual, err)
+		}
+		catalog := postgres.NewPriceCatalogRepo(pool)
+		if prices, err := catalog.List(ctx); err != nil || len(prices) != 0 {
+			t.Fatalf("catalog prices = %+v, %v; want none", prices, err)
+		}
+		if state, err := catalog.State(ctx); err != nil || state != (app.CatalogState{}) {
+			t.Fatalf("catalog state = %+v, %v; want a never-checked row", state, err)
 		}
 	})
 }

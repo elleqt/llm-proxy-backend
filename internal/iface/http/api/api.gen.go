@@ -81,6 +81,24 @@ func (e PolicySource) Valid() bool {
 	}
 }
 
+// Defines values for PriceEntrySource.
+const (
+	PriceEntrySourceCatalog PriceEntrySource = "catalog"
+	PriceEntrySourceManual  PriceEntrySource = "manual"
+)
+
+// Valid indicates whether the value is a known member of the PriceEntrySource enum.
+func (e PriceEntrySource) Valid() bool {
+	switch e {
+	case PriceEntrySourceCatalog:
+		return true
+	case PriceEntrySourceManual:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ProviderLoginStartRequestProvider.
 const (
 	Chatgpt ProviderLoginStartRequestProvider = "chatgpt"
@@ -351,6 +369,63 @@ type PolicyPreviewRequest struct {
 
 // PolicySource `idp` means the policy is recomputed from group claims at every sign-in and is read-only here.
 type PolicySource string
+
+// PriceCatalog The automatically updated price catalog.
+type PriceCatalog struct {
+	// ChangedAt When the catalog prices in force last changed.
+	ChangedAt *time.Time `json:"changedAt,omitempty"`
+
+	// CheckedAt The last successful check, whether or not the catalog had changed.
+	CheckedAt *time.Time `json:"checkedAt,omitempty"`
+
+	// Enabled False when no catalog source is configured.
+	Enabled bool `json:"enabled"`
+
+	// LastError Why the last check failed; null once a check succeeds.
+	LastError *string `json:"lastError,omitempty"`
+
+	// Models How many catalog prices are in force.
+	Models int `json:"models"`
+}
+
+// PriceEntry One price in force, in US dollars per million tokens.
+type PriceEntry struct {
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+
+	// CatalogRates For a `manual` row, the catalog's rates for the same model - what removing the override restores. Absent for a `catalog` row and when the catalog has no price.
+	CatalogRates *PriceRates `json:"catalogRates,omitempty"`
+	Input        float64     `json:"input"`
+	Model        string      `json:"model"`
+	Output       float64     `json:"output"`
+	Provider     string      `json:"provider"`
+
+	// Source `manual` is an administrator's override; it wins over the catalog.
+	Source PriceEntrySource `json:"source"`
+
+	// UpdatedAt When this row's rates last changed.
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// PriceEntrySource `manual` is an administrator's override; it wins over the catalog.
+type PriceEntrySource string
+
+// PriceList defines model for PriceList.
+type PriceList struct {
+	// Catalog The automatically updated price catalog.
+	Catalog PriceCatalog `json:"catalog"`
+
+	// Prices Ordered by provider, then model.
+	Prices []PriceEntry `json:"prices"`
+}
+
+// PriceRates US dollars per million tokens.
+type PriceRates struct {
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+}
 
 // ProviderAccount defines model for ProviderAccount.
 type ProviderAccount struct {

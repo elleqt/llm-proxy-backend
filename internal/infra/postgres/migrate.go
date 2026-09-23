@@ -101,3 +101,14 @@ func migrateDown(ctx context.Context, dsn string) error {
 		return nil
 	})
 }
+
+// migrateTo applies the pending migrations up to version and no further. Like
+// migrateDown, only the test binary reaches it (export_test.go).
+func migrateTo(ctx context.Context, dsn string, version int64) error {
+	return withProvider(dsn, func(p *goose.Provider) error {
+		if _, err := p.UpTo(ctx, version); err != nil {
+			return report("migrate to", err)
+		}
+		return nil
+	})
+}

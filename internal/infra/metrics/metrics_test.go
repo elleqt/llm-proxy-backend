@@ -266,6 +266,8 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 	m.ObserveVendorQuota("a", "claude", "7d", 0.1, time.Now())
 	m.SetAccountDisabled("a", "claude", false)
 	m.ObserveAccountFailure("a", "claude")
+	m.SetPriceCatalog(35, time.Unix(1_790_000_000, 0))
+	m.ObservePriceCatalogFailure()
 
 	body := scrape(t, m)
 	fams, err := parser().TextToMetricFamilies(strings.NewReader(body))
@@ -280,6 +282,8 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 		"llmproxy_vendor_quota_observed_timestamp_seconds",
 		"llmproxy_account_disabled", "llmproxy_account_failures_total", "llmproxy_build_info",
 		"llmproxy_cost_usd_total", "llmproxy_cost_unpriced_tokens_total",
+		"llmproxy_price_catalog_checked_timestamp_seconds", "llmproxy_price_catalog_models",
+		"llmproxy_price_catalog_check_failures_total",
 	} {
 		if _, ok := fams[name]; !ok {
 			t.Errorf("family %s missing from handler output", name)

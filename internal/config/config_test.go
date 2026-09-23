@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
@@ -91,6 +92,40 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 		t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", raw)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_PASSWORD_HASH_CONCURRENCY") {
 			t.Fatalf("%q: err = %v, want one naming LLMPROXY_PASSWORD_HASH_CONCURRENCY", raw, err)
+		}
+	}
+}
+
+// The catalog is on unless turned off; off ignores the interval, and an interval
+// short enough to hammer the source, or a URL that is not one, stops the start.
+func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {
+	setWebEnv(t, nil)
+	t.Setenv("LLMPROXY_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	load := func(url, interval string) (PriceCatalog, error) {
+		t.Helper()
+		t.Setenv("LLMPROXY_PRICES_CATALOG_URL", url)
+		t.Setenv("LLMPROXY_PRICES_CATALOG_INTERVAL", interval)
+		cfg, err := Load()
+		return cfg.PriceCatalog, err
+	}
+
+	if got, err := load("", ""); err != nil || !got.Enabled() || got.URL != DefaultPriceCatalogURL || got.Interval != 6*time.Hour {
+		t.Fatalf("defaults = %+v, %v; want the default URL every 6h", got, err)
+	}
+	if got, err := load("http://catalog.example.com/models.json", "5m"); err != nil || got.Interval != 5*time.Minute {
+		t.Fatalf("5m = %+v, %v; want accepted", got, err)
+	}
+	if got, err := load(PriceCatalogOff, "nonsense"); err != nil || got.Enabled() {
+		t.Fatalf("off = %+v, %v; want disabled, the interval ignored", got, err)
+	}
+	for _, c := range []struct{ url, interval, name string }{
+		{"", "4m59s", "LLMPROXY_PRICES_CATALOG_INTERVAL"},
+		{"", "6", "LLMPROXY_PRICES_CATALOG_INTERVAL"},
+		{"catalog.example.com/models.json", "", "LLMPROXY_PRICES_CATALOG_URL"},
+		{"ftp://catalog.example.com/models.json", "", "LLMPROXY_PRICES_CATALOG_URL"},
+	} {
+		if _, err := load(c.url, c.interval); err == nil || !strings.Contains(err.Error(), c.name) {
+			t.Errorf("%q every %q: err = %v, want one naming %s", c.url, c.interval, err, c.name)
 		}
 	}
 }
