@@ -808,7 +808,7 @@ func headers(kv ...string) http.Header {
 	return h
 }
 
-// TestSinkReadsVendorQuotaHeaders feeds the headers upstream v7.3.12 reads
+// TestSinkReadsVendorQuotaHeaders feeds the headers upstream v7.3.15 reads
 // (helps/claude_ratelimit.go, helps/codex_quota.go) and checks the gauges and
 // the quota store: Anthropic reports ratios, Codex percentages; the Codex
 // window comes from its length, so a weekly-only plan's primary window is 7d.

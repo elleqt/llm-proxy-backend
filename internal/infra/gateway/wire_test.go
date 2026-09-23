@@ -34,7 +34,7 @@ type onTheWire struct {
 // wireSecret unless the caller's Params carry another Resolver.
 //
 // The entry is in the boot configuration, not a pushed one, for two reasons
-// verified against upstream v7.3.12:
+// verified against upstream v7.3.15:
 //   - upstream synthesises credentials from configuration on Run and on its own
 //     file watcher's reload, never on the reload callback PushConfig drives
 //     (sdk/cliproxy/service_config.go: applyWatcherConfigUpdate passes

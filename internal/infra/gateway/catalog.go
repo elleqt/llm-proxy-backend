@@ -17,7 +17,7 @@ import (
 //
 // The SDK's ModelRegistry interface does not declare GetModelProviders, but
 // the registry cliproxy.GlobalModelRegistry returns (*registry.ModelRegistry,
-// v7.3.12) exports it. newCatalog reaches it through an interface assertion
+// v7.3.15) exports it. newCatalog reaches it through an interface assertion
 // and fails, so New refuses to start, if an upgrade removes it.
 //
 // It is also the admin screens' catalogue (app.ModelCatalog): Models lists
@@ -158,7 +158,7 @@ func compatNameRefused(name string) bool {
 }
 
 // builtinProviders are the upstream keys of the providers upstream serves
-// itself (v7.3.12: sdk/cliproxy/service_executors.go baselineExecutorAuths,
+// itself (v7.3.15: sdk/cliproxy/service_executors.go baselineExecutorAuths,
 // the model registration switch in sdk/cliproxy/service_models.go, and the
 // "home" provider of home mode). A policy name any of them has, or the key
 // itself, is reserved: an openai-compatibility entry going by it would share

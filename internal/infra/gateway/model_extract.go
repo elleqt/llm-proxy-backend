@@ -8,7 +8,7 @@ import (
 )
 
 // modelSource reads the model a request names, from where the upstream handler
-// serving its route reads it (upstream v7.3.12, sdk/api/handlers), with the
+// serving its route reads it (upstream v7.3.15, sdk/api/handlers), with the
 // rewrites that handler applies before routing. ok is false when the request
 // names no model, cannot be read, or names "model" more than once (see
 // repeatsModelKey); the request is then refused, never passed on.

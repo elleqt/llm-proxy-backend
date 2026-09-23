@@ -174,7 +174,7 @@ var ErrHomeMode = errors.New("gateway: home mode is refused")
 var ErrCompatName = errors.New("gateway: openai-compatibility name is reserved for a built-in provider")
 
 // managementEnv lists every environment variable the embedded upstream code
-// reads to enable /v0/management. Upstream v7.3.12 reads exactly one:
+// reads to enable /v0/management. Upstream v7.3.15 reads exactly one:
 // MANAGEMENT_PASSWORD, in internal/api/server.go NewServer (route registration
 // on a non-blank value) and internal/api/handlers/management/handler.go
 // NewHandler (accepted as the management secret). Both trim whitespace, so a
@@ -434,7 +434,7 @@ func NewCoreAuthManager(cfg *cliproxyconfig.Config) (*coreauth.Manager, coreauth
 
 // routingSelector is the selector upstream builds for cfg's routing settings
 // (sdk/cliproxy/service_config.go normalizedRoutingRuntimeState and
-// newRoutingSelector, both unexported in v7.3.12): the strategy by its accepted
+// newRoutingSelector, both unexported in v7.3.15): the strategy by its accepted
 // spellings, round-robin otherwise, wrapped in session affinity when that is on.
 // Upstream replaces it with its own on the first configuration it applies.
 func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
