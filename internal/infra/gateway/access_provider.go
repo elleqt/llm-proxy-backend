@@ -99,7 +99,7 @@ type candidate struct {
 
 // credentialCandidates returns the credentials r presents, in the order and
 // from exactly the places upstream's built-in provider reads them
-// (internal/access/config_access/provider.go Authenticate, v7.3.12):
+// (internal/access/config_access/provider.go Authenticate, v7.3.15):
 // Authorization (the token after "Bearer ", or the whole header when it has no
 // Bearer scheme), X-Goog-Api-Key, X-Api-Key, then the key and auth_token query
 // parameters. The source names are upstream's. Like upstream, any presented
