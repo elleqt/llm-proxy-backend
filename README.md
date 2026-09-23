@@ -383,7 +383,7 @@ It prints the new temporary password once, valid for 72 hours:
 ===========================================================================
 ```
 
-The account must change the password at the next sign-in, is signed out everywhere and its sign-in lockout is cleared; its API keys keep working. The reset is recorded in the audit log. The command refuses (exit code `1`, reason on stderr) an unknown email, a service account and a blocked account. `gateway reset-password --unblock <email>` also unblocks the account, but only while no other administrator is active, i.e. when the only administrator was blocked; otherwise an administrator unblocks it in the web interface.
+The account must change the password at the next sign-in, is signed out everywhere and its sign-in lockout is cleared; its API keys keep working. The reset is recorded in the audit log. The command refuses (exit code `1`, reason on stderr) an unknown email, a service account and a blocked account. `gateway reset-password --unblock <email>` also unblocks the account, but only when it is an administrator and no other administrator is active (the only administrator was blocked); any other blocked account is unblocked by an administrator in the web interface. With local sign-in off (`LLMPROXY_LOCAL_LOGIN=false`, or the web listener off), the command still prints the password but warns on stderr that it cannot be used until local sign-in is turned on.
 
 Use it when:
 
