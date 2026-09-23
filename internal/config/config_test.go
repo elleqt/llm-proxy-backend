@@ -95,6 +95,29 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 	}
 }
 
+// Catalogue updates reach the network, so they stop only when the operator says
+// off; a misspelt value stops the start rather than silently choosing either way.
+func TestModelCatalogUpdatesAreOnUnlessTurnedOff(t *testing.T) {
+	setWebEnv(t, nil)
+	t.Setenv("LLMPROXY_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	for raw, want := range map[string]bool{"": true, ModelCatalogUpdatesOn: true, ModelCatalogUpdatesOff: false} {
+		t.Setenv("LLMPROXY_MODEL_CATALOG_UPDATES", raw)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if cfg.ModelCatalogUpdates != want {
+			t.Fatalf("%q: ModelCatalogUpdates = %v, want %v", raw, cfg.ModelCatalogUpdates, want)
+		}
+	}
+	for _, raw := range []string{"false", "OFF", "no"} {
+		t.Setenv("LLMPROXY_MODEL_CATALOG_UPDATES", raw)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_MODEL_CATALOG_UPDATES") {
+			t.Fatalf("%q: err = %v, want one naming LLMPROXY_MODEL_CATALOG_UPDATES", raw, err)
+		}
+	}
+}
+
 // A listen address the server cannot bind as given is refused at start, naming the
 // variable, rather than failing later inside upstream or binding a random port.
 func TestLoadRejectsAMalformedListenAddress(t *testing.T) {

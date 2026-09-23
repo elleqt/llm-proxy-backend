@@ -180,6 +180,9 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		"LLMPROXY_LOCAL_LOGIN":   "",
 		// A set one makes the gateway refuse to start.
 		"MANAGEMENT_PASSWORD": "",
+		// On, upstream's model catalogue updaters fetch from the internet; the
+		// tests of that switch turn it on behind a local proxy.
+		"LLMPROXY_MODEL_CATALOG_UPDATES": "off",
 	}
 	maps.Copy(vars, env)
 	for k, v := range vars {

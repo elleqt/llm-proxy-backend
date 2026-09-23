@@ -76,8 +76,9 @@ const (
 // Boot order: configuration, migrations, the pool, repositories and the one
 // password hasher, the bootstrap administrator, the upstream boot configuration
 // from the database, metrics and the usage sink, the gateway, then the three
-// listeners. Nothing pushes a configuration or changes an account after boot:
-// the first change is an administrator's.
+// listeners, and once the gateway runs, the model catalogue updaters unless
+// LLMPROXY_MODEL_CATALOG_UPDATES is off. Nothing pushes a configuration or
+// changes an account after boot: the first change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -114,7 +115,10 @@ type process struct {
 	gateway *gateway.Gateway
 	// apiAddr is where the gateway serves the proxied API.
 	apiAddr string
-	sink    *gateway.UsageSink
+	// catalogUpdates starts upstream's model catalogue updaters once the gateway
+	// runs (LLMPROXY_MODEL_CATALOG_UPDATES).
+	catalogUpdates bool
+	sink           *gateway.UsageSink
 	// web is nil when LLMPROXY_WEB_ADDR is off.
 	web     *http.Server
 	metrics *http.Server
@@ -194,11 +198,12 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	}
 
 	p := &process{
-		log:     plog,
-		gateway: g,
-		apiAddr: cfg.ListenAddr,
-		sink:    sink,
-		metrics: metricsServer(cfg.MetricsAddr, meters.Handler()),
+		log:            plog,
+		gateway:        g,
+		apiAddr:        cfg.ListenAddr,
+		catalogUpdates: cfg.ModelCatalogUpdates,
+		sink:           sink,
+		metrics:        metricsServer(cfg.MetricsAddr, meters.Handler()),
 	}
 	if !cfg.Web.Enabled() {
 		return p, nil
@@ -338,8 +343,17 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	gatewayDone := make(chan error, 1)
 	go func() { gatewayDone <- p.gateway.Run(gatewayCtx) }()
 	go func() {
-		if p.gateway.WaitReload(gatewayCtx) == nil {
-			p.log.Printf("serving the proxied API on %s", p.apiAddr)
+		if p.gateway.WaitReload(gatewayCtx) != nil {
+			return
+		}
+		p.log.Printf("serving the proxied API on %s", p.apiAddr)
+		// Upstream's binary starts the model catalogue updaters before its
+		// service; here they start once the service runs, under its context,
+		// which ends their periodic refresh at shutdown. A change found before
+		// upstream registers its refresh callback is held and delivered on
+		// registration. They log their own start and every refresh.
+		if p.catalogUpdates {
+			gateway.StartModelCatalogUpdaters(gatewayCtx)
 		}
 	}()
 

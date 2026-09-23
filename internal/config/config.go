@@ -31,12 +31,25 @@ type Config struct {
 	// PasswordHashConcurrency is LLMPROXY_PASSWORD_HASH_CONCURRENCY: how many argon2
 	// derivations (about 19 MiB each) may run at once. Defaults to the CPU count.
 	PasswordHashConcurrency int
-	OIDC                    OIDC
-	Web                     Web
+	// ModelCatalogUpdates is LLMPROXY_MODEL_CATALOG_UPDATES, on unless it is
+	// ModelCatalogUpdatesOff: whether the embedded gateway keeps its model
+	// catalogue current from upstream's published catalogue, fetched over the
+	// network at start and every three hours. Off, it serves the catalogue
+	// compiled into the build.
+	ModelCatalogUpdates bool
+	OIDC                OIDC
+	Web                 Web
 }
 
 // WebAddrOff is the LLMPROXY_WEB_ADDR value that turns the web listener off.
 const WebAddrOff = "off"
+
+// ModelCatalogUpdatesOff is the LLMPROXY_MODEL_CATALOG_UPDATES value that turns
+// the model catalogue updates off; ModelCatalogUpdatesOn, or no value, keeps them on.
+const (
+	ModelCatalogUpdatesOff = "off"
+	ModelCatalogUpdatesOn  = "on"
+)
 
 // Web configures the browser-facing API's listener (internal/iface/http). It is on
 // unless LLMPROXY_WEB_ADDR is WebAddrOff; while it is off every other field is
@@ -155,6 +168,13 @@ func Load() (Config, error) {
 			return Config{}, errors.New("config: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer")
 		}
 		cfg.PasswordHashConcurrency = n
+	}
+	switch os.Getenv("LLMPROXY_MODEL_CATALOG_UPDATES") {
+	case "", ModelCatalogUpdatesOn:
+		cfg.ModelCatalogUpdates = true
+	case ModelCatalogUpdatesOff:
+	default:
+		return Config{}, errors.New("config: LLMPROXY_MODEL_CATALOG_UPDATES must be on or off")
 	}
 	oidc, err := loadOIDC()
 	if err != nil {
