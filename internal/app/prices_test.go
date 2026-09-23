@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,7 +35,15 @@ type pricesFixture struct {
 	checkedAt     time.Time
 	failures      int
 	events        []app.AuditEvent
+	// storeErr is what the catalog store's writes return; replaces and
+	// setStates count them.
+	storeErr  error
+	replaces  int
+	setStates int
 }
+
+// fingerprint is the fixture source's Fingerprint.
+const fingerprint = "2 https://catalog.example.com/models.json"
 
 // newPricesFixture builds the service with a catalog source unless disabled. The
 // manual store is left to each test; the catalog store starts as given.
@@ -59,6 +68,10 @@ func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, sta
 		func(_ context.Context, prices []app.ModelPrice, s app.CatalogState, at time.Time) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
+			f.replaces++
+			if f.storeErr != nil {
+				return f.storeErr
+			}
 			f.storedCatalog = make([]app.ModelPrice, len(prices))
 			for i, p := range prices {
 				p.UpdatedAt = at
@@ -70,6 +83,10 @@ func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, sta
 	f.catalog.EXPECT().SetState(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, s app.CatalogState) error {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.setStates++
+		if f.storeErr != nil && s.LastError == "" {
+			return f.storeErr
+		}
 		f.state = s
 		return nil
 	}).Maybe()
@@ -94,6 +111,8 @@ func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, sta
 		f.events = append(f.events, e)
 		return nil
 	}).Maybe()
+
+	f.source.EXPECT().Fingerprint().Return(fingerprint).Maybe()
 
 	var source app.PriceCatalogSource = f.source
 	if disabled {
@@ -283,7 +302,7 @@ func TestNotModifiedKeepsPricesAndValidatorsAndClearsTheError(t *testing.T) {
 	stored := sonnet()
 	stored.UpdatedAt = earlier
 	f := newPricesFixture(t, false, []app.ModelPrice{stored},
-		app.CatalogState{Validators: v, CheckedAt: earlier, ChangedAt: earlier, LastError: "the catalog answered 503"})
+		app.CatalogState{Validators: v, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier, LastError: "the catalog answered 503"})
 	f.load(t)
 	f.source.EXPECT().Fetch(mock.Anything, v).Return(app.CatalogFetch{Unchanged: true}, nil).Once()
 
@@ -313,13 +332,17 @@ func TestFailedChecksKeepThePricesInForce(t *testing.T) {
 		err   error
 		want  string
 	}{
-		"unreachable": {err: errors.New("the catalog answered 503 Service Unavailable"), want: "the catalog answered 503 Service Unavailable"},
+		"unreachable": {err: errors.New("the catalog answered 503"), want: "the catalog answered 503"},
 		"no prices": {fetch: app.CatalogFetch{Validators: app.CatalogValidators{ETag: `"empty"`}},
 			want: "the catalog has no price for any of our providers"},
+		"every price zero": {fetch: app.CatalogFetch{Prices: []app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5"},
+			{Provider: "chatgpt", Model: "gpt-6", CacheRead: 1}}, Validators: app.CatalogValidators{ETag: `"zero"`}},
+			want: "the catalog prices every model at zero"},
+		"too long": {err: errors.New(strings.Repeat("é", 300)), want: strings.Repeat("é", 100)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			v := app.CatalogValidators{ETag: `"v1"`}
-			f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{Validators: v, CheckedAt: earlier})
+			f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{Validators: v, Fingerprint: fingerprint, CheckedAt: earlier})
 			f.load(t)
 			f.source.EXPECT().Fetch(mock.Anything, v).Return(answer.fetch, answer.err).Once()
 
@@ -446,5 +469,92 @@ func TestPricesAreAdminOnly(t *testing.T) {
 	}
 	if _, err := f.svc.Refresh(context.Background(), newPerson()); !errors.Is(err, app.ErrForbidden) {
 		t.Fatalf("Refresh by a user: err = %v, want ErrForbidden", err)
+	}
+}
+
+// A catalog whose rates match the stored ones under new validators is not a
+// change: the validators move, the prices and their change time stay.
+func TestNewValidatorsWithTheSameRatesAreNoChange(t *testing.T) {
+	v1, v2 := app.CatalogValidators{ETag: `"v1"`}, app.CatalogValidators{ETag: `"v2"`}
+	stored := sonnet()
+	stored.UpdatedAt = earlier
+	f := newPricesFixture(t, false, []app.ModelPrice{stored}, app.CatalogState{Validators: v1, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier})
+	f.load(t)
+	f.source.EXPECT().Fetch(mock.Anything, v1).Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v2}, nil).Once()
+
+	list, err := f.svc.Refresh(context.Background(), newAdmin())
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if f.replaces != 0 || f.state.Validators != v2 || !f.state.ChangedAt.Equal(earlier) || !f.state.CheckedAt.Equal(settingsNow) {
+		t.Fatalf("%d replaces, state %+v; want none, the new validators, changed at the earlier time", f.replaces, f.state)
+	}
+	if !list.Catalog.ChangedAt.Equal(earlier) || f.events[0].Detail["outcome"] != "unchanged" {
+		t.Fatalf("status %+v, audit %+v; want unchanged", list.Catalog, f.events)
+	}
+}
+
+// Validators stored under another URL or parser are not sent: the new source
+// reads the whole catalog, and stores its own fingerprint with what it finds.
+func TestValidatorsFromAnotherSourceAreNotSent(t *testing.T) {
+	v := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
+	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()},
+		app.CatalogState{Validators: v, Fingerprint: "1 https://catalog.example.com/models.json", CheckedAt: earlier})
+	f.load(t)
+	f.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
+		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v}, nil).Once()
+
+	if _, err := f.svc.Refresh(context.Background(), newAdmin()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if f.state.Fingerprint != fingerprint || f.state.Validators != v {
+		t.Fatalf("state = %+v, want this source's fingerprint with the validators", f.state)
+	}
+}
+
+// A store that refuses the catalog makes a failed check, reported like any other.
+func TestAStoreFailureIsAFailedCheck(t *testing.T) {
+	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	f.load(t)
+	f.storeErr = errors.New("invalid byte sequence for encoding UTF8: 0x00")
+	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).
+		Return(app.CatalogFetch{Prices: []app.ModelPrice{gpt()}, Validators: app.CatalogValidators{ETag: `"v1"`}}, nil).Once()
+
+	list, err := f.svc.Refresh(context.Background(), newAdmin())
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if list.Catalog.LastError != "the catalog could not be stored" || !list.Catalog.CheckedAt.Equal(earlier) || f.failures != 1 {
+		t.Fatalf("status %+v, %d failures; want a failed check counted", list.Catalog, f.failures)
+	}
+	if got := f.priced(t); len(f.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
+		t.Fatalf("sink = %v after %d lists, want the price in force untouched", got, len(f.sunk))
+	}
+	if f.events[0].Detail["outcome"] != "failed" {
+		t.Fatalf("audit = %+v, want outcome failed", f.events)
+	}
+}
+
+// A check cut short by the shutdown is not a failed check: nothing is counted or
+// recorded.
+func TestACancelledCheckIsNotAFailure(t *testing.T) {
+	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	f.load(t)
+	fetching := make(chan struct{})
+	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
+		func(ctx context.Context, _ app.CatalogValidators) (app.CatalogFetch, error) {
+			close(fetching)
+			<-ctx.Done()
+			return app.CatalogFetch{}, errors.New("the catalog could not be fetched: context canceled")
+		}).Once()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.svc.RunCatalog(ctx, time.Hour); close(done) }()
+	<-fetching
+	cancel()
+	<-done
+	if f.failures != 0 || f.setStates != 0 || f.get(t).Catalog.LastError != "" {
+		t.Fatalf("%d failures, %d state writes, status %+v; want none", f.failures, f.setStates, f.get(t).Catalog)
 	}
 }

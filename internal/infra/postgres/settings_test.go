@@ -138,13 +138,14 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		sonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
 		gpt := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10}
 		first := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"},
-			CheckedAt: t0, ChangedAt: t0}
+			Fingerprint: "2 https://catalog.example.com/models.json", CheckedAt: t0, ChangedAt: t0}
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, gpt}, first, t0); err != nil {
 			t.Fatalf("first replace: %v", err)
 		}
 		cheaper := gpt
 		cheaper.Output = 8
-		second := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v2"`}, CheckedAt: t1, ChangedAt: t1}
+		second := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v2"`}, Fingerprint: "3 https://catalog.example.com/models.json",
+			CheckedAt: t1, ChangedAt: t1}
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, cheaper}, second, t1); err != nil {
 			t.Fatalf("second replace: %v", err)
 		}

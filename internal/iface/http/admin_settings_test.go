@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -171,12 +172,13 @@ func TestRefreshWithoutACatalogIsRefused(t *testing.T) {
 // A failed check is still answered 200: the reason is in catalog.lastError.
 func TestRefreshReportsAFailedCheckInTheStatus(t *testing.T) {
 	e := newEnv(t)
-	e.priceSrc.EXPECT().Fetch(mock.Anything, mock.Anything).Return(app.CatalogFetch{}, errors.New("the catalog answered 502 Bad Gateway"))
+	e.priceSrc.EXPECT().Fingerprint().Return("fp")
+	e.priceSrc.EXPECT().Fetch(mock.Anything, mock.Anything).Return(app.CatalogFetch{}, errors.New("the catalog answered 502"))
 	e.priceMet.EXPECT().ObservePriceCatalogFailure().Return().Once()
 	e.priceCat.EXPECT().SetState(mock.Anything, mock.Anything).Return(nil)
 	var got api.PriceList
 	decodeBody(t, e.do(http.MethodPost, "/api/admin/prices/refresh", "", withCookie(e.signedIn(admin()))), http.StatusOK, &got)
-	if !got.Catalog.Enabled || got.Catalog.LastError == nil || *got.Catalog.LastError != "the catalog answered 502 Bad Gateway" {
+	if !got.Catalog.Enabled || got.Catalog.LastError == nil || *got.Catalog.LastError != "the catalog answered 502" {
 		t.Fatalf("catalog = %+v, want the failure", got.Catalog)
 	}
 }
@@ -197,5 +199,39 @@ func TestReplacePricesRefusals(t *testing.T) {
 				wantField(t, got, c.field)
 			}
 		})
+	}
+}
+
+// A refresh outlasts the server's write timeout: it may wait for a scheduled
+// check and then fetch, so the route extends its own deadline.
+func TestRefreshOutlastsTheWriteTimeout(t *testing.T) {
+	e := newEnv(t)
+	const slow = 300 * time.Millisecond
+	e.priceSrc.EXPECT().Fingerprint().Return("fp")
+	e.priceSrc.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
+		func(context.Context, app.CatalogValidators) (app.CatalogFetch, error) {
+			time.Sleep(slow)
+			return app.CatalogFetch{}, errors.New("the catalog answered 503")
+		})
+	e.priceMet.EXPECT().ObservePriceCatalogFailure().Return()
+	e.priceCat.EXPECT().SetState(mock.Anything, mock.Anything).Return(nil)
+	srv := httptest.NewUnstartedServer(e.handler)
+	srv.Config.WriteTimeout = slow / 3
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/admin/prices/refresh", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(e.signedIn(admin()))
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("no answer after %s with a %s write timeout: %v", slow, srv.Config.WriteTimeout, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
 }

@@ -564,17 +564,28 @@ type CatalogFetch struct {
 	Validators CatalogValidators
 }
 
+// CatalogFetchTimeout bounds one PriceCatalogSource.Fetch, headers and body. The
+// catalog's file host can be slow, and nothing but the check waits on it.
+const CatalogFetchTimeout = 2 * time.Minute
+
 // PriceCatalogSource fetches the upstream price catalog. An error means the
 // catalog could not be read or understood; its text is short, safe to show an
-// administrator and never carries the response body.
+// administrator and never carries the response body. Fetch returns within
+// CatalogFetchTimeout.
 type PriceCatalogSource interface {
 	Fetch(ctx context.Context, since CatalogValidators) (CatalogFetch, error)
+	// Fingerprint names what turns a catalog into prices: the URL and the
+	// parser's version. Validators stored under another fingerprint describe a
+	// document this source would read differently, so they are not sent.
+	Fingerprint() string
 }
 
 // CatalogState is what the store keeps about the catalog's checks. A zero time
 // means never.
 type CatalogState struct {
 	Validators CatalogValidators
+	// Fingerprint is the source's Fingerprint when Validators were stored.
+	Fingerprint string
 	// CheckedAt is the last successful check, whether or not the catalog changed.
 	CheckedAt time.Time
 	// ChangedAt is when the catalog prices in force last changed.

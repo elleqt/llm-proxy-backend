@@ -1,7 +1,9 @@
 package http
 
 import (
+	"errors"
 	"net/http"
+	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
@@ -91,9 +93,19 @@ func (rt *router) replacePrices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, priceListOf(stored))
 }
 
+// refreshWriteTime is how long POST /api/admin/prices/refresh may take to answer:
+// the check may first wait for a scheduled one in flight, then fetch the catalog
+// itself, each up to app.CatalogFetchTimeout, and then store it. The server-wide
+// write timeout is far shorter, and this one route is given more.
+const refreshWriteTime = 2*app.CatalogFetchTimeout + time.Minute
+
 // refreshPriceCatalog checks the catalog now. A failed check is still a 200: its
 // reason is in catalog.lastError.
 func (rt *router) refreshPriceCatalog(w http.ResponseWriter, r *http.Request) {
+	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(refreshWriteTime)); err != nil &&
+		!errors.Is(err, http.ErrNotSupported) {
+		rt.Log.Warnf("web: %s %s: extend the write deadline: %v", r.Method, r.URL.Path, err)
+	}
 	c, _ := callerFrom(r.Context())
 	list, err := rt.Prices.Refresh(r.Context(), c.user)
 	if err != nil {

@@ -16,18 +16,17 @@ import (
 	"runtime/debug"
 	"slices"
 	"strings"
-	"time"
+	"unicode"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
-const (
-	// MaxBody is the largest catalog accepted. The catalog is about 11 MiB.
-	MaxBody = 64 << 20
-	// fetchTimeout bounds one fetch, headers and body. The raw file host can be
-	// slow, and nothing waits on a check but the check itself.
-	fetchTimeout = 2 * time.Minute
-)
+// MaxBody is the largest catalog accepted. The catalog is about 11 MiB.
+const MaxBody = 64 << 20
+
+// parserVersion changes whenever Parse or sections would read the same document
+// into different prices, so validators stored by an older build are not sent.
+const parserVersion = 2
 
 // sections maps the catalog's provider sections onto our provider names, in
 // precedence order: a model an earlier section prices is not taken from a later
@@ -46,6 +45,8 @@ type Source struct {
 	client    *http.Client
 }
 
+var _ app.PriceCatalogSource = (*Source)(nil)
+
 // New returns a Source for url. version names the build in the User-Agent; empty
 // takes it from the binary's build information. The client is a plain one: it
 // honours the process's proxy environment.
@@ -58,9 +59,12 @@ func New(url, version string) *Source {
 	return &Source{
 		url:       url,
 		userAgent: "llm-proxy/" + cmp.Or(version, "unknown") + " (price catalog)",
-		client:    &http.Client{Timeout: fetchTimeout},
+		client:    &http.Client{Timeout: app.CatalogFetchTimeout},
 	}
 }
+
+// Fingerprint is the parser's version and the URL.
+func (s *Source) Fingerprint() string { return fmt.Sprintf("%d %s", parserVersion, s.url) }
 
 // Fetch downloads the catalog unless it has not changed since the validators.
 func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.CatalogFetch, error) {
@@ -87,11 +91,15 @@ func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.Ca
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// The status code alone: the reason phrase is whatever the server sent.
 	switch {
+	case resp.StatusCode == http.StatusNotModified && since == (app.CatalogValidators{}):
+		// Nothing to be unchanged from: a cache in the way answered for someone else.
+		return app.CatalogFetch{}, errors.New("the catalog answered 304 to an unconditional request")
 	case resp.StatusCode == http.StatusNotModified:
 		return app.CatalogFetch{Unchanged: true}, nil
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return app.CatalogFetch{}, fmt.Errorf("the catalog answered %s", resp.Status)
+		return app.CatalogFetch{}, fmt.Errorf("the catalog answered %d", resp.StatusCode)
 	case resp.ContentLength > MaxBody:
 		return app.CatalogFetch{}, fmt.Errorf("the catalog is larger than %d MiB", MaxBody>>20)
 	}
@@ -112,21 +120,22 @@ func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.Ca
 	}, nil
 }
 
-// entry is the part of a catalog model this package reads.
+// entry is the part of a catalog model this package reads. Input and Output are
+// pointers so a cost that lacks either is told from one that is zero.
 type entry struct {
 	Cost *struct {
-		Input      float64 `json:"input"`
-		Output     float64 `json:"output"`
-		CacheRead  float64 `json:"cacheRead"`
-		CacheWrite float64 `json:"cacheWrite"`
+		Input      *float64 `json:"input"`
+		Output     *float64 `json:"output"`
+		CacheRead  float64  `json:"cacheRead"`
+		CacheWrite float64  `json:"cacheWrite"`
 	} `json:"cost"`
 }
 
 // Parse maps a catalog document onto our prices, ordered by provider then model.
-// Only the mapped sections are decoded. A model without a cost, or with a rate
-// that is negative or not a finite number, is skipped, as is one whose entry does
-// not decode; a missing cache rate is 0. Rates are taken as the catalog states
-// them.
+// Only the mapped sections are decoded. A model is skipped when its id is blank or
+// carries a control character, when it has no cost, no input or no output rate,
+// when a rate is negative or not a finite number, or when its entry does not
+// decode; a missing cache rate is 0. Rates are taken as the catalog states them.
 func Parse(doc []byte) ([]app.ModelPrice, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(doc, &top); err != nil {
@@ -146,21 +155,21 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 		}
 		for model, rawEntry := range models {
 			k := key{sec.provider, model}
-			if model == "" || seen[k] {
+			if seen[k] || !modelID(model) {
 				continue
 			}
 			var e entry
-			if json.Unmarshal(rawEntry, &e) != nil || e.Cost == nil {
+			if json.Unmarshal(rawEntry, &e) != nil || e.Cost == nil || e.Cost.Input == nil || e.Cost.Output == nil {
 				continue
 			}
 			c := e.Cost
-			if !rate(c.Input) || !rate(c.Output) || !rate(c.CacheRead) || !rate(c.CacheWrite) {
+			if !rate(*c.Input) || !rate(*c.Output) || !rate(c.CacheRead) || !rate(c.CacheWrite) {
 				continue
 			}
 			seen[k] = true
 			out = append(out, app.ModelPrice{
 				Provider: sec.provider, Model: model,
-				Input: c.Input, Output: c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite,
+				Input: *c.Input, Output: *c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite,
 			})
 		}
 	}
@@ -171,3 +180,9 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 }
 
 func rate(v float64) bool { return v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+// modelID reports whether id can be a stored model name: not blank, and free of
+// control characters (a NUL, for one, Postgres refuses in text).
+func modelID(id string) bool {
+	return strings.TrimSpace(id) != "" && !strings.ContainsFunc(id, unicode.IsControl)
+}

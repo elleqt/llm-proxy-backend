@@ -27,7 +27,13 @@ const catalogDoc = `{
     "claude-free":     {"id": "claude-free", "cost": {"input": 0, "output": 0}},
     "claude-nocost":   {"id": "claude-nocost"},
     "claude-negative": {"id": "claude-negative", "cost": {"input": -1, "output": 15}},
-    "claude-garbled":  {"id": "claude-garbled", "cost": {"input": "three", "output": 15}}
+    "claude-garbled":  {"id": "claude-garbled", "cost": {"input": "three", "output": 15}},
+    "claude-renamed":  {"id": "claude-renamed", "cost": {"inputPerMTok": 3, "outputPerMTok": 15}},
+    "claude-empty":    {"id": "claude-empty", "cost": {}},
+    "claude-no-output": {"id": "claude-no-output", "cost": {"input": 3}},
+    "   ":             {"cost": {"input": 3, "output": 15}},
+    "claude-\u0000nul": {"cost": {"input": 3, "output": 15}},
+    "claude-\ttab":    {"cost": {"input": 3, "output": 15}}
   },
   "openai-codex": {
     "gpt-5.5": {"cost": {"input": 5, "output": 30, "cacheRead": 0.5}},
@@ -129,6 +135,30 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 			w.Header().Set("Content-Length", "70000000")
 			_, _ = w.Write([]byte(secret))
 		}, "larger than 64 MiB"},
+		// No Content-Length: only reading the body can find it too large.
+		"too large, chunked": {func(w http.ResponseWriter, _ *http.Request) {
+			chunk := make([]byte, 1<<20)
+			for range pricecatalog.MaxBody>>20 + 1 {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+				w.(http.Flusher).Flush()
+			}
+		}, "larger than 64 MiB"},
+		// With no validators sent there is nothing to be unchanged from.
+		"304 to an unconditional request": {func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNotModified)
+		}, "304 to an unconditional request"},
+		// The reason phrase is the server's to choose; only the code is kept.
+		"reason phrase": {func(w http.ResponseWriter, _ *http.Request) {
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			_, _ = buf.WriteString("HTTP/1.1 503 " + secret + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			_ = buf.Flush()
+		}, "the catalog answered 503"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewServer(c.handler)

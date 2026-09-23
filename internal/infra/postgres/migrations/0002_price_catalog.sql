@@ -15,13 +15,15 @@ CREATE TABLE catalog_prices (
 );
 
 -- The state of the catalog's checks: one row, created here. etag and last_modified
--- are the validators of the last catalog accepted; checked_at the last successful
+-- are the validators of the last catalog accepted, fingerprint the source (URL and
+-- parser version) they were stored under; checked_at the last successful
 -- check; changed_at the last change of catalog_prices; last_error why the last
 -- check failed, NULL once one succeeds.
 CREATE TABLE catalog_state (
     id            boolean PRIMARY KEY DEFAULT true CHECK (id),
     etag          text NOT NULL DEFAULT '',
     last_modified text NOT NULL DEFAULT '',
+    fingerprint   text NOT NULL DEFAULT '',
     checked_at    timestamptz,
     changed_at    timestamptz,
     last_error    text

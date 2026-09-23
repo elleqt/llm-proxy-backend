@@ -55,8 +55,8 @@ func (r *PriceCatalogRepo) State(ctx context.Context) (app.CatalogState, error) 
 		lastError            *string
 	)
 	err := r.pool.QueryRow(ctx,
-		`SELECT etag, last_modified, checked_at, changed_at, last_error FROM catalog_state`).
-		Scan(&s.Validators.ETag, &s.Validators.LastModified, &checkedAt, &changedAt, &lastError)
+		`SELECT etag, last_modified, fingerprint, checked_at, changed_at, last_error FROM catalog_state`).
+		Scan(&s.Validators.ETag, &s.Validators.LastModified, &s.Fingerprint, &checkedAt, &changedAt, &lastError)
 	if err != nil {
 		return app.CatalogState{}, err
 	}
@@ -90,8 +90,9 @@ func (r *PriceCatalogRepo) SetState(ctx context.Context, state app.CatalogState)
 func setCatalogState(ctx context.Context, db execer, s app.CatalogState) error {
 	_, err := db.Exec(ctx,
 		`UPDATE catalog_state
-		    SET etag = $1, last_modified = $2, checked_at = $3, changed_at = $4, last_error = $5`,
-		s.Validators.ETag, s.Validators.LastModified, nullTime(s.CheckedAt), nullTime(s.ChangedAt), nullString(s.LastError))
+		    SET etag = $1, last_modified = $2, fingerprint = $3, checked_at = $4, changed_at = $5, last_error = $6`,
+		s.Validators.ETag, s.Validators.LastModified, s.Fingerprint, nullTime(s.CheckedAt), nullTime(s.ChangedAt),
+		nullString(s.LastError))
 	return err
 }
 

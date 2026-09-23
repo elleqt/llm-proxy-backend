@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
@@ -252,6 +253,10 @@ func (p *Prices) check(ctx context.Context) (checkResult, error) {
 
 	p.mu.Lock()
 	since := p.state.Validators
+	if p.state.Fingerprint != p.source.Fingerprint() {
+		// Stored by another URL or parser: this one must read the whole catalog.
+		since = CatalogValidators{}
+	}
 	p.mu.Unlock()
 
 	fetched, err := p.source.Fetch(ctx, since)
@@ -269,10 +274,14 @@ func (p *Prices) check(ctx context.Context) (checkResult, error) {
 }
 
 // acceptCatalog refuses a fetched list the prices in force must not be replaced
-// with: an empty one, which would unprice every model, or an invalid one.
+// with: an empty one, which would unprice every model, one that prices every
+// model at zero, which would zero the cost estimate, or an invalid one.
 func acceptCatalog(prices []ModelPrice) error {
 	if len(prices) == 0 {
 		return errors.New("the catalog has no price for any of our providers")
+	}
+	if !slices.ContainsFunc(prices, func(p ModelPrice) bool { return p.Input > 0 || p.Output > 0 }) {
+		return errors.New("the catalog prices every model at zero")
 	}
 	if err := validatePrices(prices); err != nil {
 		var ie *InvalidInputError
@@ -284,7 +293,23 @@ func acceptCatalog(prices []ModelPrice) error {
 	return nil
 }
 
+// maxCatalogError bounds the failure text stored, audited, logged and shown.
+const maxCatalogError = 200
+
+// clip cuts s to at most maxCatalogError bytes, on a rune boundary.
+func clip(s string) string {
+	if len(s) <= maxCatalogError {
+		return s
+	}
+	cut := maxCatalogError
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
+
 func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, error) {
+	why = clip(why)
 	p.metrics.ObservePriceCatalogFailure()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -297,33 +322,37 @@ func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, er
 	return res, nil
 }
 
+// recordSuccess stores what a successful fetch found. A store that refuses it
+// makes the check a failed one: the prices and the state in force stay.
 func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (checkResult, error) {
 	now := p.clock.Now()
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	state := p.state
 	state.CheckedAt, state.LastError = now, ""
 	if !fetched.Unchanged {
-		state.Validators = fetched.Validators
+		state.Validators, state.Fingerprint = fetched.Validators, p.source.Fingerprint()
 	}
+	changed := !fetched.Unchanged && !sameRates(p.catalogPrices, fetched.Prices)
+	var err error
+	if changed {
+		state.ChangedAt = now
+		err = p.catalog.Replace(ctx, fetched.Prices, state, now)
+	} else {
+		err = p.catalog.SetState(ctx, state)
+	}
+	if err != nil {
+		p.mu.Unlock()
+		p.log.Warnf("price catalog: store the check: %v", err)
+		return p.recordFailure(ctx, "the catalog could not be stored")
+	}
+	defer p.mu.Unlock()
+	p.state = state
 
-	if fetched.Unchanged || sameRates(p.catalogPrices, fetched.Prices) {
-		p.state = state
+	if !changed {
 		p.metrics.SetPriceCatalog(len(p.catalogPrices), now)
 		p.log.Infof("price catalog checked: unchanged, %d prices", len(p.catalogPrices))
-		res := checkResult{outcome: catalogUnchanged, models: len(p.catalogPrices)}
-		if err := p.catalog.SetState(ctx, state); err != nil {
-			return res, fmt.Errorf("app: record the price catalog check: %w", err)
-		}
-		return res, nil
+		return checkResult{outcome: catalogUnchanged, models: len(p.catalogPrices)}, nil
 	}
-
-	state.ChangedAt = now
-	if err := p.catalog.Replace(ctx, fetched.Prices, state, now); err != nil {
-		// Nothing was stored: the prices and the state in force stay.
-		return checkResult{}, fmt.Errorf("app: store the price catalog: %w", err)
-	}
-	p.state = state
 	// As in Replace: what was stored goes to the sink before the read-back.
 	p.catalogPrices = fetched.Prices
 	p.publish()
