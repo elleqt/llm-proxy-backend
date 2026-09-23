@@ -372,7 +372,18 @@ While the stack is running, the backend's command line issues a new temporary pa
 docker compose exec backend gateway reset-password admin@example.com
 ```
 
-It prints a banner like the bootstrap one (account, temporary password, expiry). The account must change the password at the next sign-in, is signed out everywhere and its sign-in lockout is cleared; its API keys keep working. The reset is recorded in the audit log. A blocked account is refused unless you add `--unblock` (for when the only administrator is blocked).
+It prints the new temporary password once, valid for 72 hours:
+
+```text
+======================= llm-proxy: password reset ========================
+  account:            admin@example.com
+  temporary password: <random password>
+  expires:            2026-09-26T09:15:56Z
+  Shown this once. Sign in on the web interface and choose a new password.
+===========================================================================
+```
+
+The account must change the password at the next sign-in, is signed out everywhere and its sign-in lockout is cleared; its API keys keep working. The reset is recorded in the audit log. The command refuses (exit code `1`, reason on stderr) an unknown email, a service account and a blocked account. `gateway reset-password --unblock <email>` also unblocks the account, but only while no other administrator is active, i.e. when the only administrator was blocked; otherwise an administrator unblocks it in the web interface.
 
 Use it when:
 

@@ -109,16 +109,25 @@ jobs:
         run: |
           # Without configuration the binary must start and refuse with its known
           # error: proof that it executes on the platform, not just that it exists.
+          # Each platform runs by its own manifest digest from the pushed index: the
+          # runner's image store cannot pull an index that carries attestations.
           want='gateway: config: LLMPROXY_DATABASE_URL is required'
           declare -A uname=([linux/amd64]=x86_64 [linux/arm64]=aarch64)
+          index=$(docker buildx imagetools inspect --raw "$REF")
           for platform in ${PLATFORMS//,/ }; do
             echo "::group::$platform"
+            digest=$(jq -r --arg os "${platform%/*}" --arg arch "${platform#*/}" \
+              '.manifests[] | select(.platform.os == $os and .platform.architecture == $arch) | .digest' <<<"$index")
+            [ -n "$digest" ] || { echo "::error::$platform missing from $REF"; exit 1; }
+            ref="$IMAGE@$digest"
+            echo "$platform: $ref"
+            docker pull -q --platform "$platform" "$ref"
             set +e
-            err=$(docker run --rm --platform "$platform" "$REF" 2>&1 >/dev/null)
+            err=$(docker run --rm --platform "$platform" "$ref" 2>&1 >/dev/null)
             code=$?
             set -e
             echo "exit $code: $err"
-            machine=$(docker run --rm --platform "$platform" --entrypoint uname "$REF" -m)
+            machine=$(docker run --rm --platform "$platform" --entrypoint uname "$ref" -m)
             echo "machine: $machine"
             [ "$machine" = "${uname[$platform]}" ] || { echo "::error::$platform: ran as $machine"; exit 1; }
             [ "$code" -eq 1 ] || { echo "::error::$platform: exit $code, want 1"; exit 1; }
