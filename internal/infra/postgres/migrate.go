@@ -18,12 +18,12 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-// withProvider opens dsn and hands a goose provider to fn.
+// withProvider opens dsn and hands the database and a goose provider over it to fn.
 //
 // It holds no goose package state: NewProvider takes the filesystem and dialect as
 // arguments, so two concurrent callers cannot race on shared globals the way
 // goose.SetBaseFS and goose.SetDialect do.
-func withProvider(dsn string, fn func(*goose.Provider) error) error {
+func withProvider(dsn string, fn func(*sql.DB, *goose.Provider) error) error {
 	// pgx parses the DSN lazily, inside Connect — sql.Open only fails on an
 	// unregistered driver name, which the blank import rules out. So there is no
 	// point guarding here; the leak, if any, surfaces from the provider below.
@@ -43,7 +43,7 @@ func withProvider(dsn string, fn func(*goose.Provider) error) error {
 	if err != nil {
 		return fmt.Errorf("postgres: provider: %w", err)
 	}
-	return fn(provider)
+	return fn(db, provider)
 }
 
 // report is this package's single rule for turning a failure into something safe to
@@ -82,7 +82,7 @@ func asConflict(err error) error {
 
 // Migrate applies every pending migration to the database at dsn.
 func Migrate(ctx context.Context, dsn string) error {
-	return withProvider(dsn, func(p *goose.Provider) error {
+	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
 		if _, err := p.Up(ctx); err != nil {
 			return report("migrate", err)
 		}
@@ -90,11 +90,37 @@ func Migrate(ctx context.Context, dsn string) error {
 	})
 }
 
+// Migrated reports whether every migration this build carries is applied to the
+// database at dsn. It applies nothing and takes no migration lock, so it neither
+// waits for nor delays a server migrating the same database. A database no server
+// has started on yet is not migrated.
+func Migrated(ctx context.Context, dsn string) (bool, error) {
+	var migrated bool
+	err := withProvider(dsn, func(db *sql.DB, p *goose.Provider) error {
+		// goose reads the applied versions from its table and fails where there is
+		// none yet.
+		var table *string
+		if err := db.QueryRowContext(ctx, `SELECT to_regclass('goose_db_version')::text`).Scan(&table); err != nil {
+			return report("migration status", err)
+		}
+		if table == nil {
+			return nil
+		}
+		pending, err := p.HasPending(ctx)
+		if err != nil {
+			return report("migration status", err)
+		}
+		migrated = !pending
+		return nil
+	})
+	return migrated, err
+}
+
 // migrateDown rolls every applied migration back, dropping every table and the data
 // in it. Unexported on purpose — nothing in production may reach it; the test binary
 // gets at it through export_test.go.
 func migrateDown(ctx context.Context, dsn string) error {
-	return withProvider(dsn, func(p *goose.Provider) error {
+	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
 		if _, err := p.DownTo(ctx, 0); err != nil {
 			return report("migrate down", err)
 		}
@@ -105,7 +131,7 @@ func migrateDown(ctx context.Context, dsn string) error {
 // migrateTo applies the pending migrations up to version and no further. Like
 // migrateDown, only the test binary reaches it (export_test.go).
 func migrateTo(ctx context.Context, dsn string, version int64) error {
-	return withProvider(dsn, func(p *goose.Provider) error {
+	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
 		if _, err := p.UpTo(ctx, version); err != nil {
 			return report("migrate to", err)
 		}

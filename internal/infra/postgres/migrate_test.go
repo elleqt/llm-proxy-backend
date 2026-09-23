@@ -186,6 +186,36 @@ func TestMigrations(t *testing.T) {
 		}
 	})
 
+	// gateway reset-password refuses a schema the server has not migrated: a fresh
+	// database, and one a newer build would still migrate further. Rebuilds the
+	// schema, so it runs after the subtests that use it.
+	t.Run("Migrated tells a migrated schema from one still to migrate", func(t *testing.T) {
+		dsn := pool.Config().ConnString()
+		migrated := func(want bool, state string) {
+			t.Helper()
+			got, err := postgres.Migrated(ctx, dsn)
+			if err != nil || got != want {
+				t.Fatalf("%s: Migrated = %v, %v; want %v", state, got, err, want)
+			}
+		}
+		migrated(true, "migrated")
+		if err := postgres.MigrateDown(ctx, dsn); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `DROP TABLE goose_db_version`); err != nil {
+			t.Fatal(err)
+		}
+		migrated(false, "never migrated")
+		if err := postgres.MigrateTo(ctx, dsn, 1); err != nil {
+			t.Fatal(err)
+		}
+		migrated(false, "partly migrated")
+		if err := postgres.Migrate(ctx, dsn); err != nil {
+			t.Fatal(err)
+		}
+		migrated(true, "migrated again")
+	})
+
 	// Runs last: it empties and rebuilds the schema the subtests above rely on.
 	t.Run("down then up restores the schema", func(t *testing.T) {
 		dsn := pool.Config().ConnString()

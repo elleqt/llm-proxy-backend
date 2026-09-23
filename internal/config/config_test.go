@@ -96,6 +96,29 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 	}
 }
 
+// gateway reset-password is how an operator gets back in when something is wrong,
+// so a setting only the server reads — here an incomplete OIDC configuration and a
+// malformed listener — must not stop it, while the two it uses are read as Load
+// reads them.
+func TestLoadDatabaseReadsOnlyWhatTheDatabaseNeeds(t *testing.T) {
+	setOIDCEnv(t, map[string]string{"LLMPROXY_OIDC_CLIENT_SECRET": "", "LLMPROXY_LISTEN_ADDR": "8080"})
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted the broken server settings this test relies on")
+	}
+	t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", "3")
+	db, err := LoadDatabase()
+	if err != nil {
+		t.Fatalf("LoadDatabase: %v", err)
+	}
+	if db.URL != "postgres://u:p@localhost:5432/db" || db.PasswordHashConcurrency != 3 {
+		t.Fatalf("LoadDatabase = %+v", db)
+	}
+	t.Setenv("LLMPROXY_DATABASE_URL", "")
+	if _, err := LoadDatabase(); err == nil {
+		t.Fatal("LoadDatabase accepted no LLMPROXY_DATABASE_URL")
+	}
+}
+
 // The catalog is on unless turned off; off ignores the interval, and an interval
 // short enough to hammer the source, or a URL that is not one, stops the start.
 func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {

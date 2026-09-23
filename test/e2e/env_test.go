@@ -349,18 +349,26 @@ func (p *process) webJSON(t *testing.T, method, path, body string, status int, v
 // restricted session, and changes the password, which lifts the restriction.
 func (p *process) signInAsBootstrapAdmin(t *testing.T) {
 	t.Helper()
+	p.claimTemporaryPassword(t, p.adminPassword, "a password I chose myself")
+}
+
+// claimTemporaryPassword signs the administrator in with a temporary password,
+// which opens a restricted session, and changes it to chosen, which lifts the
+// restriction.
+func (p *process) claimTemporaryPassword(t *testing.T, temporary, chosen string) {
+	t.Helper()
 	var me api.Me
 	p.webJSON(t, http.MethodPost, "/api/auth/login",
-		`{"email":"`+p.adminEmail+`","password":"`+p.adminPassword+`"}`, http.StatusOK, &me)
+		`{"email":"`+p.adminEmail+`","password":"`+temporary+`"}`, http.StatusOK, &me)
 	if !me.Restricted {
-		t.Fatal("the bootstrap administrator's first session is not restricted")
+		t.Fatal("the session a temporary password opens is not restricted")
 	}
 	var refused api.Error
 	p.webJSON(t, http.MethodGet, "/api/me/tokens", "", http.StatusForbidden, &refused)
 	if refused.Code != "password_change_required" {
 		t.Fatalf("restricted session on /api/me/tokens: code %q, want password_change_required", refused.Code)
 	}
-	p.webJSON(t, http.MethodPost, "/api/auth/password", `{"newPassword":"a password I chose myself"}`, http.StatusNoContent, nil)
+	p.webJSON(t, http.MethodPost, "/api/auth/password", `{"newPassword":"`+chosen+`"}`, http.StatusNoContent, nil)
 	p.webJSON(t, http.MethodGet, "/api/me", "", http.StatusOK, &me)
 	if me.Restricted {
 		t.Fatal("the session is still restricted after the password change")

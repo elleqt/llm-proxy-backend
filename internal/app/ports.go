@@ -490,6 +490,9 @@ type LoginAttemptRepo interface {
 	// So an attempt is admitted exactly when the returned count is at most
 	// maxFailures.
 	Charge(ctx context.Context, email string, maxFailures int, now, lockUntil time.Time) (count int, lockedUntil *time.Time, err error)
+	// Clear forgets every attempt of the address, an open lock included. A successful
+	// sign-in (Throttle.Reset) and the operator's recovery (Recovery.ResetPassword)
+	// call it, and nothing else.
 	Clear(ctx context.Context, email string) error
 }
 

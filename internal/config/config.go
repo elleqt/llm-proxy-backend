@@ -171,30 +171,24 @@ func checkAddr(name, addr string) error {
 }
 
 func Load() (Config, error) {
-	cfg := Config{
-		ListenAddr:          envOr("LLMPROXY_LISTEN_ADDR", ":8080"),
-		MetricsAddr:         envOr("LLMPROXY_METRICS_ADDR", "127.0.0.1:9090"),
-		DatabaseURL:         os.Getenv("LLMPROXY_DATABASE_URL"),
-		RuntimeDir:          envOr("LLMPROXY_RUNTIME_DIR", "/var/lib/llmproxy/runtime"),
-		AuthDir:             envOr("LLMPROXY_AUTH_DIR", "/var/lib/llmproxy/auths"),
-		BootstrapAdminEmail: strings.TrimSpace(os.Getenv("LLMPROXY_BOOTSTRAP_ADMIN_EMAIL")),
+	db, err := LoadDatabase()
+	if err != nil {
+		return Config{}, err
 	}
-	if cfg.DatabaseURL == "" {
-		return Config{}, errors.New("config: LLMPROXY_DATABASE_URL is required")
+	cfg := Config{
+		ListenAddr:              envOr("LLMPROXY_LISTEN_ADDR", ":8080"),
+		MetricsAddr:             envOr("LLMPROXY_METRICS_ADDR", "127.0.0.1:9090"),
+		DatabaseURL:             db.URL,
+		RuntimeDir:              envOr("LLMPROXY_RUNTIME_DIR", "/var/lib/llmproxy/runtime"),
+		AuthDir:                 envOr("LLMPROXY_AUTH_DIR", "/var/lib/llmproxy/auths"),
+		BootstrapAdminEmail:     strings.TrimSpace(os.Getenv("LLMPROXY_BOOTSTRAP_ADMIN_EMAIL")),
+		PasswordHashConcurrency: db.PasswordHashConcurrency,
 	}
 	if err := checkAddr("LLMPROXY_LISTEN_ADDR", cfg.ListenAddr); err != nil {
 		return Config{}, err
 	}
 	if err := checkAddr("LLMPROXY_METRICS_ADDR", cfg.MetricsAddr); err != nil {
 		return Config{}, err
-	}
-	cfg.PasswordHashConcurrency = runtime.NumCPU()
-	if raw := os.Getenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 {
-			return Config{}, errors.New("config: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer")
-		}
-		cfg.PasswordHashConcurrency = n
 	}
 	switch os.Getenv("LLMPROXY_MODEL_CATALOG_UPDATES") {
 	case "", ModelCatalogUpdatesOn:
@@ -219,6 +213,32 @@ func Load() (Config, error) {
 	}
 	cfg.PriceCatalog = catalog
 	return cfg, nil
+}
+
+// Database is the part of the configuration a command that only works on the
+// accounts in the database needs (gateway reset-password): where the database is,
+// and how many password derivations may run at once.
+type Database struct {
+	URL                     string
+	PasswordHashConcurrency int
+}
+
+// LoadDatabase reads LLMPROXY_DATABASE_URL and LLMPROXY_PASSWORD_HASH_CONCURRENCY
+// exactly as Load does, and nothing else: a variable only the listeners, the gateway
+// or OIDC read cannot stop such a command.
+func LoadDatabase() (Database, error) {
+	db := Database{URL: os.Getenv("LLMPROXY_DATABASE_URL"), PasswordHashConcurrency: runtime.NumCPU()}
+	if db.URL == "" {
+		return Database{}, errors.New("config: LLMPROXY_DATABASE_URL is required")
+	}
+	if raw := os.Getenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return Database{}, errors.New("config: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer")
+		}
+		db.PasswordHashConcurrency = n
+	}
+	return db, nil
 }
 
 // loadPriceCatalog reads the LLMPROXY_PRICES_CATALOG_* variables.

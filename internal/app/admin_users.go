@@ -223,7 +223,7 @@ func (s *AdminUsers) CreateUser(ctx context.Context, actor identity.User, in New
 		case SignInPassword:
 			// Derived before anything is written: a derivation that fails or is
 			// cancelled costs nothing to retry.
-			temp, hash, err := s.newTemporaryPassword(ctx, now)
+			temp, hash, err := drawTemporaryPassword(ctx, s.hasher, now)
 			if err != nil {
 				return CreatedUser{}, err
 			}
@@ -411,20 +411,9 @@ func (s *AdminUsers) ResetPassword(ctx context.Context, actor identity.User, id 
 		return TemporaryPassword{}, ErrNotLocal
 	}
 	now := s.clock.Now().UTC()
-	temp, hash, err := s.newTemporaryPassword(ctx, now)
+	temp, err := resetPassword(ctx, s.users, s.passwords, s.sessions, s.hasher, u.ID, now)
 	if err != nil {
 		return TemporaryPassword{}, err
-	}
-	// The restriction lands before the password. The other order has a window in
-	// which the new password opens an unrestricted session.
-	if err := s.users.SetMustChangePassword(ctx, u.ID, true); err != nil {
-		return TemporaryPassword{}, err
-	}
-	if err := s.passwords.Set(ctx, u.ID, hash, &temp.ExpiresAt); err != nil {
-		return TemporaryPassword{}, err
-	}
-	if err := s.sessions.DeleteByUser(ctx, u.ID); err != nil {
-		return TemporaryPassword{}, fmt.Errorf("app: password of %s reset but sessions not ended: %w", u.ID, err)
 	}
 	if err := s.record(ctx, actor, "user.password_reset", u.ID, now,
 		map[string]any{"expires_at": temp.ExpiresAt.Format(time.RFC3339)}); err != nil {
@@ -433,13 +422,36 @@ func (s *AdminUsers) ResetPassword(ctx context.Context, actor identity.User, id 
 	return temp, nil
 }
 
-// newTemporaryPassword draws a password and derives its hash.
-func (s *AdminUsers) newTemporaryPassword(ctx context.Context, now time.Time) (TemporaryPassword, string, error) {
+// resetPassword gives the human account id a temporary password (TemporaryPasswordTTL)
+// that must be changed at the next sign-in, and ends every session of the account. It
+// is the one reset: an administrator's (AdminUsers.ResetPassword) and the operator's
+// from the shell (Recovery.ResetPassword) both go through it, and each records it.
+func resetPassword(ctx context.Context, users UserRepo, passwords PasswordRepo, sessions SessionRepo, hasher *PasswordHasher, id uuid.UUID, now time.Time) (TemporaryPassword, error) {
+	temp, hash, err := drawTemporaryPassword(ctx, hasher, now)
+	if err != nil {
+		return TemporaryPassword{}, err
+	}
+	// The restriction lands before the password. The other order has a window in
+	// which the new password opens an unrestricted session.
+	if err := users.SetMustChangePassword(ctx, id, true); err != nil {
+		return TemporaryPassword{}, err
+	}
+	if err := passwords.Set(ctx, id, hash, &temp.ExpiresAt); err != nil {
+		return TemporaryPassword{}, err
+	}
+	if err := sessions.DeleteByUser(ctx, id); err != nil {
+		return TemporaryPassword{}, fmt.Errorf("app: password of %s reset but sessions not ended: %w", id, err)
+	}
+	return temp, nil
+}
+
+// drawTemporaryPassword draws a password and derives its hash.
+func drawTemporaryPassword(ctx context.Context, hasher *PasswordHasher, now time.Time) (TemporaryPassword, string, error) {
 	secret, err := newTemporaryPassword()
 	if err != nil {
 		return TemporaryPassword{}, "", fmt.Errorf("app: temporary password: %w", err)
 	}
-	hash, err := s.hasher.Hash(ctx, secret)
+	hash, err := hasher.Hash(ctx, secret)
 	if err != nil {
 		return TemporaryPassword{}, "", fmt.Errorf("app: temporary password: %w", err)
 	}
