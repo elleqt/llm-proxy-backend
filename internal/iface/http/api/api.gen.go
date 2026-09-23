@@ -492,7 +492,7 @@ type Usage struct {
 	} `json:"points"`
 	To     time.Time `json:"to"`
 	Totals struct {
-		// Requests Served requests. An attempt the gateway retried on another account is not counted twice; failed attempts are not counted.
+		// Requests Served model calls. Failed attempts, including ones the gateway retried on another account, are not counted. A request that also made a side call to another model (for example an image model behind a chat request) counts once per model served.
 		Requests int `json:"requests"`
 
 		// TokensTotal Every token spent, including tokens of failed or retried attempts.
