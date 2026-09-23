@@ -267,8 +267,9 @@ func TestMigrations(t *testing.T) {
 			// Manual price, with 100 unclassified tokens and cache writes outweighing reads.
 			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100,
 				TokensCacheRead: 200, TokensCacheWrite: 4000, TokensTotal: 5600}, manual, true},
+			// No cache-write rate: writes cost the input rate.
 			{app.UsageEvent{Provider: "chatgpt", Model: "gpt-6", TokensInput: 600, TokensOutput: 50, TokensCacheRead: 400,
-				TokensTotal: 1050}, catalogOnly, true},
+				TokensCacheWrite: 300, TokensTotal: 1350}, catalogOnly, true},
 			// A total only: nothing classified, so nothing priced.
 			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensTotal: 500}, manual, true},
 			// No price at all.

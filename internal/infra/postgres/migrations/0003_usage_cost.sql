@@ -21,9 +21,14 @@ ALTER TABLE usage_events
 
 -- Backfill: the rows recorded before cost was stored are priced at the price in
 -- force now (a manual price, else the catalog's), with app.PriceUsage's arithmetic.
+-- The catalog's price is used even where the catalog is switched off in the
+-- configuration, which a migration cannot see: acceptable for the beta rows this
+-- backfills, and the prices of new rows are always those really in force.
 -- The kinds partition a request (reasoning is output; a negative count is zero);
 -- tokens above their sum are unclassified and unpriced; a row with no classified
 -- token, or whose model has no price, is not priced and all its tokens are unpriced.
+-- A cache-write rate of zero is a vendor billing written tokens as input: they cost
+-- the input rate and take nothing off the savings.
 WITH price AS (
     SELECT provider, model, input, output, cache_read, cache_write FROM model_prices
     UNION ALL
@@ -40,7 +45,7 @@ WITH price AS (
                + GREATEST(e.tokens_cache_read, 0) + GREATEST(e.tokens_cache_write, 0) AS classified,
            GREATEST(e.tokens_total, 0) AS total,
            p.provider IS NOT NULL AS has_price,
-           p.input, p.output, p.cache_read, p.cache_write
+           p.input, p.output, p.cache_read, COALESCE(NULLIF(p.cache_write, 0), p.input) AS cache_write
     FROM usage_events e
     LEFT JOIN price p ON p.provider = e.provider AND p.model = e.model
 )

@@ -44,7 +44,8 @@ func (c *UsageCost) Add(o UsageCost) {
 // breakdown that way), so each token is priced once: reasoning tokens are output
 // tokens and cost the output rate. Tokens the vendor could not classify
 // (TokensTotal above the sum of the kinds) have no rate and are unpriced even for a
-// priced model; without a price every token is. A negative count counts as zero.
+// priced model; without a price every token is. A negative count counts as zero. A
+// cache-write rate of zero means cache writes are billed at the input rate.
 //
 // The migration that added the ledger's cost columns backfilled them with the same
 // arithmetic in SQL (0003_usage_cost.sql): a change here must change it there.
@@ -60,13 +61,20 @@ func PriceUsage(ev UsageEvent, p ModelPrice, ok bool) UsageCost {
 		}
 		return UsageCost{UnpricedTokens: unclassified}
 	}
+	// A price without a cache-write rate is a vendor that bills written tokens as
+	// ordinary input (OpenAI): they cost the input rate, and writing costs nothing
+	// extra, so it takes nothing off the savings.
+	cacheWriteRate := p.CacheWrite
+	if cacheWriteRate == 0 {
+		cacheWriteRate = p.Input
+	}
 	fin, fout, fread, fwrite := float64(in), float64(out), float64(cacheRead), float64(cacheWrite)
 	return UsageCost{
 		InputUSD:        fin * p.Input / 1e6,
 		OutputUSD:       fout * p.Output / 1e6,
 		CacheReadUSD:    fread * p.CacheRead / 1e6,
-		CacheWriteUSD:   fwrite * p.CacheWrite / 1e6,
-		CacheSavingsUSD: (fread*(p.Input-p.CacheRead) - fwrite*(p.CacheWrite-p.Input)) / 1e6,
+		CacheWriteUSD:   fwrite * cacheWriteRate / 1e6,
+		CacheSavingsUSD: (fread*(p.Input-p.CacheRead) - fwrite*(cacheWriteRate-p.Input)) / 1e6,
 		UnpricedTokens:  unclassified,
 		Priced:          true,
 	}
