@@ -228,21 +228,57 @@ func readDeadlineControl() gin.HandlerFunc {
 // offers no deadline.
 var errNoReadDeadline = errors.New("gateway: the request body's read deadline cannot be set")
 
-// setBodyReadDeadline bounds, on c's connection, the time left to receive
-// the request body: a sender that stalls cannot keep its request, and what
-// its body is charged, past bodyReadTimeout. The server lifts the deadline
-// itself once the whole body has been read (net/http
-// connReader.startBackgroundRead), so a long response is not cut, and every
-// request on the connection starts without one.
-func setBodyReadDeadline(c *gin.Context) error {
+// bodyDeadline bounds the time left to receive a request body: a sender that
+// stalls cannot keep its request, and what its body is charged, past
+// bodyReadTimeout.
+//
+// The deadline is set on the connection at once, and set again by a timer when
+// it passes. The second setting is what enforces it: upstream's connection
+// multiplexer hands a connection to the HTTP server and only then clears its
+// own sniffing deadline (internal/api/protocol_multiplexer.go,
+// routeMuxConnection), so on a busy process that clear can land after the
+// first setting, while the gate is already blocked reading. A deadline already
+// past makes that read return at once.
+//
+// The server lifts the deadline itself once the whole body has been read
+// (net/http connReader.startBackgroundRead), so a long response is not cut,
+// and every request on the connection starts without one. stop must be called
+// as soon as the body has been read, before anything slow.
+type bodyDeadline struct {
+	timer *time.Timer
+	fired chan struct{}
+}
+
+// setBodyReadDeadline starts c's body deadline.
+func setBodyReadDeadline(c *gin.Context) (*bodyDeadline, error) {
 	rc, ok := c.Value(readDeadlineKey).(*http.ResponseController)
 	if !ok {
-		return errNoReadDeadline
+		return nil, errNoReadDeadline
 	}
-	if err := rc.SetReadDeadline(time.Now().Add(bodyReadTimeout)); err != nil {
-		return errors.Join(errNoReadDeadline, err)
+	deadline := time.Now().Add(bodyReadTimeout)
+	if err := rc.SetReadDeadline(deadline); err != nil {
+		return nil, errors.Join(errNoReadDeadline, err)
 	}
-	return nil
+	d := &bodyDeadline{fired: make(chan struct{})}
+	d.timer = time.AfterFunc(time.Until(deadline), func() {
+		defer close(d.fired)
+		_ = rc.SetReadDeadline(deadline)
+	})
+	return d, nil
+}
+
+// stop ends the deadline's watch and reports whether the timer had already
+// fired. A body read by then counts as late whatever the read returned: once
+// the deadline was set again, the server's background read on a finished body
+// may have failed on it and cancelled the request. stop waits for a running
+// timer, so the connection is not touched after the gate moves on. A nil
+// deadline (a request without a body) never fires.
+func (d *bodyDeadline) stop() (late bool) {
+	if d == nil || d.timer.Stop() {
+		return false
+	}
+	<-d.fired
+	return true
 }
 
 // bodyTimedOut reports whether err is the body's read deadline passing.

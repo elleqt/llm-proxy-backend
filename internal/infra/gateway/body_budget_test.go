@@ -430,3 +430,89 @@ func TestBodyIsRefusedWithoutAReadDeadline(t *testing.T) {
 		}
 	}
 }
+
+// clearingListener hands out connections that report, on set, each non-zero
+// read deadline put on them, so a test can clear it afterwards from outside the
+// server, the way upstream's connection multiplexer does.
+type clearingListener struct {
+	net.Listener
+	conns chan *clearingConn
+}
+
+func (l clearingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	c := &clearingConn{Conn: conn, set: make(chan struct{}, 1)}
+	l.conns <- c
+	return c, nil
+}
+
+type clearingConn struct {
+	net.Conn
+	set chan struct{}
+}
+
+func (c *clearingConn) SetReadDeadline(t time.Time) error {
+	err := c.Conn.SetReadDeadline(t)
+	if !t.IsZero() {
+		select {
+		case c.set <- struct{}{}:
+		default:
+		}
+	}
+	return err
+}
+
+// TestStalledSenderIsCutWhenTheTransportClearsTheDeadline: upstream's
+// connection multiplexer hands a connection to the HTTP server and only then
+// clears its own sniffing deadline (internal/api/protocol_multiplexer.go,
+// routeMuxConnection). When that goroutine runs late, the clear lands after
+// the gate has set the body's read deadline, while the gate is already
+// blocked reading. The stalled sender must still be answered 408 in time,
+// not kept until it gives up.
+func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	withBodyReadTimeout(t, timeout)
+	engine := gin.New()
+	engine.Use(readDeadlineControl(), policyGate(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"),
+		fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}), nil))
+	engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusOK) })
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := clearingListener{Listener: inner, conns: make(chan *clearingConn, 1)}
+	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: engine}}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	conn, r := rawConn(t, inner.Addr().String())
+	_ = conn.SetDeadline(time.Now().Add(20 * timeout))
+	chat := `{"model":"gpt-5.6","messages":[{"role":"user","content":"hi"}]}`
+	if _, err := io.WriteString(conn, requestHead("/v1/chat/completions", gateSecret, len(chat))+chat[:10]); err != nil {
+		t.Fatal(err)
+	}
+	served := <-listener.conns
+	select {
+	case <-served.set:
+	case <-time.After(10 * timeout):
+		t.Fatal("the gate set no read deadline")
+	}
+	_ = served.Conn.SetReadDeadline(time.Time{})
+
+	started := time.Now()
+	resp, err := http.ReadResponse(r, nil)
+	if err != nil {
+		t.Fatalf("stalled sender after the transport cleared the deadline: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	const timedOut = `{"error":{"message":"request body not received in time","type":"invalid_request_error"}}`
+	if resp.StatusCode != http.StatusRequestTimeout || string(body) != timedOut {
+		t.Fatalf("stalled sender = %d %s, want 408 %s", resp.StatusCode, body, timedOut)
+	}
+	if waited := time.Since(started); waited > 5*timeout {
+		t.Fatalf("408 came %v after the clear, want about %v", waited, timeout)
+	}
+}

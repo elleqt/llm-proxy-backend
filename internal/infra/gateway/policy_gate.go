@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -102,10 +103,12 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 				c.Request.Body = http.NoBody
 			}
 			body := &limitedBody{ReadCloser: http.MaxBytesReader(c.Writer, c.Request.Body, limit)}
+			var deadline *bodyDeadline
 			if length != 0 {
 				// Without a body the server already reads the connection
 				// in the background, where a deadline would cut the reply.
-				if err := setBodyReadDeadline(c); err != nil {
+				var err error
+				if deadline, err = setBodyReadDeadline(c); err != nil {
 					log.Errorf("policy gate: %v", err)
 					abortWithError(c, http.StatusInternalServerError, "server_error", "request body cannot be received")
 					return
@@ -121,6 +124,9 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 			// panics.
 			defer held.release()
 			raw, err := bufferBody(ctx, held, body, length, limit)
+			if deadline.stop() {
+				err = errors.Join(err, os.ErrDeadlineExceeded)
+			}
 			if err == nil && encoded {
 				raw, err = decodeRequestBody(ctx, raw, encoding, held)
 			}
@@ -136,6 +142,9 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 				abortWithError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
 				return
 			case bodyTimedOut(err):
+				// The rest of the body may still arrive: the connection
+				// cannot carry another request.
+				c.Header("Connection", "close")
 				abortWithError(c, http.StatusRequestTimeout, "invalid_request_error", "request body not received in time")
 				return
 			case errors.Is(err, errUnreadableBody):
