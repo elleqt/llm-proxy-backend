@@ -1,6 +1,6 @@
 # The build stage runs on the builder's own platform and cross-compiles for the
 # target, so a multi-platform build never emulates the Go toolchain.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
