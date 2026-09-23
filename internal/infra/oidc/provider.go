@@ -9,7 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	gooidc "github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
@@ -122,7 +125,44 @@ func (p *Provider) Exchange(ctx context.Context, code string, ch app.Challenge) 
 			return app.Claims{}, fmt.Errorf("oidc: claim %q is not a list of strings", p.groupsClaim)
 		}
 	}
+	out.Name = displayName(claims, out.Email)
 	return out, nil
+}
+
+// maxNameRunes bounds the display name taken from a provider.
+const maxNameRunes = 100
+
+// displayName is what to call the person: the name claim, else
+// preferred_username, else the local part of email — the first that is non-empty
+// once cleaned. A claim that is not a string is skipped, not an error: a label is
+// not worth failing a login over.
+func displayName(claims map[string]json.RawMessage, email string) string {
+	for _, key := range []string{"name", "preferred_username"} {
+		var v string
+		if raw, ok := claims[key]; ok && json.Unmarshal(raw, &v) == nil {
+			if name := cleanName(v); name != "" {
+				return name
+			}
+		}
+	}
+	local, _, _ := strings.Cut(email, "@")
+	return cleanName(local)
+}
+
+// cleanName drops invalid UTF-8 and control characters, trims surrounding space
+// and cuts the result to maxNameRunes.
+func cleanName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToValidUTF8(s, "") {
+		if !unicode.IsControl(r) {
+			b.WriteRune(r)
+		}
+	}
+	name := strings.TrimSpace(b.String())
+	if utf8.RuneCountInString(name) <= maxNameRunes {
+		return name
+	}
+	return strings.TrimSpace(string([]rune(name)[:maxNameRunes]))
 }
 
 // exchangeError keeps the IdP's verdict and drops its body. A RetrieveError's

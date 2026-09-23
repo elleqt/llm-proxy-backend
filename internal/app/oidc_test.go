@@ -356,7 +356,7 @@ func TestSignUpProvisionsWithTheDefaultPolicy(t *testing.T) {
 	users, idents := mocks.NewUserRepo(t), mocks.NewIdentityRepo(t)
 	idp := idpAsserting(t, app.Claims{
 		Issuer: testIssuer, Subject: "sub-new", Email: "new@example.com", EmailVerified: true,
-		Groups: []string{"/gate"},
+		Groups: []string{"/gate"}, Name: "New Person",
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-new").Return(uuid.Nil, app.ErrNotFound)
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "new@example.com").Return(uuid.Nil, app.ErrNotFound)
@@ -377,8 +377,9 @@ func TestSignUpProvisionsWithTheDefaultPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if !created.CanSignIn() || created.Role != identity.RoleUser || created.Email != "new@example.com" {
-		t.Fatalf("created = %+v, want an active human user with the asserted address", created)
+	if !created.CanSignIn() || created.Role != identity.RoleUser || created.Email != "new@example.com" ||
+		created.DisplayName != "New Person" {
+		t.Fatalf("created = %+v, want an active human user with the asserted address and name", created)
 	}
 	if got := ruleStrings(created.Policy); !slices.Equal(got, []string{"claude:claude-sonnet-5"}) ||
 		created.PolicySource != identity.PolicyLocal {
@@ -670,4 +671,34 @@ func TestResumeOntoABlockedOrphanIsRefused(t *testing.T) {
 	if _, err := complete(svc); !errors.Is(err, app.ErrInvalidCredentials) {
 		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 	}
+}
+
+// A linked account that has no name yet gets the provider's at its next login; one
+// that has a name keeps it, whatever the provider now says.
+func TestOIDCLoginFillsOnlyAMissingDisplayName(t *testing.T) {
+	claims := app.Claims{Issuer: testIssuer, Subject: "sub-1", Email: "user@example.com", EmailVerified: true, Name: "From The IdP"}
+
+	t.Run("empty name is filled", func(t *testing.T) {
+		users, idents := mocks.NewUserRepo(t), mocks.NewIdentityRepo(t)
+		user := humanUser("user@example.com")
+		user.DisplayName = ""
+		idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
+		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
+		users.EXPECT().FillDisplayName(mock.Anything, user.ID, "From The IdP").Return(true, nil).Once()
+		if _, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{})); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+	})
+
+	t.Run("a name already set is kept", func(t *testing.T) {
+		users, idents := mocks.NewUserRepo(t), mocks.NewIdentityRepo(t)
+		user := humanUser("user@example.com")
+		user.DisplayName = "Set By An Admin"
+		idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
+		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
+		// No FillDisplayName expectation: a call fails the test.
+		if _, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{})); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+	})
 }

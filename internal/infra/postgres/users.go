@@ -155,8 +155,30 @@ func (r *UserRepo) SetMustChangePassword(ctx context.Context, id uuid.UUID, must
 	return nil
 }
 
+// FillDisplayName names an account that has no name. The emptiness test is part of
+// the statement, so a name an administrator sets concurrently is not replaced.
+func (r *UserRepo) FillDisplayName(ctx context.Context, id uuid.UUID, name string) (bool, error) {
+	tag, err := r.pool.Exec(ctx,
+		`UPDATE users SET display_name = $2 WHERE id = $1 AND display_name = ''`, id, name)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 1 {
+		return true, nil
+	}
+	var exists bool
+	if err := r.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, id).Scan(&exists); err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, app.ErrNotFound
+	}
+	return false, nil
+}
+
 // SaveIdentityState writes back exactly the fields an IdP login owns: the recomputed
-// policy, its source, and the display name and email the provider asserts.
+// policy, its source, and the email the provider asserts. The display name is not
+// among them: FillDisplayName sets it once, and an administrator owns it after.
 //
 // Role, status and must_change_password are deliberately absent. They are
 // administrator decisions — an operator who blocks or promotes a federated user must
@@ -168,9 +190,9 @@ func (r *UserRepo) SaveIdentityState(ctx context.Context, u identity.User) error
 	}
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE users
-		 SET policy = $2, policy_managed_by = $3, email = $4, display_name = $5
+		 SET policy = $2, policy_managed_by = $3, email = $4
 		 WHERE id = $1`,
-		u.ID, policy, string(u.PolicySource), nullString(u.Email), u.DisplayName)
+		u.ID, policy, string(u.PolicySource), nullString(u.Email))
 	// The fourth 23505-capable boundary, and the one on the hot login path: an IdP
 	// that reasserts an address a local account already holds is a conflict the
 	// federated-login flow has to recognise, not an opaque driver error.

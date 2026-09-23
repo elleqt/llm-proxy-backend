@@ -147,6 +147,18 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 	if err != nil {
 		return Session{}, err
 	}
+	// An account that has no name yet — one signed up before names were taken
+	// from the provider, or an invitation without one — gets the provider's. A
+	// name it already has is left alone.
+	if user.DisplayName == "" && claims.Name != "" {
+		filled, err := s.users.FillDisplayName(ctx, user.ID, claims.Name)
+		if err != nil {
+			return Session{}, fmt.Errorf("oidc fill display name: %w", err)
+		}
+		if filled {
+			user.DisplayName = claims.Name
+		}
+	}
 
 	if len(s.grants) > 0 {
 		user.Policy = s.policyFor(claims.Groups)
@@ -250,6 +262,7 @@ func (s *OIDCService) signUp(ctx context.Context, c Claims) (identity.User, erro
 	user := identity.User{
 		ID:           signUpID(c.Issuer, c.Subject),
 		Kind:         identity.KindHuman,
+		DisplayName:  c.Name,
 		Role:         identity.RoleUser,
 		Status:       identity.StatusActive,
 		Policy:       s.defaultPolicy,

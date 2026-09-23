@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -248,5 +249,53 @@ func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The name is the name claim, else preferred_username, else the email's local
+// part — each only if something is left once it is cleaned — trimmed, without
+// control characters, at most 100 runes. A claim of the wrong type is skipped.
+func TestExchangeNamesThePerson(t *testing.T) {
+	long := strings.Repeat("é", 150)
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+		want   string
+	}{
+		{"name claim", map[string]any{"name": "  Ada Lovelace ", "preferred_username": "ada"}, "Ada Lovelace"},
+		{"preferred_username when there is no name", map[string]any{"preferred_username": "ada"}, "ada"},
+		{"preferred_username when the name is blank", map[string]any{"name": " \t ", "preferred_username": "ada"}, "ada"},
+		{"email local part when neither is given", map[string]any{}, "person"},
+		{"a name that is not a string is skipped", map[string]any{"name": 42, "preferred_username": []string{"x"}}, "person"},
+		{"control characters dropped", map[string]any{"name": "Ada\u0000 Love\nlace\u001b"}, "Ada Lovelace"},
+		{"cut to 100 runes", map[string]any{"name": long}, strings.Repeat("é", 100)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			idp := newFakeIdP(t)
+			idp.setMint(func(issuer string) map[string]any {
+				c := validClaims(issuer)
+				maps.Copy(c, tc.claims)
+				return c
+			})
+			got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
+			if err != nil {
+				t.Fatalf("Exchange: %v", err)
+			}
+			if got.Name != tc.want {
+				t.Fatalf("Name = %q, want %q", got.Name, tc.want)
+			}
+		})
+	}
+
+	// No name, no username, no email: no name either.
+	idp := newFakeIdP(t)
+	idp.setMint(func(issuer string) map[string]any {
+		c := validClaims(issuer)
+		delete(c, "email")
+		return c
+	})
+	got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
+	if err != nil || got.Name != "" {
+		t.Fatalf("Name = %q, err %v; want empty", got.Name, err)
 	}
 }

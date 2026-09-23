@@ -40,10 +40,14 @@ type UserRepo interface {
 	ByEmail(ctx context.Context, email string) (identity.User, error)
 	UpdatePolicy(ctx context.Context, id uuid.UUID, p access.Policy) error
 	TouchLastSeen(ctx context.Context, id uuid.UUID, at time.Time) error
-	// SaveIdentityState persists the fields an IdP login owns: policy, policy source,
-	// display name and email. It does NOT touch role, status or must_change_password —
+	// SaveIdentityState persists the fields an IdP login owns: policy, policy source
+	// and email. It does NOT touch role, status or must_change_password —
 	// those stay administrator-owned even for a federated user.
 	SaveIdentityState(ctx context.Context, u identity.User) error
+	// FillDisplayName sets id's display name to name only while it is empty, and
+	// reports whether it did: a name already there, an administrator's included,
+	// is never replaced. An unknown user is ErrNotFound.
+	FillDisplayName(ctx context.Context, id uuid.UUID, name string) (bool, error)
 	// SetMustChangePassword writes that one column and nothing else. It is deliberately
 	// not folded into SaveIdentityState, which an IdP login calls and which must never
 	// touch an administrator-owned field.
@@ -399,6 +403,9 @@ type Claims struct {
 	Email         string
 	EmailVerified bool
 	Groups        []string
+	// Name is what to call the person: the provider's display name, cleaned by the
+	// provider adapter. It may be empty. It is only ever a label, never an identity.
+	Name string
 }
 
 // Challenge is the per-login secret material that binds a callback to the browser

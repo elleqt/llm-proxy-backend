@@ -343,7 +343,7 @@ func TestUserRepo(t *testing.T) {
 
 		// Everything the IdP owns changes, and everything it does not own is set to
 		// the opposite of the stored value. A widened UPDATE therefore fails here
-		// instead of silently un-blocking or demoting a federated account.
+		// instead of silently un-blocking, demoting or renaming a federated account.
 		u.Email = "after@example.com"
 		u.DisplayName = "After"
 		u.Policy = mustPolicy(t, "claude:*", "openrouter:openai/gpt-4o")
@@ -362,8 +362,10 @@ func TestUserRepo(t *testing.T) {
 		if got.Email != "after@example.com" {
 			t.Fatalf("email = %q, want the address the provider asserted", got.Email)
 		}
-		if got.DisplayName != "After" {
-			t.Fatalf("display name = %q, want \"After\"", got.DisplayName)
+		// The name is FillDisplayName's alone: written back from a copy read at the
+		// start of the login, it would undo an administrator's rename made meanwhile.
+		if got.DisplayName != "Before" {
+			t.Fatalf("display name = %q, want the stored \"Before\"", got.DisplayName)
 		}
 		if !got.Policy.Allows("openrouter", "openai/gpt-4o") || got.Policy.Allows("chatgpt", "gpt-4o") {
 			t.Fatalf("recomputed policy not stored: %v", ruleStrings(got.Policy))
@@ -462,6 +464,44 @@ func TestUserRepo(t *testing.T) {
 		federated.PolicySource = identity.PolicyIDP
 		if err := users.SaveIdentityState(ctx, federated); !errors.Is(err, app.ErrConflict) {
 			t.Fatalf("err = %v, want app.ErrConflict", err)
+		}
+	})
+
+	t.Run("FillDisplayNameFillsOnlyAnEmptyName", func(t *testing.T) {
+		unnamed := identity.User{
+			ID: uuid.New(), Kind: identity.KindHuman, Email: "unnamed@example.com",
+			Role: identity.RoleUser, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
+			CreatedAt: time.Now().UTC(),
+		}
+		named := unnamed
+		named.ID, named.Email, named.DisplayName = uuid.New(), "named@example.com", "Set By An Admin"
+		for _, u := range []identity.User{unnamed, named} {
+			if err := users.Create(ctx, u); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+		}
+		for _, c := range []struct {
+			id         uuid.UUID
+			name       string
+			wantFilled bool
+			wantName   string
+		}{
+			{unnamed.ID, "From The IdP", true, "From The IdP"},
+			{named.ID, "From The IdP", false, "Set By An Admin"},
+			// Filled once, the name is no longer empty: a second fill changes nothing.
+			{unnamed.ID, "Another Name", false, "From The IdP"},
+		} {
+			filled, err := users.FillDisplayName(ctx, c.id, c.name)
+			if err != nil || filled != c.wantFilled {
+				t.Fatalf("FillDisplayName = %t, %v; want %t", filled, err, c.wantFilled)
+			}
+			got, err := users.ByID(ctx, c.id)
+			if err != nil || got.DisplayName != c.wantName {
+				t.Fatalf("display name = %q (%v), want %q", got.DisplayName, err, c.wantName)
+			}
+		}
+		if _, err := users.FillDisplayName(ctx, uuid.New(), "x"); !errors.Is(err, app.ErrNotFound) {
+			t.Fatalf("unknown user: err = %v, want app.ErrNotFound", err)
 		}
 	})
 
