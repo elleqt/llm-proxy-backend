@@ -22,6 +22,7 @@ const defaultUsageWindow = 7 * 24 * time.Hour
 // generated type: a contract change to the point breaks the build here.
 type usagePoint = struct {
 	At          time.Time `json:"at"`
+	CostUSD     float64   `json:"costUSD"`
 	Model       string    `json:"model"`
 	Requests    int       `json:"requests"`
 	TokensTotal int       `json:"tokensTotal"`
@@ -181,13 +182,28 @@ func (rt *router) getMyUsage(w http.ResponseWriter, r *http.Request) {
 	out := api.Usage{From: from, To: to, Bucket: api.UsageBucket(series.Bucket)}
 	out.Totals.Requests = int(series.Totals.Requests)
 	out.Totals.TokensTotal = int(series.Totals.TokensTotal)
+	out.Totals.Cost = costSummaryOf(series.Totals.Cost)
 	out.Points = make([]usagePoint, 0, len(series.Points))
 	for _, p := range series.Points {
 		out.Points = append(out.Points, usagePoint{
 			At: p.At.UTC(), Model: p.Model, Requests: int(p.Requests), TokensTotal: int(p.TokensTotal),
+			CostUSD: p.CostUSD,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// costSummaryOf describes a summed cost as the contract's CostSummary.
+func costSummaryOf(c app.UsageCost) api.CostSummary {
+	return api.CostSummary{
+		TotalUSD:        c.TotalUSD(),
+		InputUSD:        c.InputUSD,
+		OutputUSD:       c.OutputUSD,
+		CacheReadUSD:    c.CacheReadUSD,
+		CacheWriteUSD:   c.CacheWriteUSD,
+		CacheSavingsUSD: c.CacheSavingsUSD,
+		UnpricedTokens:  int(c.UnpricedTokens),
+	}
 }
 
 // listMyModels answers the models the caller's keys may use now, by the caller's

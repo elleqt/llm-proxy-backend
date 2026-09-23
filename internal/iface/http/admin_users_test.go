@@ -417,9 +417,12 @@ func TestActivityReportsServedRequestsAsSuccessful(t *testing.T) {
 	at := e.clock.Now().Add(-time.Minute)
 	e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil)
 	e.activity.EXPECT().RecentUsage(mock.Anything, u.ID, app.DefaultActivityLimit).Return([]app.UsageEvent{
-		{At: at, TokenID: tokenID, Provider: "claude", Model: "m", Stream: true, TokensTotal: 42, LatencyMS: 1500},
-		{At: at, Provider: "claude", Model: "m", StatusCode: http.StatusBadGateway, Failed: true},
-		{At: at, Provider: "claude", Model: "m", Failed: true},
+		{At: at, TokenID: tokenID, Provider: "claude", Model: "m", Stream: true, TokensTotal: 42, LatencyMS: 1500,
+			Cost: app.UsageCost{InputUSD: 0.5, OutputUSD: 1, CacheSavingsUSD: -2, Priced: true}},
+		// Priced at zero: a number, not null.
+		{At: at, Provider: "claude", Model: "m", StatusCode: http.StatusBadGateway, Failed: true,
+			Cost: app.UsageCost{Priced: true}},
+		{At: at, Provider: "claude", Model: "m", Failed: true, Cost: app.UsageCost{UnpricedTokens: 5}},
 	}, nil)
 	e.activity.EXPECT().RecentAudit(mock.Anything, u.ID, app.DefaultActivityLimit).Return([]app.AuditEvent{
 		{At: at, ActorID: self.ID, Action: "token.issue", Target: "token/" + tokenID.String(), Detail: map[string]any{"label": "ci"}},
@@ -441,6 +444,15 @@ func TestActivityReportsServedRequestsAsSuccessful(t *testing.T) {
 	}
 	if unknown.StatusCode != 0 {
 		t.Fatalf("a failure without a status reads as %d, want 0", unknown.StatusCode)
+	}
+	if served.CostUSD == nil || *served.CostUSD != 1.5 {
+		t.Fatalf("served cost = %v, want 1.5", served.CostUSD)
+	}
+	if failed.CostUSD == nil || *failed.CostUSD != 0 {
+		t.Fatalf("priced-at-zero cost = %v, want 0", failed.CostUSD)
+	}
+	if unknown.CostUSD != nil {
+		t.Fatalf("unpriced request's cost = %v, want none", *unknown.CostUSD)
 	}
 	issue, signIn := got.Audit[0], got.Audit[1]
 	if issue.ActorId == nil || *issue.ActorId != self.ID || issue.Target == nil || issue.Detail == nil || (*issue.Detail)["label"] != "ci" {

@@ -171,8 +171,8 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 	}
 }
 
-// Through the real sink: once a check has applied the catalog, the cost metric
-// prices a model only the catalog prices.
+// Through the real price table: once a check has applied the catalog, a request is
+// priced for a model only the catalog prices.
 func TestACheckedCatalogPricesUsage(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(catalogDoc))
@@ -191,33 +191,28 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 		})
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil)
 
-	table := &metrics.PriceTable{}
-	m := metrics.New(prometheus.NewRegistry(), metrics.WithPrices(table))
+	table := &app.PriceTable{}
+	m := metrics.New(prometheus.NewRegistry())
 	prices := app.NewPrices(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
 	if err := prices.Load(context.Background()); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	usage := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 1_000_000, TokensTotal: 1_000_000}
-	m.ObserveUsage(usage, "before")
+	cost := func() app.UsageCost {
+		p, ok := table.Price(usage.Provider, usage.Model)
+		return app.PriceUsage(usage, p, ok)
+	}
+	if before := cost(); before.Priced || before.UnpricedTokens != 1_000_000 {
+		t.Fatalf("before the check: %+v, want every token unpriced", before)
+	}
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin, Status: identity.StatusActive}
 	if _, err := prices.Refresh(context.Background(), admin); err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
-	m.ObserveUsage(usage, "after")
-
-	body := scrape(t, m)
-	if !strings.Contains(body, `llmproxy_cost_usd_total{model="claude-sonnet-5",provider="claude",user="after"} 3`) ||
-		strings.Contains(body, `llmproxy_cost_usd_total{model="claude-sonnet-5",provider="claude",user="before"}`) {
-		t.Fatalf("want the request after the check priced at $3 and the one before unpriced:\n%s", body)
+	if after := cost(); !after.Priced || after.TotalUSD() != 3 {
+		t.Fatalf("after the check: %+v, want $3", after)
 	}
-}
-
-func scrape(t *testing.T, m *metrics.Metrics) string {
-	t.Helper()
-	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-	return rec.Body.String()
 }
 
 type clock struct{}

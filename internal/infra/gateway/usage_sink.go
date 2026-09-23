@@ -49,7 +49,9 @@ const (
 )
 
 // UsageSink turns upstream usage records into ledger rows, metrics and vendor
-// quota signals. It implements upstream's usage.Plugin.
+// quota signals. It implements upstream's usage.Plugin. Each row is priced as it
+// is mapped, at the price in force then (app.PriceUsage), and the metrics count
+// that same cost, so the ledger and the metrics never price a request apart.
 //
 // HandleUsage only enqueues: every lookup, write and metric happens on the
 // sink's worker goroutine, with a context of its own rather than the request's.
@@ -63,6 +65,7 @@ type UsageSink struct {
 	events   app.UsageRepo
 	tokens   app.TokenRepo
 	users    app.UserRepo
+	prices   app.PriceLookup
 	observer UsageObserver
 	clock    app.Clock
 	log      app.Logger
@@ -87,11 +90,14 @@ var (
 )
 
 // NewUsageSink starts the sink's worker; it runs for the life of the process.
-func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, observer UsageObserver, clock app.Clock, log app.Logger) *UsageSink {
+// prices must answer from memory: it is read for every record.
+func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
+	observer UsageObserver, clock app.Clock, log app.Logger) *UsageSink {
 	s := &UsageSink{
 		events:     events,
 		tokens:     tokens,
 		users:      users,
+		prices:     prices,
 		observer:   observer,
 		clock:      clock,
 		log:        log,
@@ -289,18 +295,105 @@ func (s *UsageSink) eventOf(r cliproxyusage.Record) app.UsageEvent {
 		ev.TokensTotal = b.TotalTokens
 		ev.BreakdownQuality = string(b.Quality)
 	} else {
-		d := r.Detail
-		ev.TokensInput = d.InputTokens
-		ev.TokensOutput = d.OutputTokens
-		ev.TokensReasoning = d.ReasoningTokens
-		ev.TokensCacheRead = d.CacheReadTokens
-		if ev.TokensCacheRead == 0 {
-			ev.TokensCacheRead = d.CachedTokens
-		}
-		ev.TokensCacheWrite = d.CacheCreationTokens
-		ev.TokensTotal = d.TotalTokens
+		partitionDetail(&ev, r.Provider, r.Detail)
 	}
+	price, ok := s.prices.Price(ev.Provider, ev.Model)
+	ev.Cost = app.PriceUsage(ev, price, ok)
 	return ev
+}
+
+// BreakdownQuality of a row whose token kinds the sink derived from the raw
+// detail, upstream having sent no valid breakdown: reconstructed when the kinds
+// partition the request, else unclassified (a protocol not recognised) or
+// inconsistent (counts that contradict each other), with every token unpriced.
+const (
+	qualityReconstructed = "reconstructed"
+	qualityUnclassified  = "unclassified"
+	qualityInconsistent  = "inconsistent"
+)
+
+// partitionDetail maps a raw usage detail onto ev's token kinds, which partition
+// the request, by how the upstream provider key's protocol reports usage (as
+// upstream's own accounting.go tokenAccountingSemanticsFor tells them apart):
+//
+//   - OpenAI-style (codex, OpenAI-compatible and the like): the prompt count
+//     includes the cached and cache-written tokens, and the completion count
+//     the reasoning tokens, so both are taken out.
+//   - Gemini-style: the prompt count includes the cache; reasoning is separate.
+//   - Anthropic: the cache counts are separate from the input; the output count
+//     includes thinking, so reasoning is taken out.
+//
+// Where upstream would not guess, neither does the sink: a protocol it does not
+// recognise, a cache larger than the prompt that includes it, reasoning larger
+// than the output that includes it, or kinds adding up to more than a reported
+// total leave every token unclassified, so none is priced. A zero reported total
+// is taken from the kinds.
+func partitionDetail(ev *app.UsageEvent, providerKey string, d cliproxyusage.Detail) {
+	in, out, reasoning := max(d.InputTokens, 0), max(d.OutputTokens, 0), max(d.ReasoningTokens, 0)
+	cacheRead, cacheWrite := max(d.CacheReadTokens, 0), max(d.CacheCreationTokens, 0)
+	// A legacy cached count stands for the cache reads only when neither cache
+	// count is set: upstream copies cache creation into it when there are no reads.
+	if cacheRead == 0 && cacheWrite == 0 {
+		cacheRead = max(d.CachedTokens, 0)
+	}
+	total := max(d.TotalTokens, 0)
+
+	quality := qualityReconstructed
+	cacheInInput, reasoningInOutput, known := detailSemantics(providerKey)
+	switch {
+	case !known:
+		quality = qualityUnclassified
+	case cacheInInput && cacheRead+cacheWrite > in, reasoningInOutput && reasoning > out:
+		quality = qualityInconsistent
+	default:
+		if cacheInInput {
+			in -= cacheRead + cacheWrite
+		}
+		if reasoningInOutput {
+			out -= reasoning
+		}
+		if classified := in + out + reasoning + cacheRead + cacheWrite; total == 0 {
+			total = classified
+		} else if classified > total {
+			quality = qualityInconsistent
+		}
+	}
+	ev.BreakdownQuality = quality
+	if quality != qualityReconstructed {
+		// Every token unclassified: the total, or the least the counts imply.
+		if total == 0 {
+			total = max(in, cacheRead+cacheWrite, max(d.CachedTokens, 0)) + max(out, reasoning)
+		}
+		ev.TokensTotal = total
+		return
+	}
+	ev.TokensInput, ev.TokensOutput, ev.TokensReasoning = in, out, reasoning
+	ev.TokensCacheRead, ev.TokensCacheWrite = cacheRead, cacheWrite
+	ev.TokensTotal = total
+}
+
+// detailSemantics says whether an upstream provider key's raw usage counts cache
+// tokens inside the prompt count and reasoning inside the completion count; known
+// is false for a protocol it does not recognise.
+func detailSemantics(providerKey string) (cacheInInput, reasoningInOutput, known bool) {
+	key := strings.ToLower(strings.TrimSpace(providerKey))
+	if key == "openai-compatibility" || strings.HasPrefix(key, openAICompatiblePrefix) {
+		return true, true, true
+	}
+	if strings.Contains(key, "claude") || strings.Contains(key, "anthropic") {
+		return false, true, true
+	}
+	for _, marker := range [...]string{"gemini", "aistudio", "antigravity", "vertex", "interaction"} {
+		if strings.Contains(key, marker) {
+			return true, false, true
+		}
+	}
+	for _, marker := range [...]string{"openai", "codex", "xai", "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+		if strings.Contains(key, marker) {
+			return true, true, true
+		}
+	}
+	return false, false, false
 }
 
 // touch stamps each token and owner in events once, with the latest time one

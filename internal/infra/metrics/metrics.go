@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,7 +35,6 @@ type config struct {
 	clock      app.Clock
 	version    string
 	knownModel func(model string) (string, bool)
-	prices     PriceLookup
 }
 
 // WithClock sets the clock that stamps vendor quota observations.
@@ -53,16 +53,6 @@ func WithKnownModel(canonical func(model string) (string, bool)) Option {
 	return func(cfg *config) { cfg.knownModel = canonical }
 }
 
-// PriceLookup finds the price of a provider's model. It is consulted on every
-// ObserveUsage, so it must answer from memory; PriceTable is one.
-type PriceLookup interface {
-	Price(provider, model string) (app.ModelPrice, bool)
-}
-
-// WithPrices sets the price list the cost estimate reads. Without it every token is
-// unpriced.
-func WithPrices(p PriceLookup) Option { return func(cfg *config) { cfg.prices = p } }
-
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }
@@ -72,7 +62,6 @@ type Metrics struct {
 	clock      app.Clock
 	gatherer   prometheus.Gatherer
 	knownModel func(model string) (string, bool)
-	prices     PriceLookup
 
 	tokens          *prometheus.CounterVec
 	requests        *prometheus.CounterVec
@@ -86,11 +75,32 @@ type Metrics struct {
 	accountDisabled *prometheus.GaugeVec
 	accountFailures *prometheus.CounterVec
 	cost            *prometheus.CounterVec
+	cacheSavings    *prometheus.CounterVec
+	cachePremium    *prometheus.CounterVec
 	unpriced        *prometheus.CounterVec
+	quotaBurned     *prometheus.CounterVec
 	catalogChecked  prometheus.Gauge
 	catalogModels   prometheus.Gauge
 	catalogFailures prometheus.Counter
+
+	// quotaMu guards burnMarks: each quota window's high-water mark, what the next
+	// reading's rise is measured from.
+	quotaMu   sync.Mutex
+	burnMarks map[quotaKey]burnMark
 }
+
+type quotaKey struct{ account, provider, window string }
+
+// burnMark is the highest used ratio seen in the window that resets at resetAt
+// (zero when no reading has carried a reset time yet).
+type burnMark struct {
+	high    float64
+	resetAt time.Time
+}
+
+// resetTolerance is how far a window's reported reset time may move and still be
+// the same window: codex reports it as seconds from the response, which jitters.
+const resetTolerance = time.Minute
 
 // Request latency runs from sub-second errors to multi-minute reasoning completions.
 var durationBuckets = []float64{0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600}
@@ -115,7 +125,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		clock:      cfg.clock,
 		gatherer:   reg,
 		knownModel: cfg.knownModel,
-		prices:     cfg.prices,
+		burnMarks:  map[quotaKey]burnMark{},
 		tokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "tokens_total",
 			Help: "Tokens consumed, by kind and service tier.",
@@ -164,12 +174,24 @@ func New(reg Registry, opts ...Option) *Metrics {
 		}, accountLabels),
 		cost: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "cost_usd_total",
-			Help: "Estimated cost of consumed tokens in US dollars, at the price list in force when each request was recorded. An estimate, not a bill.",
+			Help: "Estimated cost of consumed tokens in US dollars, by kind (input: uncached input; output: output and reasoning; cache_read; cache_write), at the price list in force when each request was recorded. An estimate, not a bill.",
+		}, []string{"user", "provider", "model", "kind"}),
+		cacheSavings: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "cache_savings_usd_total",
+			Help: "US dollars prompt caching saved, from requests where it saved: cache reads at (input - cache-read rate) less cache writes at (cache-write - input rate), against paying the input rate for every input token. A counter cannot go down, so a request where caching cost more adds to llmproxy_cache_write_premium_usd_total instead; the net effect is this minus that.",
+		}, []string{"user", "provider", "model"}),
+		cachePremium: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "cache_write_premium_usd_total",
+			Help: "US dollars prompt caching cost extra, from requests where cache writes at (cache-write - input rate) outweighed what cache reads saved at (input - cache-read rate). Subtract it from llmproxy_cache_savings_usd_total for the net effect of caching.",
 		}, []string{"user", "provider", "model"}),
 		unpriced: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "cost_unpriced_tokens_total",
-			Help: "Tokens consumed by models the price list has no price for, so absent from the cost estimate.",
+			Help: "Tokens absent from the cost estimate: those of models the price list had no price for, and those the vendor did not classify.",
 		}, []string{"provider", "model"}),
+		quotaBurned: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "vendor_quota_burned_ratio_total",
+			Help: "Vendor quota burned, summed over the rises of llmproxy_vendor_quota_used_ratio above its highest reading in the window seen by this process (a lower, late reading adds nothing; after the window resets its first reading counts from zero; quota burned while the process was down is not counted). 1.0 = one full window; pair with llmproxy_cost_usd_total / llmproxy_tokens_total to estimate the capacity of a window.",
+		}, quotaLabels),
 		catalogChecked: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "price_catalog_checked_timestamp_seconds",
 			Help: "Unix time of the last successful price catalog check, whether or not the catalog had changed; 0 before the first.",
@@ -195,7 +217,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		m.policyDenied, m.authFailures,
 		m.quotaUsed, m.quotaReset, m.quotaObserved,
 		m.accountDisabled, m.accountFailures,
-		m.cost, m.unpriced,
+		m.cost, m.cacheSavings, m.cachePremium, m.unpriced, m.quotaBurned,
 		m.catalogChecked, m.catalogModels, m.catalogFailures,
 		buildInfo,
 	)
@@ -253,49 +275,33 @@ func (m *Metrics) ObserveUsage(ev app.UsageEvent, user string) {
 	m.observeCost(ev, user)
 }
 
-// observeCost prices ev's tokens at the price in force now. The kinds partition the
-// request's tokens (the usage sink maps upstream's canonical breakdown that way), so
-// each is priced once: reasoning tokens are output tokens and cost the output rate.
-// A model without a price adds its tokens to the unpriced counter instead.
-//
-// Tokens upstream could not classify (an unclassified or inconsistent breakdown:
-// TokensTotal above the sum of the kinds) have no rate to apply, so they are
-// unpriced even for a priced model.
+// observeCost counts ev.Cost, the cost the usage sink priced ev at when it
+// recorded it (app.PriceUsage), so the metrics and the ledger agree. A part that
+// is zero adds no series.
 func (m *Metrics) observeCost(ev app.UsageEvent, user string) {
-	in, out := positive(ev.TokensInput), positive(ev.TokensOutput)+positive(ev.TokensReasoning)
-	cacheRead, cacheWrite := positive(ev.TokensCacheRead), positive(ev.TokensCacheWrite)
-	classified := in + out + cacheRead + cacheWrite
-	unclassified := max(positive(ev.TokensTotal)-classified, 0)
-	if unclassified > 0 {
-		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(unclassified)
+	c := ev.Cost
+	if c.UnpricedTokens > 0 {
+		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(float64(c.UnpricedTokens))
 	}
-	if classified == 0 {
-		return
+	for _, k := range [...]struct {
+		kind string
+		usd  float64
+	}{
+		{"input", c.InputUSD},
+		{"output", c.OutputUSD},
+		{"cache_read", c.CacheReadUSD},
+		{"cache_write", c.CacheWriteUSD},
+	} {
+		if k.usd > 0 {
+			m.cost.WithLabelValues(user, ev.Provider, ev.Model, k.kind).Add(k.usd)
+		}
 	}
-	var (
-		p  app.ModelPrice
-		ok bool
-	)
-	if m.prices != nil {
-		p, ok = m.prices.Price(ev.Provider, ev.Model)
+	switch {
+	case c.CacheSavingsUSD > 0:
+		m.cacheSavings.WithLabelValues(user, ev.Provider, ev.Model).Add(c.CacheSavingsUSD)
+	case c.CacheSavingsUSD < 0:
+		m.cachePremium.WithLabelValues(user, ev.Provider, ev.Model).Add(-c.CacheSavingsUSD)
 	}
-	if !ok {
-		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(classified)
-		return
-	}
-	cost := (in*p.Input + out*p.Output + cacheRead*p.CacheRead + cacheWrite*p.CacheWrite) / 1e6
-	if cost > 0 {
-		m.cost.WithLabelValues(user, ev.Provider, ev.Model).Add(cost)
-	}
-}
-
-// positive is n as a counter increment: a negative count adds nothing (a negative
-// Add panics).
-func positive(n int64) float64 {
-	if n <= 0 {
-		return 0
-	}
-	return float64(n)
 }
 
 // serviceTier clamps the served tier to a closed set: an empty tier is "default" and
@@ -328,12 +334,51 @@ func statusClass(ev app.UsageEvent) string {
 // ObserveVendorQuota records a vendor's own report of quota use. ratio is a share in
 // 0..1: converting a percentage is the caller's job. A zero resetAt leaves the reset
 // gauge as it was. The observed timestamp is taken from the clock.
+//
+// It also counts the quota burned, against a high-water mark per window: a reading
+// above the mark adds the difference and raises it; one at or below it adds
+// nothing, for readings arrive in completion order, and a long stream reports the
+// ratio of when it started. The window has rolled over only when resetAt moves
+// forward by more than resetTolerance: the first reading of the new window counts
+// from zero, since all of it was burned there. A reading whose resetAt is more than
+// resetTolerance before the mark's is a late one from an earlier window and counts
+// nothing. The first reading of a window since the process started only sets the
+// mark: what was burned before is not known.
 func (m *Metrics) ObserveVendorQuota(account, provider, window string, ratio float64, resetAt time.Time) {
 	m.quotaUsed.WithLabelValues(account, provider, window).Set(ratio)
+	if burned := m.burn(quotaKey{account, provider, window}, ratio, resetAt); burned > 0 {
+		m.quotaBurned.WithLabelValues(account, provider, window).Add(burned)
+	}
 	if !resetAt.IsZero() {
 		m.quotaReset.WithLabelValues(account, provider, window).Set(unixSeconds(resetAt))
 	}
 	m.quotaObserved.WithLabelValues(account, provider, window).Set(unixSeconds(m.clock.Now()))
+}
+
+// burn moves k's high-water mark for a reading and returns what it burned.
+func (m *Metrics) burn(k quotaKey, ratio float64, resetAt time.Time) float64 {
+	m.quotaMu.Lock()
+	defer m.quotaMu.Unlock()
+	mark, seen := m.burnMarks[k]
+	switch {
+	case !seen:
+		m.burnMarks[k] = burnMark{high: ratio, resetAt: resetAt}
+		return 0
+	case resetAt.IsZero():
+	case mark.resetAt.IsZero():
+		mark.resetAt = resetAt
+	case resetAt.After(mark.resetAt.Add(resetTolerance)):
+		m.burnMarks[k] = burnMark{high: ratio, resetAt: resetAt}
+		return ratio
+	case resetAt.Before(mark.resetAt.Add(-resetTolerance)):
+		return 0
+	}
+	var burned float64
+	if ratio > mark.high {
+		burned, mark.high = ratio-mark.high, ratio
+	}
+	m.burnMarks[k] = mark
+	return burned
 }
 
 func unixSeconds(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
@@ -419,6 +464,14 @@ func (m *Metrics) ForgetAccount(account, provider string) {
 	m.quotaUsed.DeletePartialMatch(match)
 	m.quotaReset.DeletePartialMatch(match)
 	m.quotaObserved.DeletePartialMatch(match)
+	m.quotaBurned.DeletePartialMatch(match)
+	m.quotaMu.Lock()
+	for k := range m.burnMarks {
+		if k.account == account && k.provider == provider {
+			delete(m.burnMarks, k)
+		}
+	}
+	m.quotaMu.Unlock()
 }
 
 // SetPriceCatalog reports the catalog prices in force and the last successful

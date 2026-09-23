@@ -227,6 +227,9 @@ type UsageEvent struct {
 	StatusCode       int
 	Failed           bool
 	VendorAccountID  string
+	// Cost is what the tokens cost at the prices in force when the request was
+	// recorded (PriceUsage). It is stored with the row and never recomputed.
+	Cost UsageCost
 }
 
 // UsagePoint is one bucket of the cabinet's chart for one model, starting at At.
@@ -238,6 +241,8 @@ type UsagePoint struct {
 	Model       string
 	TokensTotal int64
 	Requests    int64
+	// CostUSD is the priced part of the bucket's cost (UsageCost.TotalUSD).
+	CostUSD float64
 }
 
 // UsageBucket is the width of the cabinet chart's buckets.
@@ -261,6 +266,7 @@ func UsageBucketFor(from, to time.Time) UsageBucket {
 type UsageTotals struct {
 	Requests    int64
 	TokensTotal int64
+	Cost        UsageCost
 }
 
 // UsageSeries is one user's consumption over [from, to): what GET /api/me/usage
@@ -541,6 +547,13 @@ type PriceRepo interface {
 // estimate reads prices from memory rather than the database on every request.
 type PriceSink interface {
 	SetPrices(prices []ModelPrice)
+}
+
+// PriceLookup finds the price in force for a provider's model; ok is false when
+// it has none. It is read for every recorded request, so it answers from memory;
+// PriceTable is one.
+type PriceLookup interface {
+	Price(provider, model string) (ModelPrice, bool)
 }
 
 // ErrCatalogDisabled refuses a price catalog check when no catalog source is

@@ -58,6 +58,8 @@ func TestUsageRepo(t *testing.T) {
 			TokensInput: 1, TokensOutput: 2, TokensReasoning: 3, TokensCacheRead: 4, TokensCacheWrite: 5,
 			TokensTotal: 15, BreakdownQuality: "complete", LatencyMS: 1500, TTFTMS: 300, StatusCode: 429,
 			Failed: true, VendorAccountID: "claude-1.json",
+			Cost: app.UsageCost{InputUSD: 0.5, OutputUSD: 1.25, CacheReadUSD: 0.125, CacheWriteUSD: 2,
+				CacheSavingsUSD: -0.75, UnpricedTokens: 6, Priced: true},
 		}
 		if err := ledger.AppendBatch(ctx, []app.UsageEvent{want}); err != nil {
 			t.Fatalf("AppendBatch: %v", err)
@@ -65,12 +67,15 @@ func TestUsageRepo(t *testing.T) {
 		var got app.UsageEvent
 		if err := pool.QueryRow(ctx, `SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
 			tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_total,
-			breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id
+			breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id,
+			cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd, cache_savings_usd,
+			unpriced_tokens, priced
 			FROM usage_events WHERE user_id = $1`, owner.ID).Scan(
 			&got.At, &got.UserID, &got.TokenID, &got.Provider, &got.Model, &got.Alias, &got.Stream, &got.ServiceTier,
 			&got.TokensInput, &got.TokensOutput, &got.TokensReasoning, &got.TokensCacheRead, &got.TokensCacheWrite,
 			&got.TokensTotal, &got.BreakdownQuality, &got.LatencyMS, &got.TTFTMS, &got.StatusCode, &got.Failed,
-			&got.VendorAccountID); err != nil {
+			&got.VendorAccountID, &got.Cost.InputUSD, &got.Cost.OutputUSD, &got.Cost.CacheReadUSD,
+			&got.Cost.CacheWriteUSD, &got.Cost.CacheSavingsUSD, &got.Cost.UnpricedTokens, &got.Cost.Priced); err != nil {
 			t.Fatalf("read back: %v", err)
 		}
 		got.At = got.At.UTC()
@@ -172,6 +177,35 @@ func TestUsageRepo(t *testing.T) {
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("series = %+v\nwant     %+v", got, want)
+		}
+	})
+
+	// The series sums the cost each row stored; it prices nothing itself.
+	t.Run("SeriesForUserSumsStoredCost", func(t *testing.T) {
+		owner, tok := newOwner(t)
+		from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		ev := func(minute int, model string, c app.UsageCost) app.UsageEvent {
+			return app.UsageEvent{At: from.Add(10*time.Hour + time.Duration(minute)*time.Minute), UserID: owner.ID, TokenID: tok.ID,
+				Provider: "claude", Model: model, TokensTotal: 100, Cost: c}
+		}
+		if err := ledger.AppendBatch(ctx, []app.UsageEvent{
+			ev(1, "m1", app.UsageCost{InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: 1.5, Priced: true}),
+			ev(2, "m1", app.UsageCost{InputUSD: 0.5, CacheWriteUSD: 4, CacheSavingsUSD: -2, UnpricedTokens: 10, Priced: true}),
+			ev(3, "m2", app.UsageCost{UnpricedTokens: 100}),
+		}); err != nil {
+			t.Fatalf("AppendBatch: %v", err)
+		}
+		got, err := ledger.SeriesForUser(ctx, owner.ID, from, from.Add(24*time.Hour))
+		if err != nil {
+			t.Fatalf("SeriesForUser: %v", err)
+		}
+		if len(got.Points) != 2 || got.Points[0].CostUSD != 8.25 || got.Points[1].CostUSD != 0 {
+			t.Fatalf("points = %+v, want m1 at $8.25 and m2 at $0", got.Points)
+		}
+		want := app.UsageCost{InputUSD: 1.5, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 4.5,
+			CacheSavingsUSD: -0.5, UnpricedTokens: 110, Priced: true}
+		if got.Totals.Cost != want {
+			t.Fatalf("totals cost = %+v\nwant          %+v", got.Totals.Cost, want)
 		}
 	})
 

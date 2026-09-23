@@ -414,14 +414,24 @@ user_identities    user_id, issuer, subject               ← OIDC, UNIQUE(issue
 | `quota_used_ratio`, `quota_reset_timestamp_seconds`, `quota_observed_timestamp_seconds` | переименованы в `vendor_quota_used_ratio`, `vendor_quota_reset_timestamp_seconds`, `vendor_quota_observed_timestamp_seconds`, метки `{account,provider,window}`; источник — `ResponseHeaders` |
 | `account_disabled`, `account_failures_total` | оставить, метки `{account,provider}`; теперь точные (`Auth.Disabled`, `Failed`) |
 | `tokens_total`, `requests_total` | оставить; метка-ярлык ключа заменяется меткой `user`: `tokens_total{user,provider,model,service_tier,kind}`, `requests_total{user,provider,model,stream,status}`. Метки `token` нет ни в одном семействе |
-| `cost_usd_total`, `cost_unpriced_tokens_total` | оставить (`{user,provider,model}` и `{provider,model}`); прайс — каталог цен с ручными ценами администратора поверх (см. «Каталог цен») |
+| `cost_usd_total`, `cost_unpriced_tokens_total` | оставить; `cost_usd_total{user,provider,model,kind}` получил метку `kind` (`input`, `output`, `cache_read`, `cache_write`), `cost_unpriced_tokens_total{provider,model}` без изменений; прайс — каталог цен с ручными ценами администратора поверх (см. «Каталог цен»), считается один раз при записи (см. «Стоимость») |
 | `prices_loaded_timestamp_seconds`, `prices_models` | заменены на `price_catalog_checked_timestamp_seconds` (последняя успешная проверка каталога, 0 — ещё не было), `price_catalog_models` (цен каталога в силе) и `price_catalog_check_failures_total` |
 | `request_latency_ms_sum/count`, `ttft_ms_sum/count` | переделаны в гистограммы в секундах: `request_duration_seconds{provider,model,stream}`, `ttft_seconds{provider,model}`; значения поштучные, квантили настоящие |
 | `librechat_*` | не наше: телеметрия внешней панели, собирается из её собственной базы |
 
 Добавляются: `policy_denied_total{user,model,reason}` (`reason`: `model_not_allowed`,
 `unknown_model`, `route_not_allowed`; модель, которой нет в каталоге, пишется как `unknown`) и
-`auth_failures_total{reason}` (`missing`, `invalid`).
+`auth_failures_total{reason}` (`missing`, `invalid`), а также
+`cache_savings_usd_total{user,provider,model}` и `cache_write_premium_usd_total{user,provider,model}`
+(эффект кеша, см. «Стоимость») и `vendor_quota_burned_ratio_total{account,provider,window}` — сумма
+подъёмов `vendor_quota_used_ratio` над максимумом окна за жизнь процесса (1.0 — одно полное окно).
+Записи приходят в порядке завершения, а долгий стрим несёт долю на момент своего начала, поэтому
+показание не выше максимума ничего не добавляет и максимум не понижает. Окно сменилось, только
+когда его время сброса ушло вперёд больше чем на минуту (допуск на дрожание `Reset-After-Seconds`
+у codex): тогда первое показание нового окна считается от нуля, а запоздавшее показание старого
+окна не считается. Первое показание окна после старта только задаёт максимум; потраченное, пока
+процесс лежал, не учитывается. Отношение `increase(cost_usd_total)` к `increase(vendor_quota_burned_ratio_total)`
+оценивает, сколько долларов вмещает одно окно подписки.
 
 **Кардинальность.** `user × model × kind` — при десятках пользователей приемлемо. Метки `token`
 в метриках нет: число ключей не ограничено сверху так, как число пользователей, а на вопрос
@@ -463,10 +473,46 @@ URL или разборщика каталог читается целиком.
 `price_catalog_check_failures_total`. Успешная проверка очищает
 `lastError`. Каталог никогда не обнуляет прайс.
 
+### Стоимость
+
+**Считается при записи.** Приёмник usage оценивает каждый запрос в момент записи в журнал по
+прайсу, действующему в этот момент (тот же in-memory прайс, `app.PriceTable`; базу за ценой не
+читает), и хранит результат в строке `usage_events`: `cost_input_usd`, `cost_output_usd`,
+`cost_cache_read_usd`, `cost_cache_write_usd`, `cache_savings_usd`, `unpriced_tokens`, `priced`.
+Метрики считают ту же оценку, что и журнал. Кабинет (`GET /api/me/usage`: `totals.cost`,
+`points[].costUSD`) и активность в админке (`requests[].costUSD`, нет значения, если ни один токен
+не оценён) только суммируют сохранённое — смена цены не переписывает историю. Строки, записанные
+до появления колонок, миграция 0003 оценила по прайсу, действовавшему при миграции (ручная цена,
+иначе цена каталога), той же арифметикой.
+
+**Арифметика** (одна функция, `app.PriceUsage`; ставки — доллары за миллион токенов). Виды токенов
+разбивают запрос без пересечений: `input` — вход без кеша, `output` — выход вместе с рассуждениями
+(по ставке output), `cache_read`, `cache_write`. Токены сверх суммы видов (апстрим их не
+классифицировал) ставки не имеют и идут в `unpriced_tokens`, как и все токены модели без цены.
+Эффект кеша относительно оплаты всего входа по ставке input:
+
+    cacheSavings = (cacheRead × (input − cacheReadRate) − cacheWrite × (cacheWriteRate − input)) / 1e6
+
+Отрицателен, когда запись в кеш стоила больше, чем сэкономило чтение. Цена с `cacheWrite` = 0
+(OpenAI не берёт отдельной платы за запись: записанные токены оплачиваются как обычный вход)
+оценивает запись по ставке input, и запись не даёт ни премии, ни экономии. Счётчик Prometheus убывать
+не может, поэтому положительный эффект запроса идёт в `cache_savings_usd_total`, отрицательный (по
+модулю) — в `cache_write_premium_usd_total`; чистый эффект — разность.
+
+**Сырой detail.** Если апстрим не прислал валидный канонический `TokenBreakdown`, приёмник
+разбивает сырые счётчики сам (`breakdown_quality = reconstructed`) по протоколу провайдера: у
+OpenAI-подобных (codex, OpenAI-compatible) prompt включает кешированные токены, а completion —
+рассуждения, поэтому вычитается и то и другое; у Gemini-подобных вычитается только кеш; у
+Anthropic кеш отдельно от входа, а output включает thinking — вычитаются рассуждения. Где апстрим
+не угадывает, не угадывает и приёмник: незнакомый протокол (`unclassified`), кеш больше входа,
+рассуждения больше выхода или виды больше заявленного итога (`inconsistent`) — все токены
+остаются неклассифицированными и не оцениваются.
+
 **Приближение для записи в кеш.** `cacheWrite` каталога — цена пятиминутной записи Anthropic
 (1.25× input). Клиенты, запрашивающие часовой кеш (omp так делает, `cacheRetention: long`),
-платят 2× input, а журнал хранит одно число записанных в кеш токенов без разделения на 5m/1h —
-поэтому часовые записи этой ставкой недооцениваются. Если клиенты пользуются долгим кешем,
+платят 2× input, а апстрим отдаёт одно число записанных в кеш токенов без разделения на 5m/1h
+(и журнал хранит одно) — поэтому часовые записи этой ставкой недооцениваются, а вместе с ними
+`cacheWriteUSD` и премия записи в `cacheSavings`. Если клиенты пользуются долгим кешем,
 администратор может переопределить модель вручную с `cacheWrite` = 2× input.
 
 ---
@@ -566,7 +612,9 @@ api_tokens         id, user_id, label, hash, prefix, created_at, last_used_at,
 usage_events       id, at, user_id, token_id, provider, model, alias, stream, service_tier,
                    tokens_input, tokens_output, tokens_reasoning, tokens_cache_read,
                    tokens_cache_write, tokens_total, breakdown_quality,
-                   latency_ms, ttft_ms, status_code, failed, vendor_account_id
+                   latency_ms, ttft_ms, status_code, failed, vendor_account_id,
+                   cost_input_usd, cost_output_usd, cost_cache_read_usd,
+                   cost_cache_write_usd, cache_savings_usd, unpriced_tokens, priced
 audit_events       id, at, actor_user_id, action, target, detail, ip, user_agent
 model_prices       provider, model, input, output, cache_read, cache_write, updated_at
                    ← ручные цены администратора, побеждают каталог

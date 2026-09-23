@@ -26,9 +26,12 @@ func NewUsageRepo(pool *pgxpool.Pool) *UsageRepo { return &UsageRepo{pool: pool}
 const appendUsage = `INSERT INTO usage_events (
 	at, user_id, token_id, provider, model, alias, stream, service_tier,
 	tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write,
-	tokens_total, breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id)
+	tokens_total, breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id,
+	cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd, cache_savings_usd,
+	unpriced_tokens, priced)
 VALUES ($1, (SELECT id FROM users WHERE id = $2), (SELECT id FROM api_tokens WHERE id = $3),
-	$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`
+	$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+	$21, $22, $23, $24, $25, $26, $27)`
 
 // AppendBatch writes events in one round trip and one implicit transaction: every
 // event or none.
@@ -42,7 +45,9 @@ func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) er
 			e.At.UTC(), nullUUID(e.UserID), nullUUID(e.TokenID), e.Provider, e.Model, e.Alias,
 			e.Stream, e.ServiceTier, e.TokensInput, e.TokensOutput, e.TokensReasoning,
 			e.TokensCacheRead, e.TokensCacheWrite, e.TokensTotal, e.BreakdownQuality,
-			e.LatencyMS, e.TTFTMS, e.StatusCode, e.Failed, e.VendorAccountID)
+			e.LatencyMS, e.TTFTMS, e.StatusCode, e.Failed, e.VendorAccountID,
+			e.Cost.InputUSD, e.Cost.OutputUSD, e.Cost.CacheReadUSD, e.Cost.CacheWriteUSD,
+			e.Cost.CacheSavingsUSD, e.Cost.UnpricedTokens, e.Cost.Priced)
 	}
 	if err := r.pool.SendBatch(ctx, b).Close(); err != nil {
 		return fmt.Errorf("postgres: append %d usage events: %w", len(events), err)
@@ -57,12 +62,16 @@ func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) er
 // a request retried on another account after a 429 leaves a failed row next to
 // the served one; tokens still sum over every row, since they were spent. A
 // bucket and model holding only failed attempts that spent nothing has no point.
+//
+// Cost sums what each row stored when it was recorded: nothing is priced here.
 const seriesForUser = `SELECT date_trunc($4, at, 'UTC') AS bucket, model,
-	count(*) FILTER (WHERE NOT failed) AS served, coalesce(sum(tokens_total), 0)::bigint AS tokens
+	count(*) FILTER (WHERE NOT failed) AS served, coalesce(sum(tokens_total), 0)::bigint AS tokens,
+	sum(cost_input_usd), sum(cost_output_usd), sum(cost_cache_read_usd), sum(cost_cache_write_usd),
+	sum(cache_savings_usd), sum(unpriced_tokens)::bigint, bool_or(priced)
 FROM usage_events
 WHERE user_id = $1 AND at >= $2 AND at < $3
 GROUP BY bucket, model
-HAVING count(*) FILTER (WHERE NOT failed) > 0 OR coalesce(sum(tokens_total), 0) > 0
+HAVING count(*) FILTER (WHERE NOT failed) > 0 OR sum(tokens_total) > 0 OR sum(unpriced_tokens) > 0 OR bool_or(priced)
 ORDER BY bucket, model`
 
 // SeriesForUser aggregates userID's events in [from, to) per bucket and model; the
@@ -75,14 +84,21 @@ func (r *UsageRepo) SeriesForUser(ctx context.Context, userID uuid.UUID, from, t
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var p app.UsagePoint
-		if err := rows.Scan(&p.At, &p.Model, &p.Requests, &p.TokensTotal); err != nil {
+		var (
+			p    app.UsagePoint
+			cost app.UsageCost
+		)
+		if err := rows.Scan(&p.At, &p.Model, &p.Requests, &p.TokensTotal,
+			&cost.InputUSD, &cost.OutputUSD, &cost.CacheReadUSD, &cost.CacheWriteUSD,
+			&cost.CacheSavingsUSD, &cost.UnpricedTokens, &cost.Priced); err != nil {
 			return app.UsageSeries{}, fmt.Errorf("postgres: usage series: %w", err)
 		}
 		p.At = p.At.UTC()
+		p.CostUSD = cost.TotalUSD()
 		series.Points = append(series.Points, p)
 		series.Totals.Requests += p.Requests
 		series.Totals.TokensTotal += p.TokensTotal
+		series.Totals.Cost.Add(cost)
 	}
 	if err := rows.Err(); err != nil {
 		return app.UsageSeries{}, fmt.Errorf("postgres: usage series: %w", err)
