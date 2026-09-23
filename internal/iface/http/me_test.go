@@ -202,14 +202,21 @@ func TestUsageDefaultsToTheLastSevenDays(t *testing.T) {
 	now := e.clock.Now()
 	e.usage.EXPECT().SeriesForUser(mock.Anything, u.ID, now.Add(-7*24*time.Hour), now).Return(app.UsageSeries{
 		Bucket: app.UsageBucketDay,
-		Totals: app.UsageTotals{Requests: 3, TokensTotal: 70},
-		Points: []app.UsagePoint{{At: now.Truncate(24 * time.Hour), Model: "m", Requests: 3, TokensTotal: 70}},
+		Totals: app.UsageTotals{Requests: 3, TokensTotal: 70, Cost: app.UsageCost{
+			InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: -0.75, UnpricedTokens: 9, Priced: true,
+		}},
+		Points: []app.UsagePoint{{At: now.Truncate(24 * time.Hour), Model: "m", Requests: 3, TokensTotal: 70, CostUSD: 3.75}},
 	}, nil)
 	var out api.Usage
 	decodeBody(t, e.do(http.MethodGet, "/api/me/usage", "", withCookie(e.signedIn(u))), http.StatusOK, &out)
 	if out.Bucket != "day" || out.Totals.Requests != 3 || out.Totals.TokensTotal != 70 ||
 		len(out.Points) != 1 || out.Points[0].Model != "m" || !out.From.Equal(now.Add(-7*24*time.Hour)) || !out.To.Equal(now) {
 		t.Fatalf("usage = %+v", out)
+	}
+	want := api.CostSummary{TotalUSD: 3.75, InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5,
+		CacheSavingsUSD: -0.75, UnpricedTokens: 9}
+	if out.Totals.Cost != want || out.Points[0].CostUSD != 3.75 {
+		t.Fatalf("cost = %+v, point cost %v; want %+v and 3.75", out.Totals.Cost, out.Points[0].CostUSD, want)
 	}
 }
 

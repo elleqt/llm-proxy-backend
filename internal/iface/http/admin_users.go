@@ -20,6 +20,7 @@ import (
 type (
 	activityRequest = struct {
 		At          time.Time  `json:"at"`
+		CostUSD     *float64   `json:"costUSD,omitempty"`
 		LatencyMs   int        `json:"latencyMs"`
 		Model       string     `json:"model"`
 		Provider    string     `json:"provider"`
@@ -288,6 +289,7 @@ func (rt *router) getUserActivity(w http.ResponseWriter, r *http.Request) {
 			StatusCode:  requestStatus(e),
 			TokensTotal: int(e.TokensTotal),
 			LatencyMs:   e.LatencyMS,
+			CostUSD:     requestCost(e.Cost),
 		})
 	}
 	for _, e := range act.Audit {
@@ -403,4 +405,14 @@ func idPtr(id uuid.UUID) *uuid.UUID {
 		return nil
 	}
 	return &id
+}
+
+// requestCost is a request's cost as the contract's Activity carries it: none (null)
+// when none of its tokens had a price.
+func requestCost(c app.UsageCost) *float64 {
+	if !c.Priced {
+		return nil
+	}
+	total := c.TotalUSD()
+	return &total
 }

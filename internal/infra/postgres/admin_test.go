@@ -380,6 +380,11 @@ func TestAdminRepos(t *testing.T) {
 		addUsage(t, ctx, pool, user.ID, nil, at.Add(-2*time.Minute), "alpha", "middle")
 		addUsage(t, ctx, pool, user.ID, &tok.ID, at.Add(-time.Minute), "beta", "newest")
 		addUsage(t, ctx, pool, other.ID, nil, at, "alpha", "someone else's")
+		if _, err := pool.Exec(ctx, `UPDATE usage_events SET cost_input_usd = 0.5, cost_output_usd = 1,
+			cost_cache_read_usd = 0.25, cost_cache_write_usd = 2, cache_savings_usd = -1, unpriced_tokens = 3, priced = true
+			WHERE user_id = $1 AND model = 'newest'`, user.ID); err != nil {
+			t.Fatalf("price the newest row: %v", err)
+		}
 
 		got, err := repo.RecentUsage(ctx, user.ID, 2)
 		if err != nil {
@@ -393,8 +398,15 @@ func TestAdminRepos(t *testing.T) {
 			!e.Stream || e.StatusCode != 200 || e.TokensTotal != 42 || e.LatencyMS != 1500 {
 			t.Fatalf("event = %+v", e)
 		}
+		if want := (app.UsageCost{InputUSD: 0.5, OutputUSD: 1, CacheReadUSD: 0.25, CacheWriteUSD: 2,
+			CacheSavingsUSD: -1, UnpricedTokens: 3, Priced: true}); e.Cost != want {
+			t.Fatalf("stored cost = %+v, want %+v", e.Cost, want)
+		}
 		if got[1].TokenID != uuid.Nil {
 			t.Fatalf("NULL token = %s, want uuid.Nil", got[1].TokenID)
+		}
+		if got[1].Cost != (app.UsageCost{}) {
+			t.Fatalf("unpriced row's cost = %+v, want none", got[1].Cost)
 		}
 	})
 

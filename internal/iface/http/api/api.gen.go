@@ -182,7 +182,10 @@ type Activity struct {
 		Target  *string                 `json:"target,omitempty"`
 	} `json:"audit"`
 	Requests []struct {
-		At          time.Time           `json:"at"`
+		At time.Time `json:"at"`
+
+		// CostUSD The request's estimated cost, as in CostSummary.totalUSD; null when none of its tokens had a price.
+		CostUSD     *float64            `json:"costUSD,omitempty"`
 		LatencyMs   int                 `json:"latencyMs"`
 		Model       string              `json:"model"`
 		Provider    string              `json:"provider"`
@@ -246,6 +249,30 @@ type Catalog struct {
 type ConnectInfo struct {
 	// ApiBaseURL Public base URL of the proxied API, without a trailing slash.
 	ApiBaseURL string `json:"apiBaseURL"`
+}
+
+// CostSummary What the tokens would have cost at the vendor's list prices, in US dollars: an estimate of work done, not a bill. Each request is priced when it is served, at the prices in force then, so a later price change does not rewrite history.
+type CostSummary struct {
+	// CacheReadUSD Input tokens read from the prompt cache, at the cache-read rate.
+	CacheReadUSD float64 `json:"cacheReadUSD"`
+
+	// CacheSavingsUSD The net effect of prompt caching against paying the input rate for every input token: what cache reads saved (cache-read tokens at input minus cache-read rate) less what cache writes cost extra (cache-write tokens at cache-write minus input rate). Negative when writes cost more than reads saved.
+	CacheSavingsUSD float64 `json:"cacheSavingsUSD"`
+
+	// CacheWriteUSD Input tokens written to the prompt cache, at the cache-write rate.
+	CacheWriteUSD float64 `json:"cacheWriteUSD"`
+
+	// InputUSD Input tokens not read from or written to the prompt cache, at the input rate.
+	InputUSD float64 `json:"inputUSD"`
+
+	// OutputUSD Output tokens, reasoning included, at the output rate.
+	OutputUSD float64 `json:"outputUSD"`
+
+	// TotalUSD The sum of the four parts below.
+	TotalUSD float64 `json:"totalUSD"`
+
+	// UnpricedTokens Tokens with no price when served (a model missing from the price list, or tokens the vendor did not classify). They are not in `totalUSD`, not counted as free.
+	UnpricedTokens int `json:"unpricedTokens"`
 }
 
 // CreateUserRequest defines model for CreateUserRequest.
@@ -558,8 +585,11 @@ type Usage struct {
 	From   time.Time   `json:"from"`
 	Points []struct {
 		// At Start of the bucket.
-		At    time.Time `json:"at"`
-		Model string    `json:"model"`
+		At time.Time `json:"at"`
+
+		// CostUSD The priced part of this bucket's spend, as in `totals.cost.totalUSD`.
+		CostUSD float64 `json:"costUSD"`
+		Model   string  `json:"model"`
 
 		// Requests Served requests in this bucket, as in `totals.requests`.
 		Requests    int `json:"requests"`
@@ -567,6 +597,9 @@ type Usage struct {
 	} `json:"points"`
 	To     time.Time `json:"to"`
 	Totals struct {
+		// Cost What the tokens would have cost at the vendor's list prices, in US dollars: an estimate of work done, not a bill. Each request is priced when it is served, at the prices in force then, so a later price change does not rewrite history.
+		Cost CostSummary `json:"cost"`
+
 		// Requests Served model calls. Failed attempts, including ones the gateway retried on another account, are not counted. A request that also made a side call to another model (for example an image model behind a chat request) counts once per model served.
 		Requests int `json:"requests"`
 

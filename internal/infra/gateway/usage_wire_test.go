@@ -68,7 +68,7 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 	}
 
 	m := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, m, wallClock{}, discardLog{})
+	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, m, wallClock{}, discardLog{})
 	w := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +

@@ -28,7 +28,8 @@ func (r *ActivityRepo) RecentUsage(ctx context.Context, userID uuid.UUID, limit 
 		`SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
 		        tokens_input, tokens_output, tokens_reasoning, tokens_cache_read,
 		        tokens_cache_write, tokens_total, breakdown_quality, latency_ms, ttft_ms,
-		        status_code, failed, vendor_account_id
+		        status_code, failed, vendor_account_id, cost_input_usd, cost_output_usd,
+		        cost_cache_read_usd, cost_cache_write_usd, cache_savings_usd, unpriced_tokens, priced
 		 FROM usage_events WHERE user_id = $1
 		 ORDER BY at DESC, id DESC LIMIT $2`, userID, limit)
 	if err != nil {
@@ -42,7 +43,9 @@ func (r *ActivityRepo) RecentUsage(ctx context.Context, userID uuid.UUID, limit 
 		err := row.Scan(&e.At, &e.UserID, &tokenID, &e.Provider, &e.Model, &e.Alias, &e.Stream,
 			&e.ServiceTier, &e.TokensInput, &e.TokensOutput, &e.TokensReasoning,
 			&e.TokensCacheRead, &e.TokensCacheWrite, &e.TokensTotal, &e.BreakdownQuality,
-			&e.LatencyMS, &e.TTFTMS, &e.StatusCode, &e.Failed, &e.VendorAccountID)
+			&e.LatencyMS, &e.TTFTMS, &e.StatusCode, &e.Failed, &e.VendorAccountID,
+			&e.Cost.InputUSD, &e.Cost.OutputUSD, &e.Cost.CacheReadUSD, &e.Cost.CacheWriteUSD,
+			&e.Cost.CacheSavingsUSD, &e.Cost.UnpricedTokens, &e.Cost.Priced)
 		// A token deleted since is NULL here; the event models "no token" as uuid.Nil.
 		if tokenID != nil {
 			e.TokenID = *tokenID

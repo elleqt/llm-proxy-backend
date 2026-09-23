@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -118,7 +119,7 @@ func knownPrincipal(users *mocks.UserRepo, tokens *mocks.TokenRepo) {
 func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, log app.Logger) (*UsageSink, *metrics.Metrics, *prometheus.Registry) {
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
-	return NewUsageSink(events, tokens, users, m, wallClock{}, log), m, reg
+	return NewUsageSink(events, tokens, users, &app.PriceTable{}, m, wallClock{}, log), m, reg
 }
 
 // flushed waits until every record handed to sink so far has been processed.
@@ -154,7 +155,9 @@ func TestSinkAttributesRecordToPrincipal(t *testing.T) {
 	want := app.UsageEvent{
 		At: at, UserID: sinkUser, TokenID: sinkToken, Provider: "claude", Model: "claude-sonnet-5", Alias: "sonnet",
 		Stream: true, TokensInput: 10, TokensOutput: 20, TokensReasoning: 3, TokensCacheRead: 5, TokensCacheWrite: 2,
-		TokensTotal: 35, LatencyMS: 1500, TTFTMS: 300, VendorAccountID: "claude-1.json",
+		TokensTotal: 35, BreakdownQuality: "reconstructed", LatencyMS: 1500, TTFTMS: 300, VendorAccountID: "claude-1.json",
+		// No price: every classified token is unpriced.
+		Cost: app.UsageCost{UnpricedTokens: 40},
 	}
 	if got := events.written(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("ledger = %+v\nwant   [%+v]", got, want)
@@ -317,6 +320,92 @@ func TestSinkPrefersCanonicalBreakdown(t *testing.T) {
 	}
 }
 
+// TestSinkReconstructsARawBreakdown: without a valid canonical breakdown, an
+// OpenAI-style prompt count includes the cached tokens and the completion count
+// the reasoning ones, so they are taken out before pricing; Anthropic's counts
+// are already separate and are kept.
+func TestSinkReconstructsARawBreakdown(t *testing.T) {
+	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
+	events.accept()
+	knownPrincipal(users, tokens)
+	prices := &app.PriceTable{}
+	prices.SetPrices([]app.ModelPrice{
+		{Provider: "chatgpt", Model: "gpt-6", Input: 2, Output: 10, CacheRead: 0.5},
+		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
+	})
+	sink := NewUsageSink(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
+
+	sink.HandleUsage(context.Background(), cliproxyusage.Record{
+		Provider: "codex", Model: "gpt-6", APIKey: sinkKey,
+		Detail: cliproxyusage.Detail{InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120},
+	})
+	sink.HandleUsage(context.Background(), cliproxyusage.Record{
+		Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
+		Detail: cliproxyusage.Detail{InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10, OutputTokens: 20, TotalTokens: 170},
+	})
+	flushed(t, sink)
+
+	got := events.written()
+	if len(got) != 2 {
+		t.Fatalf("ledger = %+v", got)
+	}
+	codex, claude := got[0], got[1]
+	if codex.TokensInput != 60 || codex.TokensCacheRead != 40 || codex.TokensOutput != 15 || codex.TokensReasoning != 5 ||
+		codex.TokensTotal != 120 || codex.BreakdownQuality != "reconstructed" {
+		t.Fatalf("codex tokens = in %d cache %d out %d reasoning %d total %d quality %q, want 60/40/15/5/120 reconstructed",
+			codex.TokensInput, codex.TokensCacheRead, codex.TokensOutput, codex.TokensReasoning, codex.TokensTotal, codex.BreakdownQuality)
+	}
+	if want := (60*2 + 40*0.5 + 20*10) / 1e6; math.Abs(codex.Cost.TotalUSD()-want) > 1e-15 || codex.Cost.UnpricedTokens != 0 {
+		t.Fatalf("codex cost = %+v, want $%v with nothing unpriced", codex.Cost, want)
+	}
+	if claude.TokensInput != 100 || claude.TokensCacheRead != 40 || claude.TokensCacheWrite != 10 || claude.TokensOutput != 20 ||
+		claude.TokensTotal != 170 || claude.BreakdownQuality != "reconstructed" {
+		t.Fatalf("claude tokens = %+v, want the counts as reported", claude)
+	}
+	if want := (100*3 + 40*0.3 + 10*3.75 + 20*15) / 1e6; math.Abs(claude.Cost.TotalUSD()-want) > 1e-15 {
+		t.Fatalf("claude cost = %+v, want $%v", claude.Cost, want)
+	}
+}
+
+// TestSinkPricesAtTheTimeOfRecording: each row carries the cost at the price in
+// force when the sink recorded it, and the metrics count that same cost.
+func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
+	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
+	events.accept()
+	knownPrincipal(users, tokens)
+	prices := &app.PriceTable{}
+	m := metrics.New(prometheus.NewRegistry())
+	sink := NewUsageSink(events, tokens, users, prices, m, wallClock{}, discardLog{})
+	send := func() {
+		sink.HandleUsage(context.Background(), cliproxyusage.Record{
+			Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
+			Detail: cliproxyusage.Detail{TokenBreakdown: cliproxyusage.NewIndependentTokenBreakdown(1_000_000, 0, 0, 0, 0, 1_000_000)},
+		})
+		flushed(t, sink)
+	}
+
+	send() // no price yet
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3}})
+	send()
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 5}})
+	send()
+
+	got := events.written()
+	if len(got) != 3 {
+		t.Fatalf("ledger = %+v", got)
+	}
+	if got[0].Cost.Priced || got[0].Cost.UnpricedTokens != 1_000_000 {
+		t.Errorf("row before any price: %+v, want unpriced", got[0].Cost)
+	}
+	if !got[1].Cost.Priced || got[1].Cost.InputUSD != 3 || got[2].Cost.InputUSD != 5 {
+		t.Errorf("priced rows = %+v then %+v, want $3 then $5", got[1].Cost, got[2].Cost)
+	}
+	if body := scrape(t, m); !strings.Contains(body,
+		`llmproxy_cost_usd_total{kind="input",model="claude-sonnet-5",provider="claude",user="alice@example.com"} 8`) {
+		t.Fatalf("want the metrics to count the rows' $3 + $5:\n%s", body)
+	}
+}
+
 // TestSinkLabelsMetricsWithEmail: the user label is the owner's email (a
 // service account's name), looked up once per TTL, and no id reaches a label.
 func TestSinkLabelsMetricsWithEmail(t *testing.T) {
@@ -363,7 +452,7 @@ func TestSinkLabelCacheExpires(t *testing.T) {
 
 	clock := &manualClock{now: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)}
 	m := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(events, tokens, users, m, clock, discardLog{})
+	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, m, clock, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey})
 		flushed(t, sink)
@@ -423,7 +512,7 @@ func TestSinkSurvivesPanic(t *testing.T) {
 	knownPrincipal(users, tokens)
 	log := &recordingLog{}
 
-	sink := NewUsageSink(events, tokens, users, panickyObserver{}, wallClock{}, log)
+	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, panickyObserver{}, wallClock{}, log)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "boom", APIKey: sinkKey})
 	flushed(t, sink)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "fine", APIKey: sinkKey})

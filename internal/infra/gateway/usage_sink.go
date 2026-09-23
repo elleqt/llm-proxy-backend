@@ -49,7 +49,9 @@ const (
 )
 
 // UsageSink turns upstream usage records into ledger rows, metrics and vendor
-// quota signals. It implements upstream's usage.Plugin.
+// quota signals. It implements upstream's usage.Plugin. Each row is priced as it
+// is mapped, at the price in force then (app.PriceUsage), and the metrics count
+// that same cost, so the ledger and the metrics never price a request apart.
 //
 // HandleUsage only enqueues: every lookup, write and metric happens on the
 // sink's worker goroutine, with a context of its own rather than the request's.
@@ -63,6 +65,7 @@ type UsageSink struct {
 	events   app.UsageRepo
 	tokens   app.TokenRepo
 	users    app.UserRepo
+	prices   app.PriceLookup
 	observer UsageObserver
 	clock    app.Clock
 	log      app.Logger
@@ -87,11 +90,14 @@ var (
 )
 
 // NewUsageSink starts the sink's worker; it runs for the life of the process.
-func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, observer UsageObserver, clock app.Clock, log app.Logger) *UsageSink {
+// prices must answer from memory: it is read for every record.
+func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
+	observer UsageObserver, clock app.Clock, log app.Logger) *UsageSink {
 	s := &UsageSink{
 		events:     events,
 		tokens:     tokens,
 		users:      users,
+		prices:     prices,
 		observer:   observer,
 		clock:      clock,
 		log:        log,
@@ -289,18 +295,67 @@ func (s *UsageSink) eventOf(r cliproxyusage.Record) app.UsageEvent {
 		ev.TokensTotal = b.TotalTokens
 		ev.BreakdownQuality = string(b.Quality)
 	} else {
-		d := r.Detail
-		ev.TokensInput = d.InputTokens
-		ev.TokensOutput = d.OutputTokens
-		ev.TokensReasoning = d.ReasoningTokens
-		ev.TokensCacheRead = d.CacheReadTokens
-		if ev.TokensCacheRead == 0 {
-			ev.TokensCacheRead = d.CachedTokens
-		}
-		ev.TokensCacheWrite = d.CacheCreationTokens
-		ev.TokensTotal = d.TotalTokens
+		partitionDetail(&ev, r.Provider, r.Detail)
 	}
+	price, ok := s.prices.Price(ev.Provider, ev.Model)
+	ev.Cost = app.PriceUsage(ev, price, ok)
 	return ev
+}
+
+// qualityReconstructed is the BreakdownQuality of a row whose token kinds the
+// sink derived from the raw detail, upstream having sent no valid breakdown.
+const qualityReconstructed = "reconstructed"
+
+// partitionDetail maps a raw usage detail onto ev's token kinds, which partition
+// the request, by how the upstream provider key's protocol reports usage (as
+// upstream's own accounting.go tokenAccountingSemanticsFor tells them apart):
+//
+//   - OpenAI-style (codex, OpenAI-compatible and the like): the prompt count
+//     includes the cached and cache-written tokens, and the completion count
+//     the reasoning tokens, so both are taken out.
+//   - Gemini-style: the prompt count includes the cache; reasoning is separate.
+//   - Anthropic, and any protocol not recognised: every count is separate.
+//
+// A count never goes below zero. The total is kept as reported.
+func partitionDetail(ev *app.UsageEvent, providerKey string, d cliproxyusage.Detail) {
+	cacheRead := d.CacheReadTokens
+	if cacheRead == 0 {
+		cacheRead = d.CachedTokens
+	}
+	ev.TokensInput, ev.TokensOutput, ev.TokensReasoning = d.InputTokens, d.OutputTokens, d.ReasoningTokens
+	ev.TokensCacheRead, ev.TokensCacheWrite = cacheRead, d.CacheCreationTokens
+	ev.TokensTotal = d.TotalTokens
+	ev.BreakdownQuality = qualityReconstructed
+	cacheInInput, reasoningInOutput := detailSemantics(providerKey)
+	if cacheInInput {
+		ev.TokensInput = max(ev.TokensInput-max(cacheRead, 0)-max(d.CacheCreationTokens, 0), 0)
+	}
+	if reasoningInOutput {
+		ev.TokensOutput = max(ev.TokensOutput-max(d.ReasoningTokens, 0), 0)
+	}
+}
+
+// detailSemantics says whether an upstream provider key's raw usage counts cache
+// tokens inside the prompt count and reasoning inside the completion count.
+func detailSemantics(providerKey string) (cacheInInput, reasoningInOutput bool) {
+	key := strings.ToLower(strings.TrimSpace(providerKey))
+	if key == "openai-compatibility" || strings.HasPrefix(key, openAICompatiblePrefix) {
+		return true, true
+	}
+	if strings.Contains(key, "claude") || strings.Contains(key, "anthropic") {
+		return false, false
+	}
+	for _, marker := range [...]string{"gemini", "aistudio", "antigravity", "vertex", "interaction"} {
+		if strings.Contains(key, marker) {
+			return true, false
+		}
+	}
+	for _, marker := range [...]string{"openai", "codex", "xai", "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+		if strings.Contains(key, marker) {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 // touch stamps each token and owner in events once, with the latest time one

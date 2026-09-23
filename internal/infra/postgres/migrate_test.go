@@ -238,6 +238,67 @@ func TestMigrations(t *testing.T) {
 			t.Fatalf("catalog state = %+v, %v; want a never-checked row", state, err)
 		}
 	})
+
+	// The rows recorded before cost was stored are priced by 0003 at the price in
+	// force (a manual price over the catalog's) with app.PriceUsage's arithmetic.
+	// Runs after the rebuild above.
+	t.Run("0003 backfills the cost of existing usage", func(t *testing.T) {
+		dsn := pool.Config().ConnString()
+		if err := postgres.MigrateDown(ctx, dsn); err != nil {
+			t.Fatalf("migrate down: %v", err)
+		}
+		if err := postgres.MigrateTo(ctx, dsn, 2); err != nil {
+			t.Fatalf("migrate to 2: %v", err)
+		}
+		manual := app.ModelPrice{Provider: "claude", Model: "sonnet", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
+		catalogOnly := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10, CacheRead: 0.125}
+		if _, err := pool.Exec(ctx, `
+			INSERT INTO model_prices (provider, model, input, output, cache_read, cache_write)
+			VALUES ('claude', 'sonnet', 3, 15, 0.3, 3.75);
+			INSERT INTO catalog_prices (provider, model, input, output, cache_read, cache_write)
+			VALUES ('claude', 'sonnet', 100, 100, 100, 100), ('chatgpt', 'gpt-6', 1.25, 10, 0.125, 0)`); err != nil {
+			t.Fatalf("insert prices: %v", err)
+		}
+		rows := []struct {
+			ev    app.UsageEvent
+			price app.ModelPrice
+			ok    bool
+		}{
+			// Manual price, with 100 unclassified tokens and cache writes outweighing reads.
+			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100,
+				TokensCacheRead: 200, TokensCacheWrite: 4000, TokensTotal: 5600}, manual, true},
+			{app.UsageEvent{Provider: "chatgpt", Model: "gpt-6", TokensInput: 600, TokensOutput: 50, TokensCacheRead: 400,
+				TokensTotal: 1050}, catalogOnly, true},
+			// A total only: nothing classified, so nothing priced.
+			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensTotal: 500}, manual, true},
+			// No price at all.
+			{app.UsageEvent{Provider: "claude", Model: "unknown", TokensInput: 10, TokensOutput: 5, TokensTotal: 20}, app.ModelPrice{}, false},
+		}
+		for i, r := range rows {
+			e := r.ev
+			if _, err := pool.Exec(ctx, `INSERT INTO usage_events (id, at, provider, model, tokens_input, tokens_output,
+				tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_total) VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9)`,
+				i+1, e.Provider, e.Model, e.TokensInput, e.TokensOutput, e.TokensReasoning, e.TokensCacheRead,
+				e.TokensCacheWrite, e.TokensTotal); err != nil {
+				t.Fatalf("insert usage %d: %v", i, err)
+			}
+		}
+		if err := postgres.Migrate(ctx, dsn); err != nil {
+			t.Fatalf("migrate up: %v", err)
+		}
+		for i, r := range rows {
+			var got app.UsageCost
+			if err := pool.QueryRow(ctx, `SELECT cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd,
+				cache_savings_usd, unpriced_tokens, priced FROM usage_events WHERE id = $1`, i+1).Scan(
+				&got.InputUSD, &got.OutputUSD, &got.CacheReadUSD, &got.CacheWriteUSD, &got.CacheSavingsUSD,
+				&got.UnpricedTokens, &got.Priced); err != nil {
+				t.Fatalf("read row %d: %v", i, err)
+			}
+			if want := app.PriceUsage(r.ev, r.price, r.ok); got != want {
+				t.Errorf("row %d (%s/%s) backfilled as %+v\nwant                %+v", i, r.ev.Provider, r.ev.Model, got, want)
+			}
+		}
+	})
 }
 
 // TestMigrateDoesNotLeakPasswordFromMalformedDSN pins the one migration failure that

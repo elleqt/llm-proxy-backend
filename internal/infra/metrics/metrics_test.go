@@ -256,11 +256,12 @@ func TestForgetAccountDropsOnlyThatAccountsSeries(t *testing.T) {
 }
 
 func TestHandlerServesPrefixedFamilies(t *testing.T) {
-	prices := &PriceTable{}
-	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "m", Input: 1}})
-	m := New(prometheus.NewRegistry(), WithVersion("v1.2.3"), WithPrices(prices))
-	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", Stream: true, TokensInput: 1, StatusCode: 200, LatencyMS: 10, TTFTMS: 5}, "u")
-	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "unpriced", TokensInput: 1}, "u")
+	m := New(prometheus.NewRegistry(), WithVersion("v1.2.3"))
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", Stream: true, TokensInput: 1, StatusCode: 200, LatencyMS: 10, TTFTMS: 5,
+		Cost: app.UsageCost{InputUSD: 1, CacheSavingsUSD: 1, Priced: true}}, "u")
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "unpriced", TokensInput: 1,
+		Cost: app.UsageCost{UnpricedTokens: 1, CacheSavingsUSD: -1}}, "u")
+	m.ObserveVendorQuota("a", "claude", "7d", 0.05, time.Now())
 	m.ObservePolicyDenied("u", "m", DenyModelNotAllowed)
 	m.ObserveAuthFailure("unknown_token")
 	m.ObserveVendorQuota("a", "claude", "7d", 0.1, time.Now())
@@ -282,6 +283,8 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 		"llmproxy_vendor_quota_observed_timestamp_seconds",
 		"llmproxy_account_disabled", "llmproxy_account_failures_total", "llmproxy_build_info",
 		"llmproxy_cost_usd_total", "llmproxy_cost_unpriced_tokens_total",
+		"llmproxy_cache_savings_usd_total", "llmproxy_cache_write_premium_usd_total",
+		"llmproxy_vendor_quota_burned_ratio_total",
 		"llmproxy_price_catalog_checked_timestamp_seconds", "llmproxy_price_catalog_models",
 		"llmproxy_price_catalog_check_failures_total",
 	} {
@@ -352,83 +355,64 @@ func parser() *expfmt.TextParser {
 	return &p
 }
 
-func TestCostIsComputedFromThePriceInForce(t *testing.T) {
-	prices := &PriceTable{}
-	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}})
-	m := New(prometheus.NewRegistry(), WithPrices(prices))
-
-	// The kinds partition the request; reasoning tokens are output tokens.
-	m.ObserveUsage(app.UsageEvent{
-		Provider: "claude", Model: "claude-sonnet-5",
-		TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100, TokensCacheRead: 2000, TokensCacheWrite: 400,
-	}, "alice@example.com")
-
-	const want = (1000*3 + 300*15 + 2000*0.3 + 400*3.75) / 1e6
-	if got := testutil.ToFloat64(m.cost.WithLabelValues("alice@example.com", "claude", "claude-sonnet-5")); math.Abs(got-want) > 1e-12 {
-		t.Fatalf("cost = %v, want %v", got, want)
-	}
-	if n := testutil.CollectAndCount(m.unpriced); n != 0 {
-		t.Fatalf("unpriced series = %d for a priced model, want 0", n)
-	}
-}
-
-func TestUnpricedTokensAreCounted(t *testing.T) {
-	prices := &PriceTable{}
-	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3}})
-	m := New(prometheus.NewRegistry(), WithPrices(prices))
-
-	// Same model name, other provider: a price is per provider and model.
-	m.ObserveUsage(app.UsageEvent{Provider: "chatgpt", Model: "claude-sonnet-5", TokensInput: 10, TokensOutput: 5, TokensReasoning: 2, TokensCacheRead: 3, TokensCacheWrite: 1}, "u")
-
-	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("chatgpt", "claude-sonnet-5")); got != 21 {
-		t.Fatalf("unpriced tokens = %v, want 21", got)
-	}
-	if n := testutil.CollectAndCount(m.cost); n != 0 {
-		t.Fatalf("cost series = %d for an unpriced model, want 0", n)
-	}
-
-	// Without a price list every token is unpriced.
-	bare := New(prometheus.NewRegistry())
-	bare.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 7}, "u")
-	if got := testutil.ToFloat64(bare.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 7 {
-		t.Fatalf("unpriced tokens without a price list = %v, want 7", got)
-	}
-}
-
-func TestPriceChangeAppliesToLaterRecordsOnly(t *testing.T) {
-	prices := &PriceTable{}
-	m := New(prometheus.NewRegistry(), WithPrices(prices))
-	ev := app.UsageEvent{Provider: "codex", Model: "gpt-6", TokensInput: 1_000_000}
-
-	m.ObserveUsage(ev, "u") // before any price: unpriced
-	prices.SetPrices([]app.ModelPrice{{Provider: "codex", Model: "gpt-6", Input: 2}})
+// The cost counters count the cost the event carries, each part under its kind,
+// and the net cache effect on the savings counter or the premium one by its sign.
+func TestCostIsCountedByKind(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	ev := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", Cost: app.UsageCost{
+		InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: 0.75,
+		UnpricedTokens: 40, Priced: true,
+	}}
 	m.ObserveUsage(ev, "u")
-	prices.SetPrices([]app.ModelPrice{{Provider: "codex", Model: "gpt-6", Input: 5}})
+	ev.Cost = app.UsageCost{CacheWriteUSD: 4, CacheSavingsUSD: -1, Priced: true}
 	m.ObserveUsage(ev, "u")
 
-	if got := testutil.ToFloat64(m.cost.WithLabelValues("u", "codex", "gpt-6")); got != 7 {
-		t.Fatalf("cost = %v, want 2 + 5 (each record at the price in force when it was observed)", got)
+	for kind, want := range map[string]float64{"input": 1, "output": 2, "cache_read": 0.25, "cache_write": 4.5} {
+		if got := testutil.ToFloat64(m.cost.WithLabelValues("u", "claude", "claude-sonnet-5", kind)); got != want {
+			t.Errorf("cost{kind=%s} = %v, want %v", kind, got, want)
+		}
 	}
-	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("codex", "gpt-6")); got != 1_000_000 {
-		t.Fatalf("unpriced = %v, want the first record's tokens only", got)
+	if got := testutil.ToFloat64(m.cacheSavings.WithLabelValues("u", "claude", "claude-sonnet-5")); got != 0.75 {
+		t.Errorf("cache savings = %v, want 0.75 (the positive request only)", got)
+	}
+	if got := testutil.ToFloat64(m.cachePremium.WithLabelValues("u", "claude", "claude-sonnet-5")); got != 1 {
+		t.Errorf("cache write premium = %v, want 1 (the negative request, as a positive amount)", got)
+	}
+	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 40 {
+		t.Errorf("unpriced tokens = %v, want 40", got)
 	}
 }
 
-func TestUnclassifiedTokensAreUnpriced(t *testing.T) {
-	prices := &PriceTable{}
-	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15}})
-	m := New(prometheus.NewRegistry(), WithPrices(prices))
-
-	// An unclassified breakdown: only the total is known.
-	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensTotal: 500}, "u")
-	// An inconsistent one: the kinds cover part of the total.
-	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 100, TokensOutput: 10, TokensTotal: 150}, "u")
-
-	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 540 {
-		t.Fatalf("unpriced tokens = %v, want 500 + 40 unclassified", got)
+// The burned counter sums each window's rises since this process first saw it.
+func TestQuotaBurnedCountsRisesOnly(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	at := time.Now()
+	burned := func(account, window string) float64 {
+		return testutil.ToFloat64(m.quotaBurned.WithLabelValues(account, "claude", window))
 	}
-	const want = (100*3 + 10*15) / 1e6
-	if got := testutil.ToFloat64(m.cost.WithLabelValues("u", "claude", "claude-sonnet-5")); math.Abs(got-want) > 1e-12 {
-		t.Fatalf("cost = %v, want %v (classified tokens only)", got, want)
+
+	m.ObserveVendorQuota("a", "claude", "5h", 0.5, at) // first observation: the reference only
+	if got := burned("a", "5h"); got != 0 {
+		t.Fatalf("burned after the first observation = %v, want 0", got)
+	}
+	m.ObserveVendorQuota("a", "claude", "5h", 0.75, at) // +0.25
+	m.ObserveVendorQuota("a", "claude", "5h", 0.25, at) // rolled over: nothing
+	m.ObserveVendorQuota("a", "claude", "5h", 0.5, at)  // +0.25 from the new reference
+	if got := burned("a", "5h"); got != 0.5 {
+		t.Fatalf("burned = %v, want 0.25 + 0.25 (the drop adds nothing, and resets the reference)", got)
+	}
+
+	// Other windows and accounts keep references of their own.
+	m.ObserveVendorQuota("a", "claude", "7d", 0.9, at)
+	m.ObserveVendorQuota("b", "claude", "5h", 0.1, at)
+	m.ObserveVendorQuota("b", "claude", "5h", 0.2, at)
+	if got := burned("a", "7d"); got != 0 {
+		t.Errorf("a/7d burned = %v, want 0 (first observation of that window)", got)
+	}
+	if got := burned("b", "5h"); math.Abs(got-0.1) > 1e-12 {
+		t.Errorf("b/5h burned = %v, want 0.1", got)
+	}
+	if got := burned("a", "5h"); got != 0.5 {
+		t.Errorf("a/5h burned = %v after other windows moved, want 0.5", got)
 	}
 }

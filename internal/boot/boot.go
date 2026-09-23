@@ -157,16 +157,15 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	}
 
 	registry := prometheus.NewRegistry()
-	prices := &metrics.PriceTable{}
+	prices := &app.PriceTable{}
 	var g *gateway.Gateway
 	meters := metrics.New(registry,
 		metrics.WithClock(clock),
 		metrics.WithVersion(opts.Version),
-		metrics.WithPrices(prices),
 		// g is set below, before anything is served.
 		metrics.WithKnownModel(func(model string) (string, bool) { return g.Catalog().KnownModel(model) }),
 	)
-	sink := gateway.NewUsageSink(usage, tokens, users, meters, clock, logs)
+	sink := gateway.NewUsageSink(usage, tokens, users, prices, meters, clock, logs)
 	registry.MustRegister(
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: "llmproxy", Name: "usage_dropped_total",

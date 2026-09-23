@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"runtime/debug"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,7 +35,6 @@ type config struct {
 	clock      app.Clock
 	version    string
 	knownModel func(model string) (string, bool)
-	prices     PriceLookup
 }
 
 // WithClock sets the clock that stamps vendor quota observations.
@@ -53,16 +53,6 @@ func WithKnownModel(canonical func(model string) (string, bool)) Option {
 	return func(cfg *config) { cfg.knownModel = canonical }
 }
 
-// PriceLookup finds the price of a provider's model. It is consulted on every
-// ObserveUsage, so it must answer from memory; PriceTable is one.
-type PriceLookup interface {
-	Price(provider, model string) (app.ModelPrice, bool)
-}
-
-// WithPrices sets the price list the cost estimate reads. Without it every token is
-// unpriced.
-func WithPrices(p PriceLookup) Option { return func(cfg *config) { cfg.prices = p } }
-
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }
@@ -72,7 +62,6 @@ type Metrics struct {
 	clock      app.Clock
 	gatherer   prometheus.Gatherer
 	knownModel func(model string) (string, bool)
-	prices     PriceLookup
 
 	tokens          *prometheus.CounterVec
 	requests        *prometheus.CounterVec
@@ -86,11 +75,21 @@ type Metrics struct {
 	accountDisabled *prometheus.GaugeVec
 	accountFailures *prometheus.CounterVec
 	cost            *prometheus.CounterVec
+	cacheSavings    *prometheus.CounterVec
+	cachePremium    *prometheus.CounterVec
 	unpriced        *prometheus.CounterVec
+	quotaBurned     *prometheus.CounterVec
 	catalogChecked  prometheus.Gauge
 	catalogModels   prometheus.Gauge
 	catalogFailures prometheus.Counter
+
+	// quotaMu guards lastQuota: the latest used ratio of each quota window, the
+	// reference the next observation's rise is measured from.
+	quotaMu   sync.Mutex
+	lastQuota map[quotaKey]float64
 }
+
+type quotaKey struct{ account, provider, window string }
 
 // Request latency runs from sub-second errors to multi-minute reasoning completions.
 var durationBuckets = []float64{0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600}
@@ -115,7 +114,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		clock:      cfg.clock,
 		gatherer:   reg,
 		knownModel: cfg.knownModel,
-		prices:     cfg.prices,
+		lastQuota:  map[quotaKey]float64{},
 		tokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "tokens_total",
 			Help: "Tokens consumed, by kind and service tier.",
@@ -164,12 +163,24 @@ func New(reg Registry, opts ...Option) *Metrics {
 		}, accountLabels),
 		cost: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "cost_usd_total",
-			Help: "Estimated cost of consumed tokens in US dollars, at the price list in force when each request was recorded. An estimate, not a bill.",
+			Help: "Estimated cost of consumed tokens in US dollars, by kind (input: uncached input; output: output and reasoning; cache_read; cache_write), at the price list in force when each request was recorded. An estimate, not a bill.",
+		}, []string{"user", "provider", "model", "kind"}),
+		cacheSavings: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "cache_savings_usd_total",
+			Help: "US dollars prompt caching saved, from requests where it saved: cache reads at (input - cache-read rate) less cache writes at (cache-write - input rate), against paying the input rate for every input token. A counter cannot go down, so a request where caching cost more adds to llmproxy_cache_write_premium_usd_total instead; the net effect is this minus that.",
+		}, []string{"user", "provider", "model"}),
+		cachePremium: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "cache_write_premium_usd_total",
+			Help: "US dollars prompt caching cost extra, from requests where cache writes at (cache-write - input rate) outweighed what cache reads saved at (input - cache-read rate). Subtract it from llmproxy_cache_savings_usd_total for the net effect of caching.",
 		}, []string{"user", "provider", "model"}),
 		unpriced: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "cost_unpriced_tokens_total",
-			Help: "Tokens consumed by models the price list has no price for, so absent from the cost estimate.",
+			Help: "Tokens absent from the cost estimate: those of models the price list had no price for, and those the vendor did not classify.",
 		}, []string{"provider", "model"}),
+		quotaBurned: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "vendor_quota_burned_ratio_total",
+			Help: "Vendor quota burned, summed over the rises of llmproxy_vendor_quota_used_ratio seen by this process (a drop, the window rolling over, adds nothing; quota burned while the process was down is not counted). 1.0 = one full window; pair with llmproxy_cost_usd_total / llmproxy_tokens_total to estimate the capacity of a window.",
+		}, quotaLabels),
 		catalogChecked: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "price_catalog_checked_timestamp_seconds",
 			Help: "Unix time of the last successful price catalog check, whether or not the catalog had changed; 0 before the first.",
@@ -195,7 +206,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		m.policyDenied, m.authFailures,
 		m.quotaUsed, m.quotaReset, m.quotaObserved,
 		m.accountDisabled, m.accountFailures,
-		m.cost, m.unpriced,
+		m.cost, m.cacheSavings, m.cachePremium, m.unpriced, m.quotaBurned,
 		m.catalogChecked, m.catalogModels, m.catalogFailures,
 		buildInfo,
 	)
@@ -253,49 +264,33 @@ func (m *Metrics) ObserveUsage(ev app.UsageEvent, user string) {
 	m.observeCost(ev, user)
 }
 
-// observeCost prices ev's tokens at the price in force now. The kinds partition the
-// request's tokens (the usage sink maps upstream's canonical breakdown that way), so
-// each is priced once: reasoning tokens are output tokens and cost the output rate.
-// A model without a price adds its tokens to the unpriced counter instead.
-//
-// Tokens upstream could not classify (an unclassified or inconsistent breakdown:
-// TokensTotal above the sum of the kinds) have no rate to apply, so they are
-// unpriced even for a priced model.
+// observeCost counts ev.Cost, the cost the usage sink priced ev at when it
+// recorded it (app.PriceUsage), so the metrics and the ledger agree. A part that
+// is zero adds no series.
 func (m *Metrics) observeCost(ev app.UsageEvent, user string) {
-	in, out := positive(ev.TokensInput), positive(ev.TokensOutput)+positive(ev.TokensReasoning)
-	cacheRead, cacheWrite := positive(ev.TokensCacheRead), positive(ev.TokensCacheWrite)
-	classified := in + out + cacheRead + cacheWrite
-	unclassified := max(positive(ev.TokensTotal)-classified, 0)
-	if unclassified > 0 {
-		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(unclassified)
+	c := ev.Cost
+	if c.UnpricedTokens > 0 {
+		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(float64(c.UnpricedTokens))
 	}
-	if classified == 0 {
-		return
+	for _, k := range [...]struct {
+		kind string
+		usd  float64
+	}{
+		{"input", c.InputUSD},
+		{"output", c.OutputUSD},
+		{"cache_read", c.CacheReadUSD},
+		{"cache_write", c.CacheWriteUSD},
+	} {
+		if k.usd > 0 {
+			m.cost.WithLabelValues(user, ev.Provider, ev.Model, k.kind).Add(k.usd)
+		}
 	}
-	var (
-		p  app.ModelPrice
-		ok bool
-	)
-	if m.prices != nil {
-		p, ok = m.prices.Price(ev.Provider, ev.Model)
+	switch {
+	case c.CacheSavingsUSD > 0:
+		m.cacheSavings.WithLabelValues(user, ev.Provider, ev.Model).Add(c.CacheSavingsUSD)
+	case c.CacheSavingsUSD < 0:
+		m.cachePremium.WithLabelValues(user, ev.Provider, ev.Model).Add(-c.CacheSavingsUSD)
 	}
-	if !ok {
-		m.unpriced.WithLabelValues(ev.Provider, ev.Model).Add(classified)
-		return
-	}
-	cost := (in*p.Input + out*p.Output + cacheRead*p.CacheRead + cacheWrite*p.CacheWrite) / 1e6
-	if cost > 0 {
-		m.cost.WithLabelValues(user, ev.Provider, ev.Model).Add(cost)
-	}
-}
-
-// positive is n as a counter increment: a negative count adds nothing (a negative
-// Add panics).
-func positive(n int64) float64 {
-	if n <= 0 {
-		return 0
-	}
-	return float64(n)
 }
 
 // serviceTier clamps the served tier to a closed set: an empty tier is "default" and
@@ -328,8 +323,21 @@ func statusClass(ev app.UsageEvent) string {
 // ObserveVendorQuota records a vendor's own report of quota use. ratio is a share in
 // 0..1: converting a percentage is the caller's job. A zero resetAt leaves the reset
 // gauge as it was. The observed timestamp is taken from the clock.
+//
+// It also counts the quota burned: the rise of ratio since the window's previous
+// observation. A drop, the window having rolled over, adds nothing, and so does
+// the first observation of a window since the process started: it only sets the
+// reference.
 func (m *Metrics) ObserveVendorQuota(account, provider, window string, ratio float64, resetAt time.Time) {
 	m.quotaUsed.WithLabelValues(account, provider, window).Set(ratio)
+	k := quotaKey{account, provider, window}
+	m.quotaMu.Lock()
+	previous, seen := m.lastQuota[k]
+	m.lastQuota[k] = ratio
+	m.quotaMu.Unlock()
+	if seen && ratio > previous {
+		m.quotaBurned.WithLabelValues(account, provider, window).Add(ratio - previous)
+	}
 	if !resetAt.IsZero() {
 		m.quotaReset.WithLabelValues(account, provider, window).Set(unixSeconds(resetAt))
 	}
@@ -419,6 +427,14 @@ func (m *Metrics) ForgetAccount(account, provider string) {
 	m.quotaUsed.DeletePartialMatch(match)
 	m.quotaReset.DeletePartialMatch(match)
 	m.quotaObserved.DeletePartialMatch(match)
+	m.quotaBurned.DeletePartialMatch(match)
+	m.quotaMu.Lock()
+	for k := range m.lastQuota {
+		if k.account == account && k.provider == provider {
+			delete(m.lastQuota, k)
+		}
+	}
+	m.quotaMu.Unlock()
 }
 
 // SetPriceCatalog reports the catalog prices in force and the last successful
