@@ -1,0 +1,36 @@
+# mockery v3 (pinned in the Makefile's generate target).
+#
+# v3 renamed the v2 keys this project would otherwise have used: `outpkg` is now
+# `pkgname`, `with-expecter` no longer exists (the testify template always emits the
+# expecter API), and `template` is required — v3 is template-driven and refuses to
+# run without being told which one to render.
+all: false
+template: testify
+dir: internal/app/mocks
+pkgname: mocks
+filename: "{{.InterfaceName | snakecase}}.go"
+structname: "{{.InterfaceName}}"
+packages:
+  github.com/elleqt/llm-proxy-backend/internal/app:
+    interfaces:
+      UserRepo:
+      TokenRepo:
+      PasswordRepo:
+      SessionRepo:
+      UsageRepo:
+      AuditSink:
+      IdentityProvider:
+      IdentityRepo:
+      LoginAttemptRepo:
+      Logger:
+      Clock:
+      ActivityRepo:
+      ModelCatalog:
+      SettingsRepo:
+      ConfigPusher:
+      PriceRepo:
+      PriceSink:
+      VendorAccounts:
+      VendorLogins:
+      VendorQuota:
+      AccountMetrics:

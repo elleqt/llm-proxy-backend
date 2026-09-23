@@ -1,0 +1,117 @@
+# The local stack: Postgres, the backend and the frontend, built from source (the
+# frontend from the sibling ../frontend checkout). Values come from .env; see
+# .env.example. Only the proxied API (8080) and the frontend (8081) are published.
+#
+# Three networks keep each listener to the containers that need it: `web` joins the
+# frontend and the backend's web API, `db` the backend and Postgres, `metrics` the
+# backend's /metrics and a scraper, which an operator attaches to it. The web API and
+# /metrics listen only on their network's address (the backend's alias there), so a
+# container on another network cannot reach them. The web API trusts X-Real-IP only
+# because the frontend alone can reach it.
+services:
+  postgres:
+    image: postgres:17-alpine
+    networks: [db]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: .
+    environment:
+      # The password travels as PGPASSWORD, which the driver reads when the URL
+      # carries none, so it needs no URL encoding. The user and database names
+      # go into the URL as they are: keep them to letters, digits and _ - .
+      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      # The proxied LLM API: the one backend listener published.
+      LLMPROXY_LISTEN_ADDR: ":8080"
+      # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
+      # network only; no ports entry publishes either. A scraper must join
+      # `metrics` and scrape http://backend-metrics:9090/metrics.
+      LLMPROXY_WEB_ADDR: "backend-web:8081"
+      LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
+      LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
+      LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL:-}
+      LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
+      # Where clients reach the proxied API; shown in the cabinet's connection
+      # instructions. A local default - every deployment overrides it.
+      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
+      # Only because this local stack serves the web interface over plain http:
+      # a Secure cookie would not be sent back. Behind TLS, leave it unset (true).
+      LLMPROXY_COOKIE_SECURE: "false"
+      # Required, at least 32 bytes, when OIDC sign-in is on.
+      LLMPROXY_SESSION_KEY: ${LLMPROXY_SESSION_KEY:-}
+      # OIDC sign-in is on when an issuer is set.
+      LLMPROXY_OIDC_ISSUER: ${LLMPROXY_OIDC_ISSUER:-}
+      LLMPROXY_OIDC_CLIENT_ID: ${LLMPROXY_OIDC_CLIENT_ID:-}
+      LLMPROXY_OIDC_CLIENT_SECRET: ${LLMPROXY_OIDC_CLIENT_SECRET:-}
+      LLMPROXY_OIDC_REDIRECT_URL: ${LLMPROXY_OIDC_REDIRECT_URL:-}
+      LLMPROXY_OIDC_REQUIRED_GROUP: ${LLMPROXY_OIDC_REQUIRED_GROUP:-}
+      LLMPROXY_OIDC_ALLOW_SIGNUP: ${LLMPROXY_OIDC_ALLOW_SIGNUP:-}
+      LLMPROXY_OIDC_DEFAULT_POLICY: ${LLMPROXY_OIDC_DEFAULT_POLICY:-}
+      LLMPROXY_OIDC_GROUP_POLICY: ${LLMPROXY_OIDC_GROUP_POLICY:-}
+      LLMPROXY_OIDC_GROUPS_CLAIM: ${LLMPROXY_OIDC_GROUPS_CLAIM:-}
+      LLMPROXY_OIDC_DISPLAY_NAME: ${LLMPROXY_OIDC_DISPLAY_NAME:-}
+      # false turns the email-and-password form off (an OIDC-only installation).
+      LLMPROXY_LOCAL_LOGIN: ${LLMPROXY_LOCAL_LOGIN:-}
+    networks:
+      web:
+        aliases: [backend-web]
+      db: {}
+      metrics:
+        aliases: [backend-metrics]
+    volumes:
+      - grants:/var/lib/llmproxy/auths
+      - runtime:/var/lib/llmproxy/runtime
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # On SIGTERM, requests in flight get 30 s to finish (streams included), then
+    # writing the queued usage records up to 5 s; give it that long before SIGKILL.
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    build: ../frontend
+    environment:
+      # The backend's web listener, on the `web` network.
+      BACKEND_ORIGIN: http://backend:8081
+    networks: [web]
+    ports:
+      - "8081:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  web:
+  db:
+  metrics:
+
+volumes:
+  pgdata:
+  # The vendors' OAuth grants: losing this volume means signing every vendor
+  # account in again.
+  grants:
+  runtime:

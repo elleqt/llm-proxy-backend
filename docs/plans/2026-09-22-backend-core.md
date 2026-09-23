@@ -179,11 +179,11 @@ Expected: PASS.
 - [ ] **Step 7: Add Makefile**
 
 ```makefile
-.PHONY: test lint generate build
+.PHONY: test generate build
 test:
-	go test ./...
+	go test ./... -race
 generate:
-	go run github.com/vektra/mockery/v3@v3.5.1
+	go run github.com/vektra/mockery/v3@v3.8.0
 build:
 	go build ./...
 ```
@@ -314,29 +314,31 @@ git commit -m "feat: docker compose with postgres, backend and frontend"
 ## Task 3: Migrations and the Postgres test harness
 
 **Files:**
-- Create: `internal/infra/postgres/migrations/0001_init.sql`, `internal/infra/postgres/migrate.go`, `internal/infra/postgres/pool.go`, `internal/infra/postgres/testing.go`
+- Create: `internal/infra/postgres/migrations/0001_init.sql`, `internal/infra/postgres/migrate.go`, `internal/infra/postgres/pool.go`, `internal/infra/postgres/pgtest/pgtest.go`
 - Test: `internal/infra/postgres/migrate_test.go`
 
 **Interfaces:**
-- Produces: `postgres.Migrate(ctx context.Context, dsn string) error`; `postgres.NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error)`; `postgres.NewTestPool(t *testing.T) *pgxpool.Pool` — starts a container, applies migrations, returns a pool on a schema unique to the test.
+- Produces: `postgres.Migrate(ctx context.Context, dsn string) error`; `postgres.NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error)`; `pgtest.NewTestPool(t *testing.T) *pgxpool.Pool` — starts a container, applies migrations, returns a pool on a schema unique to the test.
 
 - [ ] **Step 1: Write the failing migration test**
 
 ```go
 // internal/infra/postgres/migrate_test.go
-package postgres
+package postgres_test // external: pgtest imports postgres, so an in-package test would cycle
 
 import (
 	"context"
 	"testing"
+
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 )
 
 func TestMigrateCreatesUsersTable(t *testing.T) {
-	pool := NewTestPool(t)
+	pool := pgtest.NewTestPool(t)
 	var exists bool
 	err := pool.QueryRow(context.Background(),
 		`SELECT EXISTS (SELECT 1 FROM information_schema.tables
-		                WHERE table_name = 'users')`).Scan(&exists)
+		                WHERE table_schema = 'public' AND table_name = 'users')`).Scan(&exists)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -349,7 +351,7 @@ func TestMigrateCreatesUsersTable(t *testing.T) {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/infra/postgres/ -run TestMigrate -v`
-Expected: FAIL — `NewTestPool` undefined.
+Expected: FAIL — `pgtest.NewTestPool` undefined.
 
 - [ ] **Step 3: Write the initial migration**
 
@@ -358,7 +360,7 @@ Expected: FAIL — `NewTestPool` undefined.
 CREATE TABLE users (
     id                   uuid PRIMARY KEY,
     kind                 text NOT NULL CHECK (kind IN ('human', 'service')),
-    email                text UNIQUE,
+    email                text,
     display_name         text NOT NULL DEFAULT '',
     role                 text NOT NULL CHECK (role IN ('user', 'admin')),
     status               text NOT NULL CHECK (status IN ('active', 'blocked')),
@@ -394,7 +396,10 @@ CREATE TABLE pending_identities (
 CREATE TABLE sessions (
     id         text PRIMARY KEY,
     user_id    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    restricted boolean NOT NULL DEFAULT false,
+    -- No `restricted` column, deliberately. The restriction is derived at read time
+    -- from users.must_change_password; storing it too would be two copies of one fact,
+    -- and a session opened before an administrator issues a temporary password would
+    -- stay unrestricted. Derived, the divergence is unrepresentable.
     ip         text NOT NULL DEFAULT '',
     user_agent text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now(),
@@ -437,6 +442,15 @@ CREATE TABLE usage_events (
     vendor_account_id   text NOT NULL DEFAULT ''
 );
 
+-- Uniqueness must be case-insensitive because ByEmail is: a plain UNIQUE would let
+-- A@example.com and a@example.com both exist, and the lookup would then silently
+-- return an arbitrary one of two rows with possibly different role, status and policy.
+-- Sign-in and the bootstrap-admin idempotence check both read through it, so an
+-- ambiguous answer there is an authentication-correctness problem. Enforcing it in the
+-- schema binds every writer; lower-casing on write would bind only this repository and
+-- would destroy the display capitalisation the cabinet renders.
+CREATE UNIQUE INDEX users_email_lower_key ON users (lower(email));
+
 CREATE INDEX usage_events_user_at_idx ON usage_events (user_id, at DESC);
 CREATE INDEX usage_events_at_idx ON usage_events (at DESC);
 
@@ -471,6 +485,12 @@ DROP TABLE settings, login_attempts, audit_events, usage_events, api_tokens,
            sessions, pending_identities, user_identities, user_passwords, users;
 ```
 
+> **As built (noted 2026-09-23):** the shipped `internal/infra/postgres/migrate.go` differs from
+> the block below — it is organised around `withProvider` and `report` helpers — and
+> `migrations/0001_init.sql` differs from the SQL above: it was amended in place while nothing
+> was released (it carries `model_prices`, among others) and is still the only migration. The
+> files are authoritative; the blocks are the original brief.
+
 - [ ] **Step 4: Implement migrate, pool and the test harness**
 
 ```go
@@ -481,8 +501,11 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
+	"io/fs"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/pressly/goose/v3"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
@@ -490,18 +513,42 @@ import (
 //go:embed migrations/*.sql
 var migrations embed.FS
 
+// Migrate applies every pending migration. It holds no goose package state:
+// NewProvider takes the filesystem and dialect as arguments, so two concurrent
+// callers cannot race on shared globals.
 func Migrate(ctx context.Context, dsn string) error {
+	// pgx parses the DSN lazily, inside Connect — sql.Open only fails on an
+	// unregistered driver name, which the blank import rules out. So there is no
+	// point guarding here; the leak, if any, surfaces from provider.Up below.
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return fmt.Errorf("postgres: open: %w", err)
 	}
 	defer func() { _ = db.Close() }()
 
-	goose.SetBaseFS(migrations)
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("postgres: dialect: %w", err)
+	// goose globs sources at the FILESYSTEM ROOT, and the embed root holds only the
+	// migrations/ directory — passing `migrations` directly finds nothing and silently
+	// migrates an empty set. fs.Sub rebases it so the .sql files sit at the root.
+	root, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		return fmt.Errorf("postgres: migrations fs: %w", err)
 	}
-	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, root)
+	if err != nil {
+		return fmt.Errorf("postgres: provider: %w", err)
+	}
+
+	if _, err := provider.Up(ctx); err != nil {
+		// Classify before reporting. A malformed DSN reaches us as
+		// *pgconn.ParseConfigError, whose own redaction is documented best-effort
+		// and cannot guarantee the password is masked when the string is too
+		// ambiguous to parse — so that one is replaced wholesale. Every other
+		// failure is goose or SQL: SQLSTATE and the failing statement, no DSN,
+		// and exactly what an operator needs.
+		var parseErr *pgconn.ParseConfigError
+		if errors.As(err, &parseErr) {
+			return errors.New("postgres: migrate: invalid connection string")
+		}
 		return fmt.Errorf("postgres: migrate: %w", err)
 	}
 	return nil
@@ -509,24 +556,37 @@ func Migrate(ctx context.Context, dsn string) error {
 ```
 
 ```go
-// internal/infra/postgres/testing.go
-package postgres
+// internal/infra/postgres/pgtest/pgtest.go
+//
+// Separate package on purpose: this file links the whole testcontainers and Docker
+// client stack, and anything importing it drags that into its binary. Keeping it out
+// of package postgres keeps cmd/gateway free of it. Import only from _test.go files.
+package pgtest
 
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 )
 
-// NewTestPool starts a disposable Postgres, applies migrations and returns a pool.
-// Each call gets its own database, so tests never see each other's rows.
+// NewTestPool starts a disposable Postgres container, applies migrations and returns
+// a pool bound to it. Isolation is per-container: every call gets its own database
+// server, so tests never see each other's rows and order never matters. The cost is
+// roughly two seconds per call, which is why callers should not create more pools
+// than they need.
 func NewTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
+	// A stalled image pull must fail this test, not hang until the package deadline
+	// and take every other test in the package down with a goroutine dump.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	t.Cleanup(cancel)
 
 	container, err := tcpostgres.Run(ctx, "postgres:17-alpine",
 		tcpostgres.WithDatabase("test"),
@@ -534,16 +594,18 @@ func NewTestPool(t *testing.T) *pgxpool.Pool {
 		tcpostgres.WithPassword("test"),
 		testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp")),
 	)
+	// Run can return a live container alongside an error; register cleanup before
+	// the error check or a started-but-unhealthy container leaks until session end.
+	testcontainers.CleanupContainer(t, container)
 	if err != nil {
 		t.Fatalf("start postgres: %v", err)
 	}
-	t.Cleanup(func() { _ = container.Terminate(ctx) })
 
 	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
 	}
-	if err := Migrate(ctx, dsn); err != nil {
+	if err := postgres.Migrate(ctx, dsn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	pool, err := pgxpool.New(ctx, dsn)
@@ -635,6 +697,23 @@ func TestPolicyAllows(t *testing.T) {
 		{"everything", []string{"*:*"}, "anything", "any-model", true},
 		{"empty policy allows nothing", nil, "chatgpt", "gpt-5.6", false},
 		{"provider match is case-insensitive", []string{"ChatGPT:*"}, "chatgpt", "gpt-5.6", true},
+		// Model identifiers carrying the separators that broke the first grammar.
+		{"colon inside the model id", []string{"ollama:llama3:70b"}, "ollama", "llama3:70b", true},
+		{"colon id is not over-granted", []string{"ollama:llama3:70b"}, "ollama", "llama3:8b", false},
+		{"glob over a colon-versioned id",
+			[]string{"bedrock:anthropic.claude-3-opus-*"}, "bedrock", "anthropic.claude-3-opus-20240229-v1:0", true},
+		{"slash inside the model id", []string{"openrouter:openai/gpt-4o"}, "openrouter", "openai/gpt-4o", true},
+		{"glob crosses a slash",
+			[]string{"openrouter:*claude*"}, "openrouter", "anthropic/claude-sonnet-4.6", true},
+		{"leading star is not dropped", []string{"openrouter:*gpt-4o"}, "openrouter", "openai/gpt-4o", true},
+		{"question mark matches exactly one character",
+			[]string{"claude:claude-sonnet-?"}, "claude", "claude-sonnet-5", true},
+		{"question mark does not match two",
+			[]string{"claude:claude-sonnet-?"}, "claude", "claude-sonnet-55", false},
+		{"pattern is anchored at both ends",
+			[]string{"claude:sonnet"}, "claude", "claude-sonnet-5", false},
+		{"metacharacters are literal, not regexp",
+			[]string{"claude:claude.sonnet"}, "claude", "claudexsonnet", false},
 	}
 
 	for _, tc := range cases {
@@ -655,7 +734,10 @@ func TestPolicyAllows(t *testing.T) {
 }
 
 func TestParseRuleRejectsMalformed(t *testing.T) {
-	for _, raw := range []string{"", "chatgpt", ":model", "chatgpt:", "a:b:c"} {
+	// "a:b:c" is deliberately absent: splitting on the first colon only makes it a
+	// valid rule for provider "a", pattern "b:c" — which is what a versioned or
+	// tagged model identifier needs.
+	for _, raw := range []string{"", "chatgpt", ":model", "chatgpt:", "   ", ":"} {
 		if _, err := ParseRule(raw); err == nil {
 			t.Fatalf("ParseRule(%q) = nil error, want error", raw)
 		}
@@ -677,16 +759,30 @@ package access
 import (
 	"errors"
 	"fmt"
-	"path"
+	"regexp"
 	"strings"
 )
 
 // Rule allows one provider and the models matching ModelPattern.
-// ModelPattern uses shell glob syntax; "*" means every model of the provider,
-// including models published after the rule was written.
+//
+// ModelPattern is a glob over the whole model identifier: "*" matches any run of
+// characters including "/" and ":", and "?" matches exactly one. It is deliberately
+// NOT path.Match — model identifiers are not paths. Real ones carry both separators
+// (OpenRouter "openai/gpt-4o", Ollama "llama3:70b", Bedrock "…-v1:0"), and under
+// path semantics a natural rule like "*claude*" would silently match none of them.
+//
+// "*" alone means every model of the provider, including models published after the
+// rule was written: the pattern is evaluated per request against the live catalogue,
+// never expanded into a list when the rule is granted.
 type Rule struct {
 	Provider     string
 	ModelPattern string
+
+	// re is the compiled form of ModelPattern, built once by ParseRule. A Rule is
+	// evaluated on every proxied request against every catalogue entry, so compiling
+	// per call would be the hottest allocation in the gate. A hand-built Rule leaves
+	// it nil and matches compiles on demand.
+	re *regexp.Regexp
 }
 
 // Policy is an allow-list. Order is irrelevant: a request is permitted when any
@@ -695,29 +791,74 @@ type Policy []Rule
 
 var ErrMalformedRule = errors.New("access: malformed rule")
 
+// ParseRule splits on the FIRST colon only. The provider half is an operator-chosen
+// name and never contains a colon; the model half frequently does, so splitting on
+// every colon would make whole providers inexpressible.
 func ParseRule(s string) (Rule, error) {
-	parts := strings.Split(strings.TrimSpace(s), ":")
-	if len(parts) != 2 {
+	provider, pattern, found := strings.Cut(strings.TrimSpace(s), ":")
+	if !found {
 		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
 	}
-	provider, pattern := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	provider, pattern = strings.TrimSpace(provider), strings.TrimSpace(pattern)
 	if provider == "" || pattern == "" {
 		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
 	}
-	return Rule{Provider: strings.ToLower(provider), ModelPattern: strings.ToLower(pattern)}, nil
+	// Every pattern compiles by construction: compileGlob quotes everything that is
+	// not "*" or "?", so unlike path.Match there is no such thing as a malformed model
+	// glob here. "claude:[opus" is therefore a literal that matches a model actually
+	// named "[opus" — predictable rather than silently unmatchable.
+	re, err := compileGlob(strings.ToLower(pattern))
+	if err != nil {
+		return Rule{}, fmt.Errorf("%w: %q: %v", ErrMalformedRule, s, err)
+	}
+	return Rule{
+		Provider:     strings.ToLower(provider),
+		ModelPattern: strings.ToLower(pattern),
+		re:           re,
+	}, nil
 }
 
 func (r Rule) String() string { return r.Provider + ":" + r.ModelPattern }
+
+// compileGlob turns a model glob into an anchored regexp: "*" becomes ".*" and "?"
+// becomes ".", every other character is quoted. Quoting is what keeps a stored rule
+// from smuggling in alternation, anchors or a catastrophic backtrack.
+//
+// It returns an error only for a pattern that cannot compile, which is why ParseRule
+// can use it as a validator.
+func compileGlob(pattern string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	b.WriteByte('^')
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteByte('$')
+	return regexp.Compile(b.String())
+}
 
 func (r Rule) matches(provider, model string) bool {
 	if r.Provider != "*" && r.Provider != strings.ToLower(provider) {
 		return false
 	}
+	// The common grant. Short-circuits before any matching work.
 	if r.ModelPattern == "*" {
 		return true
 	}
-	ok, err := path.Match(r.ModelPattern, strings.ToLower(model))
-	return err == nil && ok
+	re := r.re
+	if re == nil { // hand-built Rule, not produced by ParseRule
+		var err error
+		if re, err = compileGlob(r.ModelPattern); err != nil {
+			return false
+		}
+	}
+	return re.MatchString(strings.ToLower(model))
 }
 
 func (p Policy) Allows(provider, model string) bool {
@@ -1095,12 +1236,15 @@ type UserRepo interface {
 	ByEmail(ctx context.Context, email string) (identity.User, error)
 	UpdatePolicy(ctx context.Context, id uuid.UUID, p access.Policy) error
 	TouchLastSeen(ctx context.Context, id uuid.UUID, at time.Time) error
-	// SaveIdentityState persists policy and policy source after an IdP login.
+	// SaveIdentityState persists the fields an IdP login owns: policy, policy source,
+	// display name and email. It does NOT touch role, status or must_change_password —
+	// those stay administrator-owned even for a federated user.
 	SaveIdentityState(ctx context.Context, u identity.User) error
 }
 
 type TokenRepo interface {
 	Create(ctx context.Context, t credentials.Token) error
+	ByID(ctx context.Context, id uuid.UUID) (credentials.Token, error)
 	ByHash(ctx context.Context, hash string) (credentials.Token, error)
 	ListByUser(ctx context.Context, userID uuid.UUID) ([]credentials.Token, error)
 	Save(ctx context.Context, t credentials.Token) error
@@ -1231,19 +1375,24 @@ Doubles that are not mocks — trivial no-op implementations used across several
 
 ```go
 // internal/app/helpers_test.go
-package app
+//
+// EXTERNAL test package, and this is not a style choice: internal/app/mocks imports
+// internal/app, so any test declared `package app` that touches a generated mock is an
+// import cycle. Every app-layer test file in this plan is `package app_test`.
+package app_test
 
 import (
 	"context"
 	"testing"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 )
 
 type nopAudit struct{}
 
-func (nopAudit) Record(context.Context, AuditEvent) error { return nil }
+func (nopAudit) Record(context.Context, app.AuditEvent) error { return nil }
 
 type systemClock struct{}
 
@@ -1271,7 +1420,7 @@ func (discardLogger) Warnf(string, ...any) {}
 
 ```go
 // internal/infra/postgres/tokens_test.go
-package postgres
+package postgres_test // external: pgtest imports postgres, so an in-package test would cycle
 
 import (
 	"context"
@@ -1284,12 +1433,14 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 )
 
 func TestTokenRoundTripByHash(t *testing.T) {
 	ctx := context.Background()
-	pool := NewTestPool(t)
-	users, tokens := NewUserRepo(pool), NewTokenRepo(pool)
+	pool := pgtest.NewTestPool(t)
+	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
 
 	owner := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	if err := users.Create(ctx, owner); err != nil {
@@ -1310,7 +1461,7 @@ func TestTokenRoundTripByHash(t *testing.T) {
 }
 
 func TestTokenByHashUnknownReturnsNotFound(t *testing.T) {
-	_, err := NewTokenRepo(NewTestPool(t)).ByHash(context.Background(), "nope")
+	_, err := postgres.NewTokenRepo(pgtest.NewTestPool(t)).ByHash(context.Background(), "nope")
 	if err != app.ErrNotFound {
 		t.Fatalf("err = %v, want app.ErrNotFound", err)
 	}
@@ -1318,8 +1469,8 @@ func TestTokenByHashUnknownReturnsNotFound(t *testing.T) {
 
 func TestTouchLastUsed(t *testing.T) {
 	ctx := context.Background()
-	pool := NewTestPool(t)
-	users, tokens := NewUserRepo(pool), NewTokenRepo(pool)
+	pool := pgtest.NewTestPool(t)
+	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
 
 	owner := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	_ = users.Create(ctx, owner)
@@ -1447,8 +1598,9 @@ git commit -m "feat: application ports, generated mocks and postgres repositorie
 - Test: `internal/app/tokens_test.go`
 
 **Interfaces:**
-- Produces: `app.TokenService` with `NewTokenService(users UserRepo, tokens TokenRepo, audit AuditSink, clock Clock) *TokenService`; `Issue(ctx, actor identity.User, owner uuid.UUID, label string) (credentials.Token, string, error)`; `Revoke(ctx, actor identity.User, tokenID uuid.UUID) error`; `List(ctx, actor identity.User, owner uuid.UUID) ([]credentials.Token, error)`.
-- Consumes: `app.UserRepo`, `app.TokenRepo`, `app.Clock` and their generated mocks from Task 7.
+- Produces: `app.TokenService` with `NewTokenService(users UserRepo, tokens TokenRepo, audit AuditSink, clock Clock, logger Logger) *TokenService`; `Issue(ctx, actor identity.User, owner uuid.UUID, label string) (credentials.Token, string, error)`; `Revoke(ctx, actor identity.User, tokenID uuid.UUID) error`; `List(ctx, actor identity.User, owner uuid.UUID) ([]credentials.Token, error)`.
+- Consumes: `app.UserRepo`, `app.TokenRepo`, `app.AuditSink`, `app.Clock`, `app.Logger` and their generated mocks from Task 7.
+- **The `Logger` is load-bearing, not decoration.** When the audit sink fails after the token row is already durable, `Issue` revokes the row to compensate; if that compensating write also fails, a live unaudited credential exists and the warning is the only trace an operator will ever see. Task 18 must wire a real logger, never a discard.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1456,7 +1608,7 @@ These two cases encode the ownership rule from the spec: a person manages their 
 
 ```go
 // internal/app/tokens_test.go
-package app
+package app_test
 
 import (
 	"context"
@@ -1464,6 +1616,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/stretchr/testify/mock"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -1471,18 +1626,18 @@ import (
 
 func TestIssueForOtherUserRequiresAdmin(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := NewTokenService(users, tokens, nopAudit{}, clock)
+	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	_, _, err := svc.Issue(context.Background(), actor, uuid.New(), "someone else")
-	if err != ErrForbidden {
+	if err != app.ErrForbidden {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
 }
 
 func TestAdminIssuesForServiceAccount(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := NewTokenService(users, tokens, nopAudit{}, clock)
+	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	service := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	users.EXPECT().ByID(mock.Anything, service.ID).Return(service, nil)
@@ -1615,16 +1770,19 @@ func TestFullSessionPasses(t *testing.T) {
 - [ ] **Step 5: Write the failing service-account sign-in test**
 
 ```go
-// internal/app/auth_test.go — add to the file
+// internal/app/auth_test.go — add to the file.
+// package app_test, like every app-layer test here: qualify app-layer identifiers
+// (app.NewAuthService, app.ErrInvalidCredentials, app.SessionMeta) with app.
 func TestServiceAccountCannotSignInThroughTheService(t *testing.T) {
 	users := mocks.NewUserRepo(t)
-	svc := NewAuthService(users, nil, nopAudit{}, systemClock{})
+	svc := app.NewAuthService(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t),
+		nopAudit{}, systemClock{})
 
 	service := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	users.EXPECT().ByEmail(mock.Anything, "chat-panel@example.com").Return(service, nil)
 
-	_, err := svc.SignIn(context.Background(), "chat-panel@example.com", "whatever", SessionMeta{})
-	if err != ErrInvalidCredentials {
+	_, err := svc.SignIn(context.Background(), "chat-panel@example.com", "whatever", app.SessionMeta{})
+	if err != app.ErrInvalidCredentials {
 		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 	}
 }
@@ -1776,18 +1934,27 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	"github.com/gin-gonic/gin"
+	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 type Params struct {
 	Config     *cliproxyconfig.Config
 	ConfigPath string // required by Build; never read because our watcher owns config
 	Middleware []gin.HandlerFunc
-	UsagePlugin usagePlugin
+	UsagePlugin cliproxyusage.Plugin
+	// Cooldown is what NewCoreAuthManager returned alongside the manager.
+	Cooldown coreauth.CooldownStateStore
+	// CoreAuth is required in production too: Service exposes no getter and the
+	// admin surface needs the manager handle. Tests pass one carrying faketest.Executor.
+	CoreAuth *coreauth.Manager
 }
 
 type Gateway struct {
@@ -1815,6 +1982,12 @@ func New(p Params) (*Gateway, error) {
 	if len(p.Middleware) > 0 {
 		builder = builder.WithServerOptions(sdkapi.WithMiddleware(p.Middleware...))
 	}
+	if p.CoreAuth != nil {
+		builder = builder.WithCoreAuthManager(p.CoreAuth)
+		if p.Cooldown != nil {
+			builder = builder.WithCooldownStateStore(p.Cooldown)
+		}
+	}
 
 	svc, err := builder.Build()
 	if err != nil {
@@ -1825,6 +1998,21 @@ func New(p Params) (*Gateway, error) {
 	}
 	g.svc = svc
 	return g, nil
+}
+
+// NewCoreAuthManager builds the manager the way the upstream builder would, so a
+// self-supplied manager keeps the auth directory and cooldown persistence the
+// default path sets up (builder.go:253-266).
+func NewCoreAuthManager(authDir string) (*coreauth.Manager, coreauth.CooldownStateStore) {
+	store := sdkauth.GetTokenStore()
+	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
+		setter.SetBaseDir(authDir)
+	}
+	var cooldown coreauth.CooldownStateStore
+	if provider, ok := store.(coreauth.CooldownStateStoreProvider); ok {
+		cooldown = provider.CooldownStateStore()
+	}
+	return coreauth.NewManager(store, nil, nil), cooldown
 }
 
 func (g *Gateway) Run(ctx context.Context) error { return g.svc.Run(ctx) }
@@ -1886,6 +2074,149 @@ git commit -m "feat: embed upstream proxy with struct-pushed config and a fake p
 
 ---
 
+## Amendments after Task 10 — binding on Tasks 11-18
+
+Task 10 and an experiment against upstream v7.3.12 changed facts the original Tasks 11-18
+text assumed. Where a task section below disagrees with this section, **this section wins.**
+
+### A1. The test harness is the wire-level fake, not `faketest.Executor`
+
+`faketest.Executor` is unreachable through the embedded server: a real request resolves its
+provider from the global model registry by model name before the auth manager is called, and
+every config application re-registers executors, overwriting an executor-level fake. The fake
+that works is `faketest.Vendor` behind `faketest.Start` (an `httptest.Server`), declared in the
+**boot** configuration as an `openai-compatibility` entry via `faketest.Compatibility`. See
+`startOnTheWireWith` and `productionParams` in `internal/infra/gateway/wire_test.go`.
+
+- Config-derived credentials (`*-api-key`, `openai-compatibility`) cannot be added by
+  `PushConfig`; they must be in the boot configuration.
+- To test cross-provider policy, declare **two** compatibility entries (two vendors) at boot.
+- `faketest.Executor` stays for conductor-level tests only (failover, retry, mid-stream death).
+- Tests in the gateway package share process-global upstream state and are not parallel. Give
+  every test unique model and alias names, as `startOnTheWireWith` already does.
+
+### A2. Account changes go through the gateway, never the manager directly
+
+`Gateway.AddAccount`, `SetAccountDisabled` and `RemoveAccount` exist because a bare
+`coreauth.Manager.Register` leaves an account unroutable and a bare `Remove` leaves its models
+listed. Nothing outside the gateway calls the manager's mutating methods.
+
+### A3. Boot contract: no push and no account change immediately after boot
+
+`WaitReload` returns before upstream finishes registering models, and upstream reads its
+config without a lock there. The composition root builds the boot configuration from the
+database **before** `New`; the first `PushConfig` or account change comes from an
+administrator's edit.
+
+### A4. Access control must be structurally closed
+
+Upstream's access manager **admits every request when it has no providers**
+(`sdk/access/manager.go`: `len(providers) == 0` → `nil, nil`), and its built-in
+`config-api-key` provider unregisters itself when `APIKeys` is empty. So:
+
+- Our provider is registered explicitly in `New` (not in `init`) and made exclusive with
+  `sdkaccess.SetExclusiveProvider`, so no other provider can admit a request.
+- `admit` rejects a non-empty `Config.APIKeys`: a config key belongs to no user, so the policy
+  gate cannot apply a policy to it — it would be a master key that bypasses per-user limits.
+- **The policy gate is the real guard and is default-deny.** It runs before upstream's auth and
+  answers 401 itself when a proxied request carries no resolvable, active token. It never
+  "delegates to upstream to answer 401": if upstream's access were ever open, delegation would
+  admit the request. The gate covers every path except an explicit allowlist of the service's
+  own non-proxy routes.
+- A test proves an uncredentialed request through the real server gets 401, and still does
+  after a `PushConfig`.
+
+### A5. Principal format and single resolution
+
+`Principal.String()` is `"<userID>:<tokenID>"` and `ParsePrincipal` reverses it; upstream copies
+the principal into `usage.Record.APIKey`, which is how the usage sink attributes a record to a
+user and a token without another lookup. The gate resolves the token once and places the
+principal on the request context under an unexported key; the access provider trusts that value
+and only resolves itself when it is absent. One database lookup per request, not two.
+
+A token authenticates only when it is active **and** its owner's status is active — a blocked
+user's tokens stop working immediately. That rule lives in the domain as
+`identity.User.CanUseAPI()` (human or service, status active), next to `CanSignIn()`, and is not
+re-derived anywhere else.
+
+### A6. Model-to-provider resolution uses upstream's registry hook, not name prefixes
+
+The original Task 12 derived a provider from a model-name prefix (`claude-*` → claude). That
+silently fails for `openai-compatibility` models and any new vendor. Instead, a `Catalog`
+implements `cliproxy.ModelRegistryHook` (`OnModelsRegistered(ctx, provider, clientID, models)`,
+`OnModelsUnregistered(ctx, provider, clientID)`), installed with
+`cliproxy.SetGlobalModelRegistryHook`. It keeps `clientID → (provider, models)` and answers
+`ProvidersFor(model) []string` — the same source upstream routes from.
+
+> **Superseded 2026-09-23 by the Task 12 review — the hook mechanism above is history, not the
+> contract.** An asynchronous mirror fed by the hook is fail-open while a provider's model set is
+> still growing: for a moment the mirror knows fewer providers for a model than upstream can
+> route it to, and the gate would check only those. The hook, the mirror and every
+> `ModelRegistryHook` symbol were removed. `Catalog` (`internal/infra/gateway/catalog.go`) now
+> reads upstream's registry synchronously, at the moment it is asked, through the call upstream
+> itself routes by: `newCatalog` asserts `cliproxy.GlobalModelRegistry()` to an interface with
+> `GetModelProviders(modelID)` (not declared by the SDK's `ModelRegistry` interface, but exported
+> by the concrete registry) and `GetAvailableModels(handlerType)`, and `gateway.New` refuses to
+> start (`ErrModelRegistry`) if an upgrade removes them. The rules below are unchanged and still
+> bind.
+
+- **Policy provider names** are upstream provider keys with one naming layer: `codex` →
+  `chatgpt`; `openai-compatible-<name>` → `<name>`; everything else unchanged. The mapping lives
+  in one function.
+- A model served by several providers is allowed only if the policy allows **every** provider
+  serving it — otherwise upstream's routing could hand the request to a provider the user may
+  not use.
+- A model with no known provider is denied (403): fail closed.
+- `/v1/models` filtering (Task 13) uses the same catalogue and the same rule.
+
+### A7. Metrics are not on the public listener
+
+`/metrics` is served on a separate listen address (`LLMPROXY_METRICS_ADDR`, default
+`127.0.0.1:9090` in code, exposed only inside the compose network), never on the API listener
+the reverse proxy publishes.
+
+### A8. The web API has its own listener
+
+`/api/*` (auth, cabinet, and later admin) is served on `LLMPROXY_WEB_ADDR`, a listener separate
+from the proxied API, reachable only from the frontend container. Task 18 builds its router for
+that listener; it is not mounted on the embedded upstream's engine. The proxied listener's gate
+therefore never needs to know web routes, and `/api/admin` is not served on the public API name.
+Request and response types for `/api/*` are generated from `api/openapi.yaml` (oapi-codegen,
+types only); a contract change must break the build. Mutating `/api/*` requests require
+`Content-Type: application/json` (415 otherwise) — with a `SameSite=Lax` cookie that closes
+cross-site form posts.
+
+### A9. The proxied listener serves an explicit route allow-list (after Task 11 review)
+
+Task 11's review found two authenticators that bypass our access provider and a route that adds
+accounts to the shared pool: `/v1/ws` (any token holder attaches an `aistudio` account whose
+socket then receives other users' prompts) and `/v1/realtime*` (an `ek_` client secret minted
+once keeps working after the token is revoked or the owner blocked). A default-deny gate that
+treats "GET without a model" like `/v1/models` would let `/v1/ws` through. So, in Task 12:
+
+- The gateway registers, in `New`, a route classification every request passes: **model routes**
+  (a model named in the body or path; policy-gated), **listing routes** (`GET /v1/models` and its
+  provider-specific equivalents; filtered per user by Task 13), and nothing else. Every other
+  path answers 404 before any upstream handler, including `/v1/ws`, `/v1/realtime*`, management
+  and pprof. The classification is a table in one place.
+- A test boots the real server, walks `engine.Routes()` and fails if any route upstream
+  registered is unclassified, so an upstream upgrade that adds a route breaks the build instead
+  of opening a hole.
+- A real-server test proves a valid token on `/v1/ws` is refused and no `aistudio` account is
+  registered, and that `/v1/realtime/client_secrets` is refused.
+- The gate's 401 body is byte-identical to upstream's (`{"error":"Invalid API key"}` /
+  `"Missing API key"`), so a gate refusal cannot be told from a provider refusal.
+- The provider is resolved through A6's catalogue, never a name prefix; the brief's prefix table
+  is void. Models named in the path (`/v1beta/models/{model}:...`) are extracted too.
+- Folded in from Task 11's minors: claim the exclusive access provider in an `OnBeforeStart`
+  hook as well, so no request is served before the claim; `admit` refuses `Plugins.Enabled`
+  (plugins are the only other way a provider enters the registry).
+- Test doubles changed shape in Task 11: `staticResolver` is a function type returning
+  `app.ErrInvalidCredentials`, and `Principal` is `app.Principal`. The brief's test code is
+  adapted, not copied.
+
+---
+
 ## Task 11: Access provider resolving a token to a principal
 
 **Files:**
@@ -1893,7 +2224,7 @@ git commit -m "feat: embed upstream proxy with struct-pushed config and a fake p
 - Test: `internal/infra/gateway/access_provider_test.go`
 
 **Interfaces:**
-- Produces: `gateway.NewAccessProvider(resolver TokenResolver) *AccessProvider` implementing `sdkaccess.Provider`; `gateway.TokenResolver` interface — `Resolve(ctx, secret string) (Principal, error)`; `gateway.Principal{UserID, TokenID uuid.UUID}`.
+- Produces (as built): `gateway.NewAccessProvider(resolver Resolver) *AccessProvider` implementing `sdkaccess.Provider`; `gateway.Resolver` interface — `Resolve(ctx, secret string) (app.Principal, access.Policy, error)`, one read returning the token's principal and its owner's policy; `app.Principal{UserID, TokenID uuid.UUID; Owner string}`, resolved in production by the `app.TokenResolver` struct (`app.NewTokenResolver(users, tokens)`). The brief's `gateway.TokenResolver` interface and `gateway.Principal` type were never built (see A9's note on test doubles).
 - Test doubles used across the gateway tests live in `internal/infra/gateway/helpers_test.go`:
   `staticResolver{secret string; principal Principal}` (returns the principal for its secret,
   `app.ErrNotFound` otherwise), `staticPolicy{policy access.Policy}`, `failingPolicy{err error}`,
@@ -2005,7 +2336,7 @@ git commit -m "feat: access provider resolving api tokens to principals"
 - Test: `internal/infra/gateway/policy_gate_test.go`, `internal/infra/gateway/model_extract_test.go`
 
 **Interfaces:**
-- Produces: `gateway.PolicyGate(resolver TokenResolver, users PolicyLookup) gin.HandlerFunc`; `gateway.PolicyLookup` interface — `PolicyFor(ctx, userID uuid.UUID) (access.Policy, error)`; `gateway.ExtractModel(c *gin.Context) (provider, model string, ok bool)`.
+- Produces (as built): the unexported `policyGate(resolver Resolver, catalog providerCatalog, observe GateObserver) gin.HandlerFunc`, installed by `gateway.New` from `Params.Resolver` and `Params.Observer`; there is no exported `PolicyGate` and no `PolicyLookup` — the owner's policy comes with the `Resolver`'s single read (A5). Models are extracted per route by the A9 route table's `modelSource` functions (`model_extract.go`), not by an exported `ExtractModel`, and the provider comes from A6's catalogue, not a name prefix.
 
 The gate runs before the upstream auth middleware (`engine.Use` at `server.go:140-142` versus route groups at `server.go:226`), so it resolves credentials itself rather than reading `c.Get("userApiKey")`.
 
@@ -2147,6 +2478,17 @@ git commit -m "feat: policy gate rejecting models outside the owner's policy"
 ---
 
 ## Task 13: Filter `/v1/models` per user
+
+> **Superseded 2026-09-23 by A9 — see `internal/infra/gateway/listing.go`.** The files, the
+> export and the middleware below were never built: there is no `models_filter.go`, no
+> `FilterModels` and no `PolicyLookup`. Listing filtering lives in the policy gate. The A9 route
+> table (`routes.go`) marks `GET /v1/models`, `GET /v1beta/models` and
+> `GET /v1beta/models/*action` as `routeListing`, each with a `listing` function
+> (`v1Models`, `geminiModels`, `geminiModel`). For those routes the gate authenticates, holds
+> back upstream's response, and keeps only the entries whose name the owner's policy covers on
+> every provider serving it (`access.Policy.Covers` through A6's catalogue) — one owner read per
+> request, the same rule as a model request. A successful list of an unexpected shape, or one
+> over 16 MiB, is not passed on (502). The steps below are kept as the original brief.
 
 **Files:**
 - Create: `internal/infra/gateway/models_filter.go`
@@ -2379,7 +2721,7 @@ func TestVendorQuotaGauges(t *testing.T) {
 
 - [ ] **Step 2: Implement the metric families**
 
-Register, with the `llmproxy_` prefix: `tokens_total{user,provider,model,kind}`, `requests_total{user,provider,model,status}`, `request_duration_seconds` (histogram), `ttft_seconds` (histogram), `policy_denied_total{user,model,reason}`, `auth_failures_total{reason}`, `vendor_quota_used_ratio{account,provider,window}`, `vendor_quota_reset_timestamp_seconds{...}`, `vendor_quota_observed_timestamp_seconds{...}`, `account_disabled{account,provider}`, `account_failures_total{account,provider}`, `build_info{version}`.
+Register, with the `llmproxy_` prefix (as built): `tokens_total{user,provider,model,service_tier,kind}`, `requests_total{user,provider,model,stream,status}`, `request_duration_seconds{provider,model,stream}` (histogram), `ttft_seconds{provider,model}` (histogram), `policy_denied_total{user,model,reason}`, `auth_failures_total{reason}`, `vendor_quota_used_ratio{account,provider,window}`, `vendor_quota_reset_timestamp_seconds{...}`, `vendor_quota_observed_timestamp_seconds{...}`, `account_disabled{account,provider}`, `account_failures_total{account,provider}`, `build_info{version}`; Plan B added `cost_usd_total{user,provider,model}` and `cost_unpriced_tokens_total{provider,model}`. No family carries a `token` label.
 
 No window-capacity estimate: only direct vendor signals.
 
@@ -2418,6 +2760,9 @@ These four cases are the closed-service guarantee.
 
 ```go
 // internal/app/oidc_test.go
+// package app_test, like every app-layer test here: qualify app-layer identifiers
+// (app.Claims, app.NewOIDCService, app.OIDCConfig, app.ErrForbidden, app.ErrNotFound,
+// app.SessionMeta) with app. The bodies below omit the prefix for readability only.
 func TestLoginRejectedWithoutRequiredGroup(t *testing.T) {
 	users, idp := mocks.NewUserRepo(t), mocks.NewIdentityProvider(t)
 	idp.EXPECT().Exchange(mock.Anything, "code").Return(Claims{
@@ -2426,7 +2771,7 @@ func TestLoginRejectedWithoutRequiredGroup(t *testing.T) {
 	}, nil)
 
 	svc := NewOIDCService(users, nil, idp, nopAudit{}, systemClock{}, OIDCConfig{
-		RequiredGroup: "/llm-access",
+		RequiredGroup: "/gate",
 		AllowSignUp:   true,
 	})
 
@@ -2442,7 +2787,7 @@ func TestUnknownSubjectRejectedWhenSignUpDisabled(t *testing.T) {
 	idp := mocks.NewIdentityProvider(t)
 	idp.EXPECT().Exchange(mock.Anything, "code").Return(Claims{
 		Issuer: "https://idp.example.com", Subject: "sub-unknown",
-		Email: "stranger@example.com", Groups: []string{"/llm-access"},
+		Email: "stranger@example.com", Groups: []string{"/gate"},
 	}, nil)
 	idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-unknown").
 		Return(uuid.Nil, ErrNotFound)
@@ -2450,7 +2795,7 @@ func TestUnknownSubjectRejectedWhenSignUpDisabled(t *testing.T) {
 		Return(uuid.Nil, ErrNotFound)
 
 	svc := NewOIDCService(users, idents, idp, nopAudit{}, systemClock{}, OIDCConfig{
-		RequiredGroup: "/llm-access",
+		RequiredGroup: "/gate",
 		AllowSignUp:   false,
 	})
 
@@ -2468,7 +2813,7 @@ func TestPendingIdentityLinksSubjectOnce(t *testing.T) {
 
 	idp.EXPECT().Exchange(mock.Anything, "code").Return(Claims{
 		Issuer: "https://idp.example.com", Subject: "sub-1",
-		Email: "invited@example.com", Groups: []string{"/llm-access"},
+		Email: "invited@example.com", Groups: []string{"/gate"},
 	}, nil)
 	idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-1").
 		Return(uuid.Nil, ErrNotFound)
@@ -2479,7 +2824,7 @@ func TestPendingIdentityLinksSubjectOnce(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, invited.ID).Return(invited, nil)
 
 	svc := NewOIDCService(users, idents, idp, nopAudit{}, systemClock{}, OIDCConfig{
-		RequiredGroup: "/llm-access", AllowSignUp: false,
+		RequiredGroup: "/gate", AllowSignUp: false,
 	})
 
 	if _, err := svc.Complete(context.Background(), "code", SessionMeta{}); err != nil {
@@ -2497,7 +2842,7 @@ func TestGroupMappingSetsPolicyAndMarksItIDPManaged(t *testing.T) {
 
 	idp.EXPECT().Exchange(mock.Anything, "code").Return(Claims{
 		Issuer: "https://idp.example.com", Subject: "sub-1",
-		Email: "user@example.com", Groups: []string{"/llm-access", "/llm-chatgpt"},
+		Email: "user@example.com", Groups: []string{"/gate", "/team-a"},
 	}, nil)
 	idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-1").
 		Return(existing.ID, nil)
@@ -2508,8 +2853,8 @@ func TestGroupMappingSetsPolicyAndMarksItIDPManaged(t *testing.T) {
 		Run(func(_ context.Context, u identity.User) { saved = u }).Return(nil)
 
 	svc := NewOIDCService(users, idents, idp, nopAudit{}, systemClock{}, OIDCConfig{
-		RequiredGroup: "/llm-access",
-		GroupPolicy:   map[string][]string{"/llm-chatgpt": {"chatgpt:*"}},
+		RequiredGroup: "/gate",
+		GroupPolicy:   map[string][]string{"/team-a": {"chatgpt:*"}},
 	})
 
 	if _, err := svc.Complete(context.Background(), "code", SessionMeta{}); err != nil {
@@ -2534,14 +2879,14 @@ func TestWithoutGroupMappingPolicyStaysLocal(t *testing.T) {
 
 	idp.EXPECT().Exchange(mock.Anything, "code").Return(Claims{
 		Issuer: "https://idp.example.com", Subject: "sub-1",
-		Email: "user@example.com", Groups: []string{"/llm-access"},
+		Email: "user@example.com", Groups: []string{"/gate"},
 	}, nil)
 	idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-1").
 		Return(existing.ID, nil)
 	users.EXPECT().ByID(mock.Anything, existing.ID).Return(existing, nil)
 
 	svc := NewOIDCService(users, idents, idp, nopAudit{}, systemClock{}, OIDCConfig{
-		RequiredGroup: "/llm-access",
+		RequiredGroup: "/gate",
 	})
 
 	if _, err := svc.Complete(context.Background(), "code", SessionMeta{}); err != nil {
@@ -2582,7 +2927,7 @@ git commit -m "feat: OIDC sign-in gated by group and sign-up policy"
 
 **Interfaces:**
 - Produces: `app.Bootstrap(ctx, users UserRepo, passwords PasswordRepo, email string) (string, error)` returning the generated password once, empty when an administrator already exists; `app.NewThrottle(attempts LoginAttemptRepo, maxFailures int, lockFor time.Duration) *Throttle` with `Check(ctx, email) error` (returns `ErrLockedOut`), `Fail(ctx, email) error`, `Reset(ctx, email) error`.
-- Consumes: `postgres.NewPasswordRepo`, `postgres.NewLoginAttemptRepo` and `postgres.NewUserRepo` from Task 7; `postgres.NewTestPool` from Task 3.
+- Consumes: `postgres.NewPasswordRepo`, `postgres.NewLoginAttemptRepo` and `postgres.NewUserRepo` from Task 7; `pgtest.NewTestPool` from Task 3.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2602,7 +2947,7 @@ import (
 
 func TestBootstrapCreatesAdminWithMustChangePassword(t *testing.T) {
 	ctx := context.Background()
-	pool := postgres.NewTestPool(t)
+	pool := pgtest.NewTestPool(t)
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 
 	secret, err := app.Bootstrap(ctx, users, passwords, "admin@example.com")
@@ -2627,7 +2972,7 @@ func TestBootstrapCreatesAdminWithMustChangePassword(t *testing.T) {
 
 func TestBootstrapIsIdempotent(t *testing.T) {
 	ctx := context.Background()
-	pool := postgres.NewTestPool(t)
+	pool := pgtest.NewTestPool(t)
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 
 	if _, err := app.Bootstrap(ctx, users, passwords, "admin@example.com"); err != nil {
@@ -2659,7 +3004,7 @@ import (
 
 func TestLockoutAfterRepeatedFailures(t *testing.T) {
 	ctx := context.Background()
-	th := app.NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
+	th := app.NewThrottle(postgres.NewLoginAttemptRepo(pgtest.NewTestPool(t)), 3, time.Minute)
 
 	for i := 0; i < 3; i++ {
 		if err := th.Fail(ctx, "user@example.com"); err != nil {
@@ -2673,7 +3018,7 @@ func TestLockoutAfterRepeatedFailures(t *testing.T) {
 
 func TestSuccessfulSignInResetsFailures(t *testing.T) {
 	ctx := context.Background()
-	th := app.NewThrottle(postgres.NewLoginAttemptRepo(postgres.NewTestPool(t)), 3, time.Minute)
+	th := app.NewThrottle(postgres.NewLoginAttemptRepo(pgtest.NewTestPool(t)), 3, time.Minute)
 
 	_ = th.Fail(ctx, "user@example.com")
 	_ = th.Fail(ctx, "user@example.com")
@@ -2783,7 +3128,7 @@ Expected: FAIL — `StartTestEnv` undefined.
 
 - [ ] **Step 3: Implement the router, handlers and the test environment**
 
-`StartTestEnv` composes what earlier tasks produced: `postgres.NewTestPool`, repositories, services, `gateway.New` with the policy gate, the models filter, the usage sink, and a `coreauth.Manager` carrying `faketest.Executor` for both providers:
+`StartTestEnv` composes what earlier tasks produced: `pgtest.NewTestPool`, repositories, services, `gateway.New` (whose policy gate also filters the model lists, A9 — there is no separate models filter), the usage sink, and a `coreauth.Manager` carrying `faketest.Executor` for both providers (superseded by A1's wire-level fake):
 
 ```go
 mgr := coreauth.NewManager(sdkauth.GetTokenStore(), nil, nil)
@@ -2814,5 +3159,5 @@ git commit -m "feat: cabinet REST API with end-to-end policy and ledger coverage
 
 ## Follow-up plans
 
-- **Plan B — admin surface:** users administration, vendor account wizard (`NoBrowser` + `Prompt`), settings pushed through `PushConfig`, audit browsing, model prices.
+- **Plan B — admin surface:** users administration, vendor account wizard (upstream's embedder path in `sdk/api`: management-token requester, callback file, post-auth hook; see `docs/plans/2026-09-23-admin.md` B2), settings pushed through `PushConfig`, audit browsing, model prices.
 - **Plan C — frontend:** the screens from `llm-proxy-frontend`, `docs/specs/2026-09-22-frontend-design.md`.

@@ -1,0 +1,430 @@
+package metrics
+
+import (
+	"io"
+	"math"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/prometheus/common/expfmt"
+	"github.com/prometheus/common/model"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+)
+
+type fakeClock struct{ t time.Time }
+
+func (c fakeClock) Now() time.Time { return c.t }
+
+func TestObserveUsageCountsTokensByKind(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	ev := app.UsageEvent{
+		Provider: "claude", Model: "claude-sonnet-5", ServiceTier: "priority",
+		TokensInput: 10, TokensOutput: 20, TokensReasoning: 4, TokensCacheRead: 5,
+	}
+
+	m.ObserveUsage(ev, "alice@example.com")
+	m.ObserveUsage(ev, "alice@example.com")
+
+	for kind, want := range map[string]float64{"input": 20, "output": 40, "reasoning": 8, "cache_read": 10} {
+		if got := testutil.ToFloat64(m.tokens.WithLabelValues("alice@example.com", "claude", "claude-sonnet-5", "priority", kind)); got != want {
+			t.Errorf("%s tokens = %v, want %v", kind, got, want)
+		}
+	}
+	// ToFloat64 above created no new series; cache_write was zero, so it must not exist.
+	if n := testutil.CollectAndCount(m.tokens); n != 4 {
+		t.Fatalf("token series = %d, want 4 (zero-valued cache_write must not be emitted)", n)
+	}
+}
+
+func TestServiceTierIsAClosedSet(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	for _, tier := range []string{"", "flex", "auto", "scale", "priority", "turbo", "Priority"} {
+		m.ObserveUsage(app.UsageEvent{Provider: "codex", Model: "gpt-6", ServiceTier: tier, TokensInput: 1}, "u")
+	}
+
+	for tier, want := range map[string]float64{"default": 1, "flex": 1, "auto": 1, "scale": 1, "priority": 1, "other": 2} {
+		if got := testutil.ToFloat64(m.tokens.WithLabelValues("u", "codex", "gpt-6", tier, "input")); got != want {
+			t.Errorf("tokens{service_tier=%q} = %v, want %v", tier, got, want)
+		}
+	}
+	if n := testutil.CollectAndCount(m.tokens); n != 6 {
+		t.Fatalf("token series = %d, want 6", n)
+	}
+}
+
+func TestRequestsCountedByStatusClassAndStream(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	for _, ev := range []app.UsageEvent{
+		{StatusCode: 200}, {StatusCode: 201, Stream: true},
+		{StatusCode: 429, Failed: true},
+		{StatusCode: 502, Failed: true},
+		{Failed: true}, // no response at all
+		{},             // succeeded, status code not recorded
+	} {
+		ev.Provider, ev.Model = "codex", "gpt-6"
+		m.ObserveUsage(ev, "svc-ci")
+	}
+
+	for _, c := range []struct {
+		stream, status string
+		want           float64
+	}{
+		{"false", "2xx", 1}, {"true", "2xx", 1}, {"false", "4xx", 1},
+		{"false", "5xx", 1}, {"false", "error", 1}, {"false", "ok", 1},
+	} {
+		if got := testutil.ToFloat64(m.requests.WithLabelValues("svc-ci", "codex", "gpt-6", c.stream, c.status)); got != c.want {
+			t.Errorf("requests{stream=%q,status=%q} = %v, want %v", c.stream, c.status, got, c.want)
+		}
+	}
+	if n := testutil.CollectAndCount(m.requests); n != 6 {
+		t.Fatalf("request series = %d, want 6", n)
+	}
+}
+
+func TestDurationsInSecondsAndTTFTOnlyWhenStreamed(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := New(reg)
+
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", Stream: true, LatencyMS: 90_000, TTFTMS: 1_500}, "u")
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", Stream: true, LatencyMS: 2_000, TTFTMS: 500}, "u")
+	// Upstream sets TTFT on non-streamed calls too (first body byte, after the whole
+	// generation); it must not reach the TTFT histogram.
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", LatencyMS: 500, TTFTMS: 480}, "u")
+
+	fams := gather(t, reg)
+	durations := map[string]*dto.Histogram{}
+	for _, mt := range fams["llmproxy_request_duration_seconds"].GetMetric() {
+		for _, l := range mt.GetLabel() {
+			if l.GetName() == "stream" {
+				durations[l.GetValue()] = mt.GetHistogram()
+			}
+		}
+	}
+	if h := durations["true"]; h.GetSampleCount() != 2 || h.GetSampleSum() != 92 {
+		t.Fatalf("streamed duration count/sum = %d/%v, want 2/92", h.GetSampleCount(), h.GetSampleSum())
+	}
+	if h := durations["false"]; h.GetSampleCount() != 1 || h.GetSampleSum() != 0.5 {
+		t.Fatalf("non-streamed duration count/sum = %d/%v, want 1/0.5", h.GetSampleCount(), h.GetSampleSum())
+	}
+	ttft := fams["llmproxy_ttft_seconds"].GetMetric()[0].GetHistogram()
+	if ttft.GetSampleCount() != 2 || ttft.GetSampleSum() != 2 {
+		t.Fatalf("ttft count/sum = %d/%v, want 2/2 (streamed requests only)", ttft.GetSampleCount(), ttft.GetSampleSum())
+	}
+}
+
+func TestPolicyDeniedModelLabelIsTheCanonicalName(t *testing.T) {
+	canonical := func(model string) (string, bool) {
+		if strings.EqualFold(model, "claude-sonnet-5") {
+			return "claude-sonnet-5", true
+		}
+		return "", false
+	}
+	m := New(prometheus.NewRegistry(), WithKnownModel(canonical))
+
+	m.ObservePolicyDenied("u", "claude-sonnet-5", DenyModelNotAllowed)
+	m.ObservePolicyDenied("u", "CLAUDE-SONNET-5", DenyModelNotAllowed)
+	for _, junk := range []string{"x-1", "x-2", strings.Repeat("a", 4096), ""} {
+		m.ObservePolicyDenied("u", junk, DenyUnknownModel)
+	}
+	m.ObservePolicyDenied("u", "claude-sonnet-5", DenyReason(200))
+
+	for _, c := range []struct {
+		model, reason string
+		want          float64
+	}{
+		{"claude-sonnet-5", "model_not_allowed", 2},
+		{Unknown, "unknown_model", 4},
+		{"claude-sonnet-5", "other", 1},
+	} {
+		if got := testutil.ToFloat64(m.policyDenied.WithLabelValues("u", c.model, c.reason)); got != c.want {
+			t.Errorf("policy_denied{model=%q,reason=%q} = %v, want %v", c.model, c.reason, got, c.want)
+		}
+	}
+	if n := testutil.CollectAndCount(m.policyDenied); n != 3 {
+		t.Fatalf("policy_denied series = %d, want 3: client strings must not create series", n)
+	}
+}
+
+func TestPolicyDeniedWithoutPredicateNeverLabelsTheModel(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.ObservePolicyDenied("u", "claude-sonnet-5", DenyModelNotAllowed)
+	if got := testutil.ToFloat64(m.policyDenied.WithLabelValues("u", Unknown, "model_not_allowed")); got != 1 {
+		t.Fatalf("policy_denied{model=%q} = %v, want 1", Unknown, got)
+	}
+	if n := testutil.CollectAndCount(m.policyDenied); n != 1 {
+		t.Fatalf("policy_denied series = %d, want 1", n)
+	}
+}
+
+// A request refused before anyone was authenticated has no owner: it is counted
+// under Unknown, never under an empty user label.
+func TestPolicyDeniedWithoutOwnerIsUnknown(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.ObservePolicyDenied("", "", DenyRouteNotAllowed)
+	if got := testutil.ToFloat64(m.policyDenied.WithLabelValues(Unknown, Unknown, "route_not_allowed")); got != 1 {
+		t.Fatalf("policy_denied{user=%q} = %v, want 1", Unknown, got)
+	}
+	if n := testutil.CollectAndCount(m.policyDenied); n != 1 {
+		t.Fatalf("policy_denied series = %d, want 1", n)
+	}
+}
+
+func TestVendorQuotaGauges(t *testing.T) {
+	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{t: now}
+	m := New(prometheus.NewRegistry(), WithClock(clock))
+	reset := now.Add(3 * time.Hour)
+
+	m.ObserveVendorQuota("acct-1", "claude", "5h", 0.42, reset)
+
+	labels := []string{"acct-1", "claude", "5h"}
+	if got := testutil.ToFloat64(m.quotaUsed.WithLabelValues(labels...)); got != 0.42 {
+		t.Fatalf("quota ratio = %v, want 0.42 (ratio in, ratio out)", got)
+	}
+	if got := testutil.ToFloat64(m.quotaReset.WithLabelValues(labels...)); got != float64(reset.Unix()) {
+		t.Fatalf("reset timestamp = %v, want %v", got, reset.Unix())
+	}
+	if got := testutil.ToFloat64(m.quotaObserved.WithLabelValues(labels...)); got != float64(now.Unix()) {
+		t.Fatalf("observed timestamp = %v, want %v", got, now.Unix())
+	}
+
+	// A later report without a reset time updates use and observation, keeps the reset.
+	clock.t = now.Add(time.Minute)
+	m.ObserveVendorQuota("acct-1", "claude", "5h", 0.5, time.Time{})
+	if got := testutil.ToFloat64(m.quotaUsed.WithLabelValues(labels...)); got != 0.5 {
+		t.Fatalf("quota ratio = %v, want 0.5", got)
+	}
+	if got := testutil.ToFloat64(m.quotaReset.WithLabelValues(labels...)); got != float64(reset.Unix()) {
+		t.Fatalf("reset timestamp = %v after zero resetAt, want it kept at %v", got, reset.Unix())
+	}
+	if got := testutil.ToFloat64(m.quotaObserved.WithLabelValues(labels...)); got != float64(clock.t.Unix()) {
+		t.Fatalf("observed timestamp = %v, want %v", got, clock.t.Unix())
+	}
+}
+
+func TestAccountDisabledFollowsLatestState(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	m.SetAccountDisabled("acct-1", "codex", true)
+	if got := testutil.ToFloat64(m.accountDisabled.WithLabelValues("acct-1", "codex")); got != 1 {
+		t.Fatalf("disabled = %v, want 1", got)
+	}
+	m.SetAccountDisabled("acct-1", "codex", false)
+	if got := testutil.ToFloat64(m.accountDisabled.WithLabelValues("acct-1", "codex")); got != 0 {
+		t.Fatalf("disabled = %v after re-enable, want 0", got)
+	}
+}
+
+func TestForgetAccountDropsOnlyThatAccountsSeries(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	for _, acct := range []string{"gone", "kept"} {
+		m.SetAccountDisabled(acct, "claude", true)
+		m.ObserveAccountFailure(acct, "claude")
+		m.ObserveVendorQuota(acct, "claude", "5h", 0.9, time.Now())
+		m.ObserveVendorQuota(acct, "claude", "7d", 0.3, time.Now())
+	}
+	// Same account name under another provider is a different account.
+	m.SetAccountDisabled("gone", "codex", true)
+
+	m.ForgetAccount("gone", "claude")
+
+	// Left: kept/claude and gone/codex disabled, kept's one failure, kept's 5h and 7d windows.
+	for _, c := range []struct {
+		name string
+		c    prometheus.Collector
+		want int
+	}{
+		{"account_disabled", m.accountDisabled, 2},
+		{"account_failures_total", m.accountFailures, 1},
+		{"vendor_quota_used_ratio", m.quotaUsed, 2},
+		{"vendor_quota_reset_timestamp_seconds", m.quotaReset, 2},
+		{"vendor_quota_observed_timestamp_seconds", m.quotaObserved, 2},
+	} {
+		if n := testutil.CollectAndCount(c.c); n != c.want {
+			t.Errorf("%s series = %d after ForgetAccount, want %d", c.name, n, c.want)
+		}
+	}
+	if got := testutil.ToFloat64(m.quotaUsed.WithLabelValues("kept", "claude", "5h")); got != 0.9 {
+		t.Fatalf("kept account's quota = %v, want 0.9", got)
+	}
+}
+
+func TestHandlerServesPrefixedFamilies(t *testing.T) {
+	prices := &PriceTable{}
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "m", Input: 1}})
+	m := New(prometheus.NewRegistry(), WithVersion("v1.2.3"), WithPrices(prices))
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "m", Stream: true, TokensInput: 1, StatusCode: 200, LatencyMS: 10, TTFTMS: 5}, "u")
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "unpriced", TokensInput: 1}, "u")
+	m.ObservePolicyDenied("u", "m", DenyModelNotAllowed)
+	m.ObserveAuthFailure("unknown_token")
+	m.ObserveVendorQuota("a", "claude", "7d", 0.1, time.Now())
+	m.SetAccountDisabled("a", "claude", false)
+	m.ObserveAccountFailure("a", "claude")
+
+	body := scrape(t, m)
+	fams, err := parser().TextToMetricFamilies(strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("handler output is not Prometheus text: %v\n%s", err, body)
+	}
+	for _, name := range []string{
+		"llmproxy_tokens_total", "llmproxy_requests_total",
+		"llmproxy_request_duration_seconds", "llmproxy_ttft_seconds",
+		"llmproxy_policy_denied_total", "llmproxy_auth_failures_total",
+		"llmproxy_vendor_quota_used_ratio", "llmproxy_vendor_quota_reset_timestamp_seconds",
+		"llmproxy_vendor_quota_observed_timestamp_seconds",
+		"llmproxy_account_disabled", "llmproxy_account_failures_total", "llmproxy_build_info",
+		"llmproxy_cost_usd_total", "llmproxy_cost_unpriced_tokens_total",
+	} {
+		if _, ok := fams[name]; !ok {
+			t.Errorf("family %s missing from handler output", name)
+		}
+	}
+	for name := range fams {
+		if !strings.HasPrefix(name, "llmproxy_") {
+			t.Errorf("family %s lacks the llmproxy_ prefix", name)
+		}
+	}
+	if !strings.Contains(body, `llmproxy_build_info{version="v1.2.3"} 1`) {
+		t.Errorf("build_info does not carry the configured version:\n%s", body)
+	}
+}
+
+func TestLabelsNeverCarryThePrincipal(t *testing.T) {
+	userID, tokenID := uuid.New(), uuid.New()
+	m := New(prometheus.NewRegistry())
+
+	m.ObserveUsage(app.UsageEvent{
+		UserID: userID, TokenID: tokenID,
+		Provider: "claude", Model: "m", TokensInput: 7, StatusCode: 200,
+	}, "alice@example.com")
+
+	body := scrape(t, m)
+	if !strings.Contains(body, `user="alice@example.com"`) {
+		t.Fatalf("caller-supplied user label missing:\n%s", body)
+	}
+	// The principal upstream carries as the record's APIKey is "<userID>:<tokenID>".
+	for _, id := range []string{userID.String(), tokenID.String()} {
+		if strings.Contains(body, id) {
+			t.Fatalf("handler output contains %q:\n%s", id, body)
+		}
+	}
+}
+
+func scrape(t *testing.T, m *Metrics) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		t.Fatalf("handler status = %d", rec.Code)
+	}
+	b, err := io.ReadAll(rec.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func gather(t *testing.T, reg *prometheus.Registry) map[string]*dto.MetricFamily {
+	t.Helper()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(map[string]*dto.MetricFamily, len(mfs))
+	for _, mf := range mfs {
+		out[mf.GetName()] = mf
+	}
+	return out
+}
+
+func parser() *expfmt.TextParser {
+	p := expfmt.NewTextParser(model.UTF8Validation)
+	return &p
+}
+
+func TestCostIsComputedFromThePriceInForce(t *testing.T) {
+	prices := &PriceTable{}
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}})
+	m := New(prometheus.NewRegistry(), WithPrices(prices))
+
+	// The kinds partition the request; reasoning tokens are output tokens.
+	m.ObserveUsage(app.UsageEvent{
+		Provider: "claude", Model: "claude-sonnet-5",
+		TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100, TokensCacheRead: 2000, TokensCacheWrite: 400,
+	}, "alice@example.com")
+
+	const want = (1000*3 + 300*15 + 2000*0.3 + 400*3.75) / 1e6
+	if got := testutil.ToFloat64(m.cost.WithLabelValues("alice@example.com", "claude", "claude-sonnet-5")); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cost = %v, want %v", got, want)
+	}
+	if n := testutil.CollectAndCount(m.unpriced); n != 0 {
+		t.Fatalf("unpriced series = %d for a priced model, want 0", n)
+	}
+}
+
+func TestUnpricedTokensAreCounted(t *testing.T) {
+	prices := &PriceTable{}
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3}})
+	m := New(prometheus.NewRegistry(), WithPrices(prices))
+
+	// Same model name, other provider: a price is per provider and model.
+	m.ObserveUsage(app.UsageEvent{Provider: "chatgpt", Model: "claude-sonnet-5", TokensInput: 10, TokensOutput: 5, TokensReasoning: 2, TokensCacheRead: 3, TokensCacheWrite: 1}, "u")
+
+	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("chatgpt", "claude-sonnet-5")); got != 21 {
+		t.Fatalf("unpriced tokens = %v, want 21", got)
+	}
+	if n := testutil.CollectAndCount(m.cost); n != 0 {
+		t.Fatalf("cost series = %d for an unpriced model, want 0", n)
+	}
+
+	// Without a price list every token is unpriced.
+	bare := New(prometheus.NewRegistry())
+	bare.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 7}, "u")
+	if got := testutil.ToFloat64(bare.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 7 {
+		t.Fatalf("unpriced tokens without a price list = %v, want 7", got)
+	}
+}
+
+func TestPriceChangeAppliesToLaterRecordsOnly(t *testing.T) {
+	prices := &PriceTable{}
+	m := New(prometheus.NewRegistry(), WithPrices(prices))
+	ev := app.UsageEvent{Provider: "codex", Model: "gpt-6", TokensInput: 1_000_000}
+
+	m.ObserveUsage(ev, "u") // before any price: unpriced
+	prices.SetPrices([]app.ModelPrice{{Provider: "codex", Model: "gpt-6", Input: 2}})
+	m.ObserveUsage(ev, "u")
+	prices.SetPrices([]app.ModelPrice{{Provider: "codex", Model: "gpt-6", Input: 5}})
+	m.ObserveUsage(ev, "u")
+
+	if got := testutil.ToFloat64(m.cost.WithLabelValues("u", "codex", "gpt-6")); got != 7 {
+		t.Fatalf("cost = %v, want 2 + 5 (each record at the price in force when it was observed)", got)
+	}
+	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("codex", "gpt-6")); got != 1_000_000 {
+		t.Fatalf("unpriced = %v, want the first record's tokens only", got)
+	}
+}
+
+func TestUnclassifiedTokensAreUnpriced(t *testing.T) {
+	prices := &PriceTable{}
+	prices.SetPrices([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15}})
+	m := New(prometheus.NewRegistry(), WithPrices(prices))
+
+	// An unclassified breakdown: only the total is known.
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensTotal: 500}, "u")
+	// An inconsistent one: the kinds cover part of the total.
+	m.ObserveUsage(app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 100, TokensOutput: 10, TokensTotal: 150}, "u")
+
+	if got := testutil.ToFloat64(m.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 540 {
+		t.Fatalf("unpriced tokens = %v, want 500 + 40 unclassified", got)
+	}
+	const want = (100*3 + 10*15) / 1e6
+	if got := testutil.ToFloat64(m.cost.WithLabelValues("u", "claude", "claude-sonnet-5")); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cost = %v, want %v (classified tokens only)", got, want)
+	}
+}

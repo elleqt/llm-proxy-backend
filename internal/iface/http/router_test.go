@@ -1,0 +1,346 @@
+package http
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
+)
+
+// pathOf turns a ServeMux pattern into a request line that matches it.
+func pathOf(pattern string) (method, path string) {
+	method, path, _ = strings.Cut(pattern, " ")
+	path = strings.ReplaceAll(path, "{userId}", uuid.NewString())
+	path = strings.ReplaceAll(path, "{accountId}", "claude-someone.json")
+	return method, strings.ReplaceAll(path, "{tokenId}", uuid.NewString())
+}
+
+// allRoutes is every pattern the router serves.
+func allRoutes() []string {
+	var out []string
+	for p := range (&router{}).routes() {
+		out = append(out, p)
+	}
+	return out
+}
+
+// The contract's Conventions, written out here rather than read from the router: a
+// restricted session reaches GET /api/me, POST /api/auth/password and
+// POST /api/auth/logout, and nothing else. Every other route that needs a session
+// answers it 403 password_change_required — including any route added later, which is
+// why this walks the router's table instead of listing today's routes.
+func TestARestrictedSessionReachesOnlyTheContractsAllowList(t *testing.T) {
+	contract := map[string]bool{
+		"GET /api/me":             true,
+		"POST /api/auth/password": true,
+		"POST /api/auth/logout":   true,
+	}
+	for _, pattern := range allRoutes() {
+		if anonymous[pattern] && !contract[pattern] {
+			continue
+		}
+		t.Run(pattern, func(t *testing.T) {
+			e := newEnv(t)
+			u := person("restricted@example.com")
+			u.MustChangePassword = true
+			method, path := pathOf(pattern)
+			// A malformed body: a route the guard admits refuses it as input (or
+			// ignores it), a route it refuses never reads it.
+			e.sessions.EXPECT().Delete(mock.Anything, mock.Anything).Return(nil).Maybe()
+			rec := e.do(method, path, "{", withCookie(e.signedIn(u)))
+			if contract[pattern] {
+				if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+					t.Fatalf("status = %d, body %s: the contract lets a restricted session reach this", rec.Code, rec.Body)
+				}
+				return
+			}
+			apiError(t, rec, http.StatusForbidden, codePasswordChangeRequired)
+		})
+	}
+}
+
+// Every route that is not explicitly anonymous needs a session, and says so with the
+// one code a client treats as "signed out".
+func TestEveryAuthenticatedRouteRefusesARequestWithoutASession(t *testing.T) {
+	for _, pattern := range allRoutes() {
+		if anonymous[pattern] {
+			continue
+		}
+		t.Run(pattern, func(t *testing.T) {
+			method, path := pathOf(pattern)
+			apiError(t, newEnv(t).do(method, path, "{}"), http.StatusUnauthorized, codeUnauthenticated)
+		})
+	}
+}
+
+// The administration API does not exist for anyone but an administrator: a person
+// with a full session gets what an unrouted path gets, whatever they send. The body
+// and query are ones every admin handler would refuse as input, so a route that let
+// the request through to its handler answers something else.
+func TestEveryAdminRouteIsNotFoundToANonAdministrator(t *testing.T) {
+	for _, pattern := range allRoutes() {
+		if !adminOnly(pattern) {
+			continue
+		}
+		t.Run(pattern, func(t *testing.T) {
+			e := newEnv(t)
+			method, path := pathOf(pattern)
+			rec := e.do(method, path+"?limit=0", "{", withCookie(e.signedIn(person("p@example.com"))))
+			apiError(t, rec, http.StatusNotFound, codeNotFound)
+		})
+	}
+}
+
+// Admin routes cannot be served without their services.
+func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
+	e := newEnv(t)
+	for name, drop := range map[string]func(*Deps){
+		"users":     func(d *Deps) { d.AdminUsers = nil },
+		"settings":  func(d *Deps) { d.Settings = nil },
+		"prices":    func(d *Deps) { d.Prices = nil },
+		"providers": func(d *Deps) { d.Providers = nil },
+	} {
+		d := e.deps
+		drop(&d)
+		if _, err := NewRouter(d); err == nil {
+			t.Errorf("NewRouter without the %s service: no error", name)
+		}
+	}
+}
+
+// Every refusal the middleware writes is the contract's JSON Error: a client that
+// renders from `code` must never meet a text/plain body.
+func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
+	big := strings.Repeat("x", maxBodyBytes+1)
+	cases := []struct {
+		name   string
+		send   func(e *testEnv) *httptest.ResponseRecorder
+		status int
+		code   string
+	}{
+		{"content type", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodPost, "/api/auth/login", `{}`, func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") })
+		}, http.StatusUnsupportedMediaType, codeUnsupportedMediaType},
+		{"no content type on a body-less post", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodPost, "/api/auth/logout", "", func(r *http.Request) { r.Header.Del("Content-Type") })
+		}, http.StatusUnsupportedMediaType, codeUnsupportedMediaType},
+		{"declared body too large", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodPost, "/api/auth/login", big)
+		}, http.StatusRequestEntityTooLarge, codePayloadTooLarge},
+		{"undeclared body too large", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodPost, "/api/auth/login", `{"email":"`+big+`"}`, func(r *http.Request) { r.ContentLength = -1 })
+		}, http.StatusRequestEntityTooLarge, codePayloadTooLarge},
+		{"no session", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodGet, "/api/me", "")
+		}, http.StatusUnauthorized, codeUnauthenticated},
+		{"restricted session", func(e *testEnv) *httptest.ResponseRecorder {
+			u := person("restricted@example.com")
+			u.MustChangePassword = true
+			return e.do(http.MethodGet, "/api/connect", "", withCookie(e.signedIn(u)))
+		}, http.StatusForbidden, codePasswordChangeRequired},
+		{"unknown path", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodGet, "/api/nothing-here", "")
+		}, http.StatusNotFound, codeNotFound},
+		{"known path, other method", func(e *testEnv) *httptest.ResponseRecorder {
+			return e.do(http.MethodPut, "/api/me", "{}")
+		}, http.StatusNotFound, codeNotFound},
+		{"rate limit", func(e *testEnv) *httptest.ResponseRecorder {
+			e.do(http.MethodPost, "/api/auth/login", "{")
+			return e.do(http.MethodPost, "/api/auth/login", "{")
+		}, http.StatusTooManyRequests, codeRateLimited},
+		{"session store down", func(e *testEnv) *httptest.ResponseRecorder {
+			e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, errors.New("connection refused"))
+			return e.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
+		}, http.StatusInternalServerError, codeInternal},
+		{"panic", func(e *testEnv) *httptest.ResponseRecorder {
+			e.usage.EXPECT().SeriesForUser(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
+				RunAndReturn(func(_ context.Context, _ uuid.UUID, _, _ time.Time) (app.UsageSeries, error) { panic("boom") })
+			return e.do(http.MethodGet, "/api/me/usage", "", withCookie(e.signedIn(person("p@example.com"))))
+		}, http.StatusInternalServerError, codeInternal},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Minute, MaxClients: 10}))
+			apiError(t, c.send(e), c.status, c.code)
+		})
+	}
+}
+
+// An internal failure is logged for the operator and never described to the client.
+func TestAnInternalErrorKeepsItsTextOutOfTheResponse(t *testing.T) {
+	e := newEnv(t)
+	const detail = "pq: relation sessions does not exist at 192.0.2.5"
+	e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, errors.New(detail))
+	rec := e.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
+	apiError(t, rec, http.StatusInternalServerError, codeInternal)
+	if strings.Contains(rec.Body.String(), "relation") {
+		t.Fatalf("the response describes the failure: %s", rec.Body)
+	}
+	if !strings.Contains(e.log.text(), detail) {
+		t.Fatalf("the failure was not logged; log %q", e.log.text())
+	}
+}
+
+// A JSON content type with parameters is still JSON.
+func TestAJSONContentTypeWithACharsetIsAccepted(t *testing.T) {
+	e := newEnv(t)
+	rec := e.do(http.MethodPost, "/api/auth/logout", "", func(r *http.Request) {
+		r.Header.Set("Content-Type", "application/json; charset=utf-8")
+	})
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
+	}
+}
+
+// DELETE carries no body, so it needs no content type: the frontend sets the header
+// on POST, PUT and PATCH only.
+func TestADeleteWithoutAContentTypeIsServed(t *testing.T) {
+	e := newEnv(t)
+	u := person("person@example.com")
+	mine, _, err := credentials.Generate(u.ID, "mine")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.tokens.EXPECT().ByID(mock.Anything, mine.ID).Return(mine, nil)
+	e.tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(nil)
+	rec := e.do(http.MethodDelete, "/api/me/tokens/"+mine.ID.String(), "", withCookie(e.signedIn(u)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
+	}
+}
+
+// rateRefused reports whether rec is a rate-limit refusal of either kind.
+func rateRefused(rec *httptest.ResponseRecorder) bool {
+	return rec.Code == http.StatusTooManyRequests || rec.Header().Get("Location") == loginRateLimited
+}
+
+// The limit covers exactly the routes that spend password work or start a sign-in,
+// and it is per client: the key is X-Real-IP, set by the frontend's proxy. The API
+// routes refuse with 429 JSON; the OIDC routes are browser navigations and send the
+// browser back to the login page instead.
+func TestSignInRoutesAreRateLimitedPerClient(t *testing.T) {
+	limited := map[string]bool{ // pattern -> navigational
+		"POST /api/auth/login":        false,
+		"POST /api/auth/password":     false,
+		"GET /api/auth/oidc/start":    true,
+		"GET /api/auth/oidc/callback": true,
+	}
+	for pattern, navigational := range limited {
+		t.Run(pattern, func(t *testing.T) {
+			e := newEnv(t, withRate(RateLimit{Burst: 1, Every: 10 * time.Second, MaxClients: 10}))
+			method, path := pathOf(pattern)
+			if rec := e.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
+				t.Fatal("the first attempt was refused")
+			}
+			rec := e.do(method, path, "{", fromIP("198.51.100.1"))
+			if navigational {
+				if rec.Code != http.StatusFound || rec.Header().Get("Location") != loginRateLimited {
+					t.Fatalf("status %d to %q, want 302 to %s", rec.Code, rec.Header().Get("Location"), loginRateLimited)
+				}
+				if ct := rec.Header().Get("Content-Type"); ct == "application/json" {
+					t.Fatal("a navigational route answered with JSON")
+				}
+			} else {
+				apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
+				if got := rec.Header().Get("Retry-After"); got != "10" {
+					t.Fatalf("Retry-After = %q, want 10", got)
+				}
+			}
+			// Another client behind the same proxy connection is not limited.
+			if rec := e.do(method, path, "{", fromIP("198.51.100.2")); rateRefused(rec) {
+				t.Fatal("a different client was refused")
+			}
+			// Once the bucket refills the first client is admitted again.
+			e.clock.advance(10 * time.Second)
+			if rec := e.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
+				t.Fatal("the client was still refused after the bucket refilled")
+			}
+		})
+	}
+
+	t.Run("other routes", func(t *testing.T) {
+		e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
+		for i := range 3 {
+			if rec := e.do(http.MethodGet, "/api/auth/config", ""); rec.Code != http.StatusOK {
+				t.Fatalf("attempt %d: status = %d, want 200", i+1, rec.Code)
+			}
+		}
+	})
+}
+
+// An IPv6 client can use any address of its /64, so the /64 is what is limited: two
+// addresses in one /64 share a bucket, and a neighbouring /64 has its own.
+func TestIPv6ClientsAreLimitedByTheirSlash64(t *testing.T) {
+	e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
+	if rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1::1")); rateRefused(rec) {
+		t.Fatal("the first attempt was refused")
+	}
+	rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1:ffff:ffff:ffff:ffff"))
+	apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
+	if rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:2::1")); rateRefused(rec) {
+		t.Fatal("a client in another /64 was refused")
+	}
+}
+
+// Without X-Real-IP (or with garbage in it) the connection's peer is the client.
+func TestClientIPFallsBackToThePeerAddress(t *testing.T) {
+	for header, want := range map[string]string{
+		"":                 "192.0.2.10",
+		"not an address":   "192.0.2.10",
+		"203.0.113.7":      "203.0.113.7",
+		" 2001:db8::1 ":    "2001:db8::1",
+		"::ffff:192.0.2.9": "192.0.2.9",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = testClientAddr
+		if header != "" {
+			req.Header.Set("X-Real-IP", header)
+		}
+		if got := clientIP(req); got != want {
+			t.Errorf("X-Real-IP %q: clientIP = %q, want %q", header, got, want)
+		}
+	}
+}
+
+// Retry-After is whole seconds rounded up: a client that waits exactly that long is
+// admitted, never refused once more for a fraction of a second.
+func TestRetryAfterRoundsUp(t *testing.T) {
+	for wait, want := range map[time.Duration]int{
+		1500 * time.Millisecond: 2,
+		3 * time.Second:         3,
+		0:                       1,
+		-time.Second:            1,
+	} {
+		rec := httptest.NewRecorder()
+		writeRetryAfter(rec, wait, codeRateLimited, "slow down")
+		if got := rec.Header().Get("Retry-After"); got != strconv.Itoa(want) {
+			t.Errorf("wait %v: Retry-After = %q, want %d", wait, got, want)
+		}
+	}
+}
+
+func TestNewRouterRefusesOIDCWithoutAUsableKey(t *testing.T) {
+	e := newEnv(t, withOIDC)
+	d := e.deps
+	d.SessionKey = []byte("too short")
+	if _, err := NewRouter(d); err == nil {
+		t.Fatal("NewRouter accepted OIDC with a short session key")
+	}
+}
+
+func TestServerHasEveryTimeoutSet(t *testing.T) {
+	s := NewServer("127.0.0.1:0", http.NotFoundHandler())
+	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 || s.MaxHeaderBytes <= 0 {
+		t.Fatalf("server = %+v: a zero timeout lets a client hold a connection forever", s)
+	}
+}

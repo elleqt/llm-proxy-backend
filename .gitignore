@@ -1,0 +1,4 @@
+.superpowers/
+.env
+/gateway
+*.out

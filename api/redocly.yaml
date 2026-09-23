@@ -1,0 +1,7 @@
+extends:
+  - recommended
+rules:
+  # operationIds are descriptive; summaries are added where behaviour needs explaining.
+  operation-summary: off
+  # Routine 401/403 for an absent or restricted session are stated once, in info.description.
+  operation-4xx-response: off

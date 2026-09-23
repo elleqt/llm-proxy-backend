@@ -1,0 +1,131 @@
+package access
+
+import (
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// Rule allows one provider and the models matching ModelPattern.
+//
+// ModelPattern is a glob over the whole model identifier: "*" matches any run of
+// characters including "/" and ":", and "?" matches exactly one. It is deliberately
+// NOT path.Match — model identifiers are not paths. Real ones carry both separators
+// (OpenRouter "openai/gpt-4o", Ollama "llama3:70b", Bedrock "…-v1:0"), and under
+// path semantics a natural rule like "*claude*" would silently match none of them.
+//
+// "*" alone means every model of the provider, including models published after the
+// rule was written: the pattern is evaluated per request against the live catalogue,
+// never expanded into a list when the rule is granted.
+type Rule struct {
+	Provider     string
+	ModelPattern string
+
+	// re is the compiled form of ModelPattern, built once by ParseRule. A Rule is
+	// evaluated on every proxied request against every catalogue entry, so compiling
+	// per call would be the hottest allocation in the gate. A hand-built Rule leaves
+	// it nil and matches compiles on demand.
+	re *regexp.Regexp
+}
+
+// Policy is an allow-list. Order is irrelevant: a request is permitted when any
+// rule matches. There are deliberately no deny rules.
+type Policy []Rule
+
+var ErrMalformedRule = errors.New("access: malformed rule")
+
+// ParseRule splits on the FIRST colon only. The provider half is an operator-chosen
+// name and never contains a colon; the model half frequently does, so splitting on
+// every colon would make whole providers inexpressible.
+func ParseRule(s string) (Rule, error) {
+	provider, pattern, found := strings.Cut(strings.TrimSpace(s), ":")
+	if !found {
+		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
+	}
+	provider, pattern = strings.TrimSpace(provider), strings.TrimSpace(pattern)
+	if provider == "" || pattern == "" {
+		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
+	}
+	// Every pattern compiles by construction: compileGlob quotes everything that is
+	// not "*" or "?", so unlike path.Match there is no such thing as a malformed model
+	// glob here. "claude:[opus" is therefore a literal that matches a model actually
+	// named "[opus" — predictable rather than silently unmatchable.
+	re, err := compileGlob(strings.ToLower(pattern))
+	if err != nil {
+		return Rule{}, fmt.Errorf("%w: %q: %v", ErrMalformedRule, s, err)
+	}
+	return Rule{
+		Provider:     strings.ToLower(provider),
+		ModelPattern: strings.ToLower(pattern),
+		re:           re,
+	}, nil
+}
+
+func (r Rule) String() string { return r.Provider + ":" + r.ModelPattern }
+
+// compileGlob turns a model glob into an anchored regexp: "*" becomes ".*" and "?"
+// becomes ".", every other character is quoted. Quoting is what keeps a stored rule
+// from smuggling in alternation, anchors or a catastrophic backtrack.
+//
+// It returns an error only for a pattern that cannot compile, which is why ParseRule
+// can use it as a validator.
+func compileGlob(pattern string) (*regexp.Regexp, error) {
+	var b strings.Builder
+	b.WriteByte('^')
+	for _, r := range pattern {
+		switch r {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	b.WriteByte('$')
+	return regexp.Compile(b.String())
+}
+
+func (r Rule) matches(provider, model string) bool {
+	if r.Provider != "*" && r.Provider != strings.ToLower(provider) {
+		return false
+	}
+	// The common grant. Short-circuits before any matching work.
+	if r.ModelPattern == "*" {
+		return true
+	}
+	re := r.re
+	if re == nil { // hand-built Rule, not produced by ParseRule
+		var err error
+		if re, err = compileGlob(r.ModelPattern); err != nil {
+			return false
+		}
+	}
+	return re.MatchString(strings.ToLower(model))
+}
+
+func (p Policy) Allows(provider, model string) bool {
+	for _, r := range p {
+		if r.matches(provider, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// Covers reports whether the policy allows model on every one of providers, the
+// providers serving it right now. Upstream picks among them when it routes, so
+// allowing fewer than all would let a request land on one the policy does not allow.
+// A model no provider serves is not covered: the answer fails closed.
+func (p Policy) Covers(model string, providers []string) bool {
+	if len(providers) == 0 {
+		return false
+	}
+	for _, provider := range providers {
+		if !p.Allows(provider, model) {
+			return false
+		}
+	}
+	return true
+}

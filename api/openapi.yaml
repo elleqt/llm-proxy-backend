@@ -1,0 +1,1020 @@
+openapi: 3.1.0
+info:
+  title: llm-proxy web API
+  version: 0.1.0
+  description: |
+    The browser-facing API of llm-proxy: the user cabinet and the admin panel.
+    This is NOT the proxied LLM API (`/v1/...`), which the embedded upstream serves
+    and which authenticates with API tokens, not sessions.
+
+    Conventions:
+    - Authentication is a session cookie set by `POST /api/auth/login` or the OIDC
+      callback. It is `HttpOnly`, so no endpoint ever returns a session id.
+    - A restricted session (temporary password not yet changed) may call only
+      `GET /api/me`, `POST /api/auth/password` and `POST /api/auth/logout`; every
+      other authenticated endpoint answers 403 with code `password_change_required`.
+    - An authenticated endpoint called without a valid session answers 401 with code
+      `unauthenticated`. The only other 401 code is `invalid_credentials`, and it is
+      returned only by `POST /api/auth/login` and `POST /api/auth/password`, where it
+      rejects what was typed and leaves the session alone: a client must not treat it
+      as a signed-out session.
+    - Every error the web API writes, including those from its middleware (session,
+      restriction, content type), is a JSON `Error` - never plain text.
+    - Codes any endpoint may answer besides those it declares: `unsupported_media_type`
+      (415, a mutating request without `Content-Type: application/json`),
+      `payload_too_large` (413), `rate_limited` (429 with `Retry-After`, sign-in and
+      password endpoints only), `internal` (500), `not_found` (404, an unknown or malformed
+      id in the path, or an `/api/admin/*` route called by a non-administrator), and
+      `invalid_input` (422, a body or query parameter that is not what the operation
+      expects, with `field` when one field is at fault).
+    - Every error body is `Error`. Clients render text from `code`, never from
+      `message`, so the interface stays translatable.
+    - Timestamps are RFC 3339 in UTC. Ids are UUIDs unless stated otherwise.
+    - A secret (API token, temporary password) appears in exactly one response:
+      the one that creates it. No other endpoint can return it again.
+
+servers:
+  - url: /
+
+tags:
+  - name: auth
+  - name: cabinet
+  - name: admin-users
+  - name: admin-providers
+  - name: admin-settings
+
+paths:
+  /api/auth/config:
+    get:
+      tags: [auth]
+      operationId: getAuthConfig
+      summary: What the login screen may offer. Unauthenticated.
+      security: []
+      responses:
+        "200":
+          description: Login options.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthConfig" }
+
+  /api/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Local sign-in. Sets the session cookie.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Signed in. The body is the same as `GET /api/me`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401":
+          description: >
+            `invalid_credentials` — deliberately identical for an unknown address,
+            a wrong password, a blocked user and a service account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: "`not_found` — local sign-in is turned off (`AuthConfig.localLogin` is false); the route answers as an unknown one."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "429":
+          description: "`locked_out` — too many failed attempts for this address; `rate_limited` — too many attempts from this client. Both carry `Retry-After`."
+          headers:
+            Retry-After:
+              schema: { type: integer, description: Seconds until the next attempt is accepted. }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/oidc/start:
+    get:
+      tags: [auth]
+      operationId: startOIDC
+      summary: Redirects the browser to the identity provider.
+      security: []
+      responses:
+        "302": { description: Redirect to the identity provider. }
+        "404":
+          description: "`oidc_disabled`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/auth/oidc/callback:
+    get:
+      tags: [auth]
+      operationId: oidcCallback
+      summary: >
+        Identity-provider redirect target. On success sets the session cookie and
+        redirects to `/`; on refusal redirects to `/login?error=<code>` with one of
+        `oidc_forbidden`, `oidc_failed`.
+      security: []
+      parameters:
+        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: state, in: query, required: true, schema: { type: string } }
+      responses:
+        "302": { description: Redirect back into the application. }
+
+  /api/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      responses:
+        "204": { description: Signed out; the cookie is cleared. }
+
+  /api/auth/password:
+    post:
+      tags: [auth]
+      operationId: changePassword
+      summary: >
+        Change the caller's password. `currentPassword` is required unless the
+        session is restricted (the temporary password was proved at sign-in).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PasswordChangeRequest" }
+      responses:
+        "204": { description: Changed. A restricted session becomes a full one. }
+        "400":
+          description: "`weak_password` or `empty_password`, with `field`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: "`invalid_credentials` — the current password is wrong or the temporary one expired."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me:
+    get:
+      tags: [cabinet]
+      operationId: getMe
+      responses:
+        "200":
+          description: The signed-in user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+
+  /api/me/tokens:
+    get:
+      tags: [cabinet]
+      operationId: listMyTokens
+      responses:
+        "200":
+          description: The caller's API tokens, newest first, revoked ones included.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Token" }
+    post:
+      tags: [cabinet]
+      operationId: issueMyToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueTokenRequest" }
+      responses:
+        "201":
+          description: Issued. `secret` is shown here and never again.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "422":
+          description: "`invalid_input` with `field: label` — empty, longer than 64 characters, or with control characters."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "`token_limit` — the account already holds 50 tokens that are not revoked; revoke one first."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/tokens/{tokenId}:
+    delete:
+      tags: [cabinet]
+      operationId: revokeMyToken
+      parameters:
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "204": { description: Revoked. Takes effect on the next proxied request. }
+        "404":
+          description: "`not_found` — also for a token owned by someone else."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/me/usage:
+    get:
+      tags: [cabinet]
+      operationId: getMyUsage
+      parameters:
+        - $ref: "#/components/parameters/From"
+        - $ref: "#/components/parameters/To"
+      responses:
+        "200":
+          description: Aggregated consumption for the caller.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Usage" }
+
+  /api/connect:
+    get:
+      tags: [cabinet]
+      operationId: getConnectInfo
+      summary: Addresses the connection instructions are rendered from.
+      responses:
+        "200":
+          description: Deployment addresses. The client holds the per-tool templates.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ConnectInfo" }
+
+  /api/admin/users:
+    get:
+      tags: [admin-users]
+      operationId: listUsers
+      responses:
+        "200":
+          description: Every account, humans and service accounts.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/AdminUser" }
+    post:
+      tags: [admin-users]
+      operationId: createUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+      responses:
+        "201":
+          description: >
+            Created. For a human with local sign-in, `temporaryPassword` is set and
+            shown only here. A service account and an OIDC-only invitation get none.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreatedUser" }
+        "409":
+          description: "`email_taken` — compared case-insensitively."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >
+            `invalid_input` with `field` naming the offending field (kind, email, role,
+            signIn, displayName), or `invalid_rule` with `field` set to the first bad rule.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}:
+    get:
+      tags: [admin-users]
+      operationId: getUser
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      responses:
+        "200":
+          description: One account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUser" }
+    patch:
+      tags: [admin-users]
+      operationId: updateUser
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateUserRequest" }
+      responses:
+        "200":
+          description: Updated. A policy change applies on the user's next request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminUser" }
+        "409":
+          description: >
+            `policy_managed_by_idp` — the policy is recomputed at every IdP login and cannot be
+            edited here while the group mapping is configured. `self_lockout` — an administrator
+            tried to block themselves or remove their own admin role.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`invalid_rule` with `field` set to the offending rule."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/password-reset:
+    post:
+      tags: [admin-users]
+      operationId: resetUserPassword
+      summary: Issue a new temporary password. The user must change it at next sign-in.
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      responses:
+        "200":
+          description: The temporary password, shown only here.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TemporaryPassword" }
+        "409":
+          description: "`not_local` — a service account has no password."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/invitation:
+    post:
+      tags: [admin-users]
+      operationId: renewUserInvitation
+      summary: >
+        Issue a fresh identity-provider invitation for a human who has not linked an
+        identity yet (the old one lapsed or was consumed without a link). Replaces any
+        previous invitation for that account.
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      responses:
+        "204": { description: Invited. The first IdP sign-in with the account's address claims it. }
+        "409":
+          description: >
+            `already_linked` — the account already has an identity-provider link;
+            `not_invitable` — a service account, an account without an email address, or
+            identity-provider sign-in is not configured.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/tokens:
+    get:
+      tags: [admin-users]
+      operationId: listUserTokens
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      responses:
+        "200":
+          description: That account's tokens.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Token" }
+    post:
+      tags: [admin-users]
+      operationId: issueUserToken
+      summary: Issue a token on behalf of an account — the only way a service account gets one.
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/IssueTokenRequest" }
+      responses:
+        "201":
+          description: Issued. `secret` is shown here and never again.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "422":
+          description: "`invalid_input` with `field: label` — empty, longer than 64 characters, or with control characters."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "`token_limit` — the account already holds 50 tokens that are not revoked; revoke one first."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/tokens/{tokenId}:
+    delete:
+      tags: [admin-users]
+      operationId: revokeUserToken
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/TokenId"
+      responses:
+        "204": { description: Revoked. }
+        "404":
+          description: "`not_found` — no such token on that account."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/activity:
+    get:
+      tags: [admin-users]
+      operationId: getUserActivity
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+      responses:
+        "200":
+          description: Recent proxied requests and recent audit events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+
+  /api/admin/catalog:
+    get:
+      tags: [admin-users]
+      operationId: getCatalog
+      summary: Providers and the models they serve right now, for the policy editor.
+      responses:
+        "200":
+          description: The live catalogue.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Catalog" }
+
+  /api/admin/policy/preview:
+    post:
+      tags: [admin-users]
+      operationId: previewPolicy
+      summary: >
+        Which models of today's catalogue a set of rules covers. A wildcard rule also
+        covers models published later; the preview can only show today's.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyPreviewRequest" }
+      responses:
+        "200":
+          description: Coverage and per-rule parse errors.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyPreview" }
+
+  /api/admin/providers:
+    get:
+      tags: [admin-providers]
+      operationId: listProviderAccounts
+      responses:
+        "200":
+          description: Vendor accounts the gateway holds.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProviderAccount" }
+
+  /api/admin/providers/login/start:
+    post:
+      tags: [admin-providers]
+      operationId: startProviderLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderLoginStartRequest" }
+      responses:
+        "201":
+          description: >
+            A pending login. The administrator opens `authURL` in their own browser,
+            completes the vendor sign-in, and pastes the URL they land on into
+            `complete` before `expiresAt`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderLoginSession" }
+        "409":
+          description: "`login_busy` — too many vendor logins are pending; finish or abandon one and retry."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`unsupported_provider`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/providers/login/complete:
+    post:
+      tags: [admin-providers]
+      operationId: completeProviderLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProviderLoginCompleteRequest" }
+      responses:
+        "201":
+          description: The account was added and is routable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderAccount" }
+        "410":
+          description: "`login_expired` — the session timed out or was already used."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`login_failed` — the vendor rejected the callback."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/providers/{accountId}:
+    patch:
+      tags: [admin-providers]
+      operationId: updateProviderAccount
+      parameters: [{ $ref: "#/components/parameters/AccountId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              properties:
+                disabled: { type: boolean }
+      responses:
+        "200":
+          description: Updated.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderAccount" }
+    delete:
+      tags: [admin-providers]
+      operationId: removeProviderAccount
+      parameters: [{ $ref: "#/components/parameters/AccountId" }]
+      responses:
+        "204": { description: Removed from memory and from storage. }
+
+  /api/admin/settings:
+    get:
+      tags: [admin-settings]
+      operationId: getSettings
+      responses:
+        "200":
+          description: The gateway settings.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Settings" }
+    put:
+      tags: [admin-settings]
+      operationId: updateSettings
+      summary: >
+        Validate, and unless `dryRun`, apply. The response always carries the diff
+        against the running configuration, so the client can show it before applying.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SettingsUpdateRequest" }
+      responses:
+        "200":
+          description: Validated, and applied unless `dryRun`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SettingsUpdateResult" }
+        "422":
+          description: >
+            `invalid_settings` or `forbidden_setting` (a field the gateway owns, such as
+            the listen address, the auth directory, the management secret or config API
+            keys), with `field` naming it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/prices:
+    get:
+      tags: [admin-settings]
+      operationId: getPrices
+      responses:
+        "200":
+          description: The price list used to estimate cost in metrics.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ModelPrice" }
+    put:
+      tags: [admin-settings]
+      operationId: replacePrices
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: "#/components/schemas/ModelPrice" }
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ModelPrice" }
+        "422":
+          description: >
+            `invalid_input` with `field` naming the entry and value, e.g. `[2].input` (a
+            negative price) or `[3]` (a provider and model listed twice). Nothing is replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+components:
+  securitySchemes:
+    session:
+      type: apiKey
+      in: cookie
+      name: llmproxy_session
+
+  parameters:
+    UserId: { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+    TokenId: { name: tokenId, in: path, required: true, schema: { type: string, format: uuid } }
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      description: A vendor account id. Not a UUID — the upstream credential identifier.
+      schema: { type: string }
+    From: { name: from, in: query, schema: { type: string, format: date-time }, description: Defaults to 7 days before `to`. }
+    To: { name: to, in: query, schema: { type: string, format: date-time }, description: Defaults to now. }
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Stable machine code. The client translates this, not `message`.
+          examples: [invalid_credentials]
+        message: { type: string, description: English diagnostic for logs. Not for display. }
+        field: { type: string, description: "The request field the error is about, when there is one." }
+
+    AuthConfig:
+      type: object
+      required: [localLogin, oidc]
+      properties:
+        localLogin: { type: boolean, description: Whether the email-and-password form is offered. }
+        oidc:
+          type: object
+          required: [enabled]
+          properties:
+            enabled: { type: boolean }
+            displayName: { type: string, description: "Button label, e.g. the identity provider's name." }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string }
+        password: { type: string }
+
+    PasswordChangeRequest:
+      type: object
+      required: [newPassword]
+      properties:
+        currentPassword: { type: string, description: Required on a full session. }
+        newPassword: { type: string, minLength: 12 }
+
+    Kind: { type: string, enum: [human, service] }
+    Role: { type: string, enum: [user, admin] }
+    Status: { type: string, enum: [active, blocked] }
+    PolicySource:
+      type: string
+      enum: [local, idp]
+      description: "`idp` means the policy is recomputed from group claims at every sign-in and is read-only here."
+
+    Policy:
+      type: array
+      description: >
+        Allow-list rules `<provider>:<model-glob>`. The glob dialect is exactly `*`
+        (any run of characters, including `/` and `:`) and `?` (one character);
+        everything else is literal. A wildcard covers models published later.
+      items: { type: string, examples: ["chatgpt:*", "claude:claude-sonnet-5"] }
+
+    Me:
+      type: object
+      required: [id, kind, displayName, role, restricted, policy, policySource]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/Kind" }
+        email: { type: [string, "null"] }
+        displayName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        restricted:
+          type: boolean
+          description: True while a temporary password has not been changed.
+        policy: { $ref: "#/components/schemas/Policy" }
+        policySource: { $ref: "#/components/schemas/PolicySource" }
+
+    Token:
+      type: object
+      required: [id, label, prefix, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        label: { type: string }
+        prefix: { type: string, description: "The first characters of the secret, to tell keys apart." }
+        createdAt: { type: string, format: date-time }
+        lastUsedAt:
+          type: [string, "null"]
+          format: date-time
+          description: Null if the token was never used.
+        revokedAt: { type: [string, "null"], format: date-time }
+
+    IssueTokenRequest:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 64, description: "Printable text; control characters are refused." }
+
+    IssuedToken:
+      type: object
+      required: [token, secret]
+      properties:
+        token: { $ref: "#/components/schemas/Token" }
+        secret: { type: string, description: The full API token. Shown once. }
+
+    Usage:
+      type: object
+      required: [from, to, bucket, totals, points]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        bucket: { type: string, enum: [hour, day] }
+        totals:
+          type: object
+          required: [requests, tokensTotal]
+          properties:
+            requests: { type: integer, description: "Served requests. An attempt the gateway retried on another account is not counted twice; failed attempts are not counted." }
+            tokensTotal: { type: integer, description: "Every token spent, including tokens of failed or retried attempts." }
+        points:
+          type: array
+          items:
+            type: object
+            required: [at, model, requests, tokensTotal]
+            properties:
+              at: { type: string, format: date-time, description: Start of the bucket. }
+              model: { type: string }
+              requests: { type: integer, description: "Served requests in this bucket, as in `totals.requests`." }
+              tokensTotal: { type: integer }
+
+    ConnectInfo:
+      type: object
+      required: [apiBaseURL]
+      properties:
+        apiBaseURL:
+          type: string
+          description: Public base URL of the proxied API, without a trailing slash.
+
+    AdminUser:
+      type: object
+      required: [id, kind, displayName, role, status, policy, policySource, mustChangePassword, signIn, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { $ref: "#/components/schemas/Kind" }
+        email: { type: [string, "null"] }
+        displayName: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/Status" }
+        policy: { $ref: "#/components/schemas/Policy" }
+        policySource: { $ref: "#/components/schemas/PolicySource" }
+        mustChangePassword: { type: boolean }
+        signIn:
+          type: array
+          description: >
+            Sign-in methods that work now: `password` when a usable (unexpired) password is
+            set, `oidc` when an identity-provider identity is linked. Empty for a service
+            account and for a person whose only way in is a pending invitation.
+          items: { type: string, enum: [password, oidc] }
+        invitationExpiresAt:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Set while an identity-provider invitation exists and no identity is linked yet;
+            it may lie in the past (lapsed - renew it with POST .../invitation).
+        lastSeenAt: { type: [string, "null"], format: date-time }
+        createdAt: { type: string, format: date-time }
+
+    CreateUserRequest:
+      type: object
+      required: [kind, displayName, policy]
+      properties:
+        kind: { $ref: "#/components/schemas/Kind" }
+        email: { type: string, description: Required for a human. Absent for a service account. }
+        displayName: { type: string, minLength: 1 }
+        role: { $ref: "#/components/schemas/Role" }
+        policy: { $ref: "#/components/schemas/Policy" }
+        signIn:
+          type: string
+          enum: [password, oidc]
+          description: >
+            For a human only. `password` issues a temporary password; `oidc` records an
+            invitation the first sign-in with that address through the identity provider
+            will claim. Ignored for a service account.
+
+    CreatedUser:
+      type: object
+      required: [user]
+      properties:
+        user: { $ref: "#/components/schemas/AdminUser" }
+        temporaryPassword: { $ref: "#/components/schemas/TemporaryPassword" }
+
+    TemporaryPassword:
+      type: object
+      required: [password, expiresAt]
+      properties:
+        password: { type: string, description: Shown once. }
+        expiresAt: { type: string, format: date-time }
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        displayName: { type: string, minLength: 1 }
+        role: { $ref: "#/components/schemas/Role" }
+        status: { $ref: "#/components/schemas/Status" }
+        policy: { $ref: "#/components/schemas/Policy" }
+
+    Activity:
+      type: object
+      required: [requests, audit]
+      properties:
+        requests:
+          type: array
+          items:
+            type: object
+            required: [at, provider, model, stream, statusCode, tokensTotal, latencyMs]
+            properties:
+              at: { type: string, format: date-time }
+              tokenId: { type: [string, "null"], format: uuid }
+              provider: { type: string }
+              model: { type: string }
+              stream: { type: boolean }
+              statusCode: { type: integer }
+              tokensTotal: { type: integer }
+              latencyMs: { type: integer }
+        audit:
+          type: array
+          items:
+            type: object
+            required: [at, action]
+            properties:
+              at: { type: string, format: date-time }
+              action: { type: string, examples: [token.issue, token.revoke, user.policy.update, auth.sign_in] }
+              target: { type: string }
+              actorId: { type: [string, "null"], format: uuid }
+              detail: { type: object, additionalProperties: true }
+
+    Catalog:
+      type: object
+      required: [providers]
+      properties:
+        providers:
+          type: array
+          items:
+            type: object
+            required: [name, models]
+            properties:
+              name: { type: string, description: The provider name as written in policy rules. }
+              models:
+                type: array
+                items: { type: string }
+
+    PolicyPreviewRequest:
+      type: object
+      required: [rules]
+      properties:
+        rules: { $ref: "#/components/schemas/Policy" }
+
+    PolicyPreview:
+      type: object
+      required: [errors, covered]
+      properties:
+        errors:
+          type: array
+          items:
+            type: object
+            required: [rule, code]
+            properties:
+              rule: { type: string }
+              code: { type: string, examples: [invalid_rule] }
+        covered:
+          type: array
+          description: Models of today's catalogue the rules allow.
+          items:
+            type: object
+            required: [provider, model]
+            properties:
+              provider: { type: string }
+              model: { type: string }
+
+    ProviderAccount:
+      type: object
+      required: [id, provider, status, disabled, quota]
+      properties:
+        id: { type: string }
+        provider: { type: string, description: Policy-facing provider name. }
+        label: { type: string }
+        email: { type: [string, "null"] }
+        status: { type: string, examples: [active, error, disabled] }
+        disabled: { type: boolean }
+        lastError: { type: [string, "null"] }
+        lastRefreshedAt: { type: [string, "null"], format: date-time }
+        quota:
+          type: array
+          description: Direct vendor signals. No capacity estimate.
+          items:
+            type: object
+            required: [window, usedRatio]
+            properties:
+              window: { type: string, examples: [5h, 7d] }
+              usedRatio: { type: number, minimum: 0, maximum: 1 }
+              resetAt: { type: [string, "null"], format: date-time }
+              observedAt: { type: [string, "null"], format: date-time }
+
+    ProviderLoginStartRequest:
+      type: object
+      required: [provider]
+      properties:
+        provider: { type: string, enum: [claude, chatgpt] }
+
+    ProviderLoginSession:
+      type: object
+      required: [sessionId, authURL, expiresAt]
+      properties:
+        sessionId: { type: string }
+        authURL: { type: string, description: Open in the administrator's own browser. }
+        expiresAt: { type: string, format: date-time }
+
+    ProviderLoginCompleteRequest:
+      type: object
+      required: [sessionId, callbackURL]
+      properties:
+        sessionId: { type: string }
+        callbackURL: { type: string, description: The full URL the vendor sign-in ended on. }
+
+    Settings:
+      type: object
+      required: [yaml, fields]
+      properties:
+        yaml:
+          type: string
+          description: >
+            The editable part of the upstream configuration as YAML. Fields the gateway
+            owns (listen address, auth directory, management, config API keys) are
+            absent and cannot be set.
+        fields:
+          type: object
+          description: The same values as typed form fields.
+          properties:
+            proxyURL: { type: string }
+            requestRetry: { type: integer, minimum: 0 }
+            maxRetryInterval: { type: integer, minimum: 0, description: Seconds. }
+
+    SettingsUpdateRequest:
+      type: object
+      properties:
+        yaml: { type: string, description: Replaces the whole editable document. Mutually exclusive with `fields`. }
+        fields:
+          type: object
+          description: Patches individual typed fields. Mutually exclusive with `yaml`.
+          properties:
+            proxyURL: { type: string }
+            requestRetry: { type: integer, minimum: 0 }
+            maxRetryInterval: { type: integer, minimum: 0 }
+        dryRun: { type: boolean, default: false }
+
+    SettingsUpdateResult:
+      type: object
+      required: [applied, diff, settings]
+      properties:
+        applied: { type: boolean }
+        diff: { type: string, description: Unified diff of the YAML against the running configuration. }
+        settings: { $ref: "#/components/schemas/Settings" }
+
+    ModelPrice:
+      type: object
+      required: [provider, model, input, output, cacheRead, cacheWrite]
+      description: US dollars per million tokens. An estimate of work done, not a bill.
+      properties:
+        provider: { type: string }
+        model: { type: string }
+        input: { type: number, format: double, minimum: 0 }
+        output: { type: number, format: double, minimum: 0 }
+        cacheRead: { type: number, format: double, minimum: 0 }
+        cacheWrite: { type: number, format: double, minimum: 0 }
+
+security:
+  - session: []

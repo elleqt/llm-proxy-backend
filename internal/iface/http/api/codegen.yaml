@@ -1,0 +1,8 @@
+# oapi-codegen configuration (pinned in the Makefile's generate target). Types only:
+# the router is the standard library's ServeMux and the handlers are written by hand;
+# what is generated is every request and response body, so a contract change that
+# alters one breaks the build.
+package: api
+output: internal/iface/http/api/api.gen.go
+generate:
+  models: true
