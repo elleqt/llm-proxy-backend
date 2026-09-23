@@ -256,3 +256,46 @@ func TestConnectNamesThePublicAPI(t *testing.T) {
 		t.Fatalf("apiBaseURL = %q, want %q", out.ApiBaseURL, testAPIURL)
 	}
 }
+
+// The caller's models follow the policy the session loads with each request: an
+// administrator's edit shows on the next call, a provider with nothing allowed is
+// absent, and an empty policy is an empty list rather than null.
+func TestMyModelsFollowTheCurrentPolicy(t *testing.T) {
+	e := newEnv(t)
+	served := map[string][]string{"claude": {"b", "a"}, "chatgpt": {"x"}}
+	e.catalog.EXPECT().Models().Return(served).Maybe()
+	e.catalog.EXPECT().ProvidersFor(mock.Anything).RunAndReturn(func(model string) []string {
+		if model == "x" {
+			return []string{"chatgpt"}
+		}
+		return []string{"claude"}
+	}).Maybe()
+	u := person("p@example.com")
+	current := u
+	e.users.EXPECT().ByID(mock.Anything, u.ID).RunAndReturn(func(context.Context, uuid.UUID) (identity.User, error) {
+		return current, nil
+	})
+	cookie := withCookie(e.signedIn(u))
+
+	for _, tc := range []struct {
+		rule string
+		want string
+	}{
+		{"claude:*", `{"providers":[{"models":["a","b"],"name":"claude"}]}`},
+		{"chatgpt:*", `{"providers":[{"models":["x"],"name":"chatgpt"}]}`},
+		{"", `{"providers":[]}`},
+	} {
+		current.Policy = nil
+		if tc.rule != "" {
+			rule, err := access.ParseRule(tc.rule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current.Policy = access.Policy{rule}
+		}
+		rec := e.do(http.MethodGet, "/api/me/models", "", cookie)
+		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != tc.want {
+			t.Errorf("policy %q: GET /api/me/models = %d %s, want 200 %s", tc.rule, rec.Code, rec.Body, tc.want)
+		}
+	}
+}

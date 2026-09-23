@@ -23,6 +23,8 @@ type Deps struct {
 	LocalLogin bool
 	// Usage serves the cabinet's consumption chart.
 	Usage *app.UsageService
+	// Models serves the cabinet's list of the models the caller may use.
+	Models *app.ModelsService
 
 	// The administration API's services.
 	AdminUsers *app.AdminUsers
@@ -103,7 +105,7 @@ type router struct {
 // then per route the rate limit, the session guard and, on /api/admin/*, the
 // administrator guard.
 func NewRouter(d Deps) (http.Handler, error) {
-	if d.Auth == nil || d.Tokens == nil || d.Usage == nil || d.Clock == nil || d.Log == nil ||
+	if d.Auth == nil || d.Tokens == nil || d.Usage == nil || d.Models == nil || d.Clock == nil || d.Log == nil ||
 		d.AdminUsers == nil || d.Settings == nil || d.Prices == nil || d.Providers == nil {
 		return nil, errors.New("web: router is missing a dependency")
 	}
@@ -169,6 +171,7 @@ func (rt *router) routes() map[string]http.HandlerFunc {
 		"POST /api/me/tokens":             rt.issueMyToken,
 		"DELETE /api/me/tokens/{tokenId}": rt.revokeMyToken,
 		"GET /api/me/usage":               rt.getMyUsage,
+		"GET /api/me/models":              rt.listMyModels,
 		"GET /api/connect":                rt.getConnectInfo,
 	}
 	if !rt.LocalLogin {

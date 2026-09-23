@@ -129,3 +129,49 @@ func (p Policy) Covers(model string, providers []string) bool {
 	}
 	return true
 }
+
+// Catalog answers which providers serve a model right now, under the provider
+// names policies are written in.
+type Catalog interface {
+	// ProvidersFor returns every provider serving model; nil if none does.
+	ProvidersFor(model string) []string
+}
+
+// Admits reports whether a request naming requested gets through: the model it
+// resolves to as upstream routes it (Routed) is covered on every provider serving
+// it (Covers). It is the one rule the gateway enforces on every proxied request,
+// filters every model listing by, and the cabinet lists a user's models by.
+func (p Policy) Admits(catalog Catalog, requested string) bool {
+	model, providers := Routed(catalog, requested)
+	return p.Covers(model, providers)
+}
+
+// Routed resolves requested as upstream does before routing
+// (sdk/api/handlers/handlers_routing.go getRequestDetailsWithOptions): the name
+// without its thinking suffix first, then the full name. It returns the
+// registered model the providers were found for. "auto" names whichever model
+// upstream finds available first, so it is never resolved.
+func Routed(catalog Catalog, requested string) (model string, providers []string) {
+	base := thinkingBase(requested)
+	if requested == "auto" || base == "auto" {
+		return "", nil
+	}
+	trimmed := strings.TrimSpace(base)
+	if providers := catalog.ProvidersFor(trimmed); len(providers) > 0 {
+		return trimmed, providers
+	}
+	if trimmed != requested {
+		return requested, catalog.ProvidersFor(requested)
+	}
+	return trimmed, nil
+}
+
+// thinkingBase is the model name without a trailing "(suffix)", as upstream's
+// thinking.ParseSuffix splits it.
+func thinkingBase(model string) string {
+	open := strings.LastIndex(model, "(")
+	if open == -1 || !strings.HasSuffix(model, ")") {
+		return model
+	}
+	return model[:open]
+}

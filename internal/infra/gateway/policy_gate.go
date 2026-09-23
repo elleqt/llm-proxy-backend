@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -13,11 +12,6 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 )
-
-// providerCatalog answers which providers serve a model; Catalog implements it.
-type providerCatalog interface {
-	ProvidersFor(model string) []string
-}
 
 // policyGate is the proxied listener's default-deny guard, first in the
 // embedded server's middleware. It does not rely on upstream's access check,
@@ -44,11 +38,12 @@ type providerCatalog interface {
 //     the owner's policy covering the model on every provider serving it
 //     (403 otherwise, including a model no provider serves). The 403 names
 //     the requested model and nothing else.
-//   - A listing route lists only the models the same rule (allows) admits.
+//   - A listing route lists only the models the same rule (access.Policy.Admits)
+//     admits.
 //
 // observe is told of every 401 and every policy or route refusal; nil observes
 // nothing.
-func policyGate(resolver Resolver, catalog providerCatalog, observe GateObserver) gin.HandlerFunc {
+func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver) gin.HandlerFunc {
 	if observe == nil {
 		observe = noGateObserver{}
 	}
@@ -163,10 +158,10 @@ func policyGate(resolver Resolver, catalog providerCatalog, observe GateObserver
 			requested = model
 		}
 		if r.kind == routeListing {
-			serveListing(c, r.listing, func(model string) bool { return allows(policy, catalog, model) })
+			serveListing(c, r.listing, func(model string) bool { return policy.Admits(catalog, model) })
 			return
 		}
-		model, providers := routedProviders(catalog, requested)
+		model, providers := access.Routed(catalog, requested)
 		if !policy.Covers(model, providers) {
 			reason := DenyModelNotAllowed
 			if len(providers) == 0 {
@@ -223,32 +218,4 @@ func (b *limitedBody) Read(p []byte) (int, error) {
 // abortWithError answers in the error shape upstream's handlers use.
 func abortWithError(c *gin.Context, status int, kind, message string) {
 	c.AbortWithStatusJSON(status, gin.H{"error": gin.H{"message": message, "type": kind}})
-}
-
-// allows reports whether policy covers the model a request names, resolved
-// as upstream routes it, on every provider that could serve it
-// (access.Policy.Covers, the one rule the admin screens apply too).
-func allows(policy access.Policy, catalog providerCatalog, requested string) bool {
-	model, providers := routedProviders(catalog, requested)
-	return policy.Covers(model, providers)
-}
-
-// routedProviders resolves requested as upstream does before routing
-// (sdk/api/handlers/handlers_routing.go getRequestDetailsWithOptions): the
-// name without its thinking suffix first, then the full name. It returns the
-// registered model the providers were found for. "auto" names whichever model
-// upstream finds available first, so it is never resolved.
-func routedProviders(catalog providerCatalog, requested string) (string, []string) {
-	base := thinkingBase(requested)
-	if requested == "auto" || base == "auto" {
-		return "", nil
-	}
-	trimmed := strings.TrimSpace(base)
-	if providers := catalog.ProvidersFor(trimmed); len(providers) > 0 {
-		return trimmed, providers
-	}
-	if trimmed != requested {
-		return requested, catalog.ProvidersFor(requested)
-	}
-	return trimmed, nil
 }

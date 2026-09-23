@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -13,6 +14,9 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
 // modelList is one listing format: how to ask for it and how to read the
@@ -243,5 +247,66 @@ func TestListingThroughTheWire(t *testing.T) {
 	ids := arrayNames("data", "id", same)(t, body)
 	if !slices.Contains(ids, v.allowedAlias) || slices.Contains(ids, v.otherAlias) || slices.Contains(ids, v.sharedAlias) {
 		t.Fatalf("GET /v1/models = %v, want %s and neither %s nor %s", ids, v.allowedAlias, v.otherAlias, v.sharedAlias)
+	}
+}
+
+// TestCabinetListsWhatTheListingLists: the cabinet's list of a user's models
+// (app.ModelsService over this gateway's catalogue) holds exactly the models
+// GET /v1/models lists to the same user's key, each under every provider
+// serving it. One model is only reachable through upstream's thinking-suffix
+// resolution: "<think>(high)" is registered for chatgpt, but a request for it
+// routes to "<think>", which only claude serves — so a side that judged it by
+// its own providers instead of the gate's routing would disagree.
+func TestCabinetListsWhatTheListingLists(t *testing.T) {
+	policy := &switchableResolver{}
+	r := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	cabinet := app.NewModelsService(r.gateway.Catalog())
+
+	seq := strconv.FormatInt(wireSeq.Add(1), 10)
+	claudeOnly, codexOnly, shared := "cab-claude-"+seq, "cab-codex-"+seq, "cab-shared-"+seq
+	think := "cab-think-" + seq
+	thinkHigh := think + "(high)"
+	registerClient(t, "cab-client-claude-"+seq, "claude", claudeOnly, shared, think)
+	registerClient(t, "cab-client-codex-"+seq, "codex", codexOnly, shared, thinkHigh)
+
+	for _, tc := range []struct {
+		rules []string
+		want  map[string][]string // this test's models the cabinet lists, by provider
+	}{
+		{[]string{"claude:*"}, map[string][]string{"claude": {claudeOnly, think}, "chatgpt": {thinkHigh}}},
+		{[]string{"chatgpt:*"}, map[string][]string{"chatgpt": {codexOnly}}},
+		{[]string{"claude:*", "chatgpt:cab-*"}, map[string][]string{
+			"claude": {claudeOnly, shared, think}, "chatgpt": {codexOnly, shared, thinkHigh}}},
+		{nil, map[string][]string{}},
+	} {
+		policy.set(tc.rules...)
+		code, body := r.getAs(t, "/v1/models", nil)
+		if code != http.StatusOK {
+			t.Fatalf("GET /v1/models for %v = %d %s", tc.rules, code, body)
+		}
+		listed := arrayNames("data", "id", same)(t, body)
+		slices.Sort(listed)
+		listed = slices.Compact(listed)
+
+		providers := cabinet.Allowed(identity.User{Policy: mustPolicy(tc.rules...)})
+		var cabinetModels []string
+		ours := map[string][]string{}
+		for _, p := range providers {
+			cabinetModels = append(cabinetModels, p.Models...)
+			for _, m := range p.Models {
+				if strings.HasPrefix(m, "cab-") {
+					ours[p.Name] = append(ours[p.Name], m)
+				}
+			}
+		}
+		slices.Sort(cabinetModels)
+		cabinetModels = slices.Compact(cabinetModels)
+
+		if !slices.Equal(cabinetModels, listed) {
+			t.Errorf("policy %v: the cabinet lists %v, GET /v1/models lists %v", tc.rules, cabinetModels, listed)
+		}
+		if !maps.EqualFunc(ours, tc.want, slices.Equal) {
+			t.Errorf("policy %v: the cabinet lists this test's models as %v, want %v", tc.rules, ours, tc.want)
+		}
 	}
 }

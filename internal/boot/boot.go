@@ -256,6 +256,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 		OIDCDisplayName: cfg.OIDC.DisplayName,
 		LocalLogin:      cfg.Web.LocalLogin,
 		Usage:           app.NewUsageService(usage),
+		Models:          app.NewModelsService(g.Catalog()),
 		AdminUsers: app.NewAdminUsers(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
 			tokenService, hasher, audit, clock, g.Catalog(), app.AdminUsersConfig{
 				OIDCIssuer:             cfg.OIDC.Issuer,

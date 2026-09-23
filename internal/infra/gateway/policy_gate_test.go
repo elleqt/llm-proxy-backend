@@ -19,7 +19,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
-// catalogFunc is a providerCatalog stub.
+// catalogFunc is an access.Catalog stub.
 type catalogFunc func(model string) []string
 
 func (f catalogFunc) ProvidersFor(model string) []string { return f(model) }
@@ -36,7 +36,7 @@ var gatePrincipal = app.Principal{UserID: uuid.New(), TokenID: uuid.New()}
 // gated is a gin engine serving every route upstream registers behind the
 // gate; reached reports whether a request got past it. A handler that is
 // reached answers 200 with the image-edit form's model when there is one.
-func gated(resolver Resolver, catalog providerCatalog) (engine *gin.Engine, reached *bool) {
+func gated(resolver Resolver, catalog access.Catalog) (engine *gin.Engine, reached *bool) {
 	reached = new(bool)
 	engine = gateEngine(resolver, catalog)
 	for key := range routes {

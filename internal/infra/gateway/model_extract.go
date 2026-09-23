@@ -204,13 +204,3 @@ func decodeClaudeModelID(id string) string {
 	}
 	return string(runes)
 }
-
-// thinkingBase is the model name without a trailing "(suffix)", as upstream's
-// thinking.ParseSuffix splits it.
-func thinkingBase(model string) string {
-	open := strings.LastIndex(model, "(")
-	if open == -1 || !strings.HasSuffix(model, ")") {
-		return model
-	}
-	return model[:open]
-}

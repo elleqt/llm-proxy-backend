@@ -187,6 +187,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 			cheapHasher(), e.sessions, e.audit, e.clock),
 		Tokens:       app.NewTokenService(e.users, e.tokens, e.audit, e.clock, e.log),
 		Usage:        app.NewUsageService(e.usage),
+		Models:       app.NewModelsService(e.catalog),
 		LocalLogin:   true,
 		Clock:        e.clock,
 		Log:          e.log,

@@ -322,6 +322,12 @@ func (rt *router) getCatalog(w http.ResponseWriter, r *http.Request) {
 		rt.adminFailure(w, r, err)
 		return
 	}
+	writeJSON(w, http.StatusOK, catalogOf(providers))
+}
+
+// catalogOf writes providers as the contract's Catalog; a provider's models are []
+// rather than null.
+func catalogOf(providers []app.CatalogProvider) api.Catalog {
 	out := api.Catalog{Providers: make([]catalogProvider, 0, len(providers))}
 	for _, p := range providers {
 		models := p.Models
@@ -330,7 +336,7 @@ func (rt *router) getCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Providers = append(out.Providers, catalogProvider{Name: p.Name, Models: models})
 	}
-	writeJSON(w, http.StatusOK, out)
+	return out
 }
 
 func (rt *router) previewPolicy(w http.ResponseWriter, r *http.Request) {

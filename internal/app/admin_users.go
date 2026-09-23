@@ -552,7 +552,7 @@ type PolicyPreview struct {
 	Invalid []string
 	// Covered holds every (provider, model) of today's catalogue the valid rules
 	// cover, sorted. A model is covered only if every provider serving it is allowed
-	// — the gate's rule, access.Policy.Covers — so a model two providers serve is
+	// — the gate's rule, access.Policy.Admits — so a model two providers serve is
 	// listed under both or under neither.
 	Covered []CoveredModel
 }
@@ -578,7 +578,7 @@ func (s *AdminUsers) PolicyPreview(actor identity.User, rules []string) (PolicyP
 		for _, model := range models {
 			ok, seen := covers[model]
 			if !seen {
-				ok = policy.Covers(model, s.catalog.ProvidersFor(model))
+				ok = policy.Admits(s.catalog, model)
 				covers[model] = ok
 			}
 			if ok {

@@ -189,3 +189,10 @@ func (rt *router) getMyUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, out)
 }
+
+// listMyModels answers the models the caller's keys may use now, by the caller's
+// policy as the session middleware loaded it for this request.
+func (rt *router) listMyModels(w http.ResponseWriter, r *http.Request) {
+	c, _ := callerFrom(r.Context())
+	writeJSON(w, http.StatusOK, catalogOf(rt.Models.Allowed(c.user)))
+}

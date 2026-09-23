@@ -25,7 +25,7 @@ import (
 // it through httptest recorders, which offer no read deadline: the gate is
 // handed a controller whose deadlines are accepted and ignored. Tests of the
 // deadline itself serve the real engine (startWith).
-func gateEngine(resolver Resolver, catalog providerCatalog) *gin.Engine {
+func gateEngine(resolver Resolver, catalog access.Catalog) *gin.Engine {
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) {
 		c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
