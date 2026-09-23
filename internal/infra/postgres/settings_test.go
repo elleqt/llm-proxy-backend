@@ -130,4 +130,50 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 			t.Fatalf("after an empty replace List = %+v, %v; want none", after, err)
 		}
 	})
+
+	t.Run("catalog prices and state replace together", func(t *testing.T) {
+		repo := postgres.NewPriceCatalogRepo(pool)
+		t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
+		t1 := t0.Add(time.Minute)
+		sonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
+		gpt := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10}
+		first := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"},
+			CheckedAt: t0, ChangedAt: t0}
+		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, gpt}, first, t0); err != nil {
+			t.Fatalf("first replace: %v", err)
+		}
+		cheaper := gpt
+		cheaper.Output = 8
+		second := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v2"`}, CheckedAt: t1, ChangedAt: t1}
+		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, cheaper}, second, t1); err != nil {
+			t.Fatalf("second replace: %v", err)
+		}
+		got, err := repo.List(ctx)
+		if err != nil || len(got) != 2 || !got[0].UpdatedAt.Equal(t1) || got[0].Output != 8 || !got[1].UpdatedAt.Equal(t0) {
+			t.Fatalf("List = %+v, %v; want gpt-6 changed at t1 and sonnet kept at t0", got, err)
+		}
+		if state, err := repo.State(ctx); err != nil || state != second {
+			t.Fatalf("State = %+v, %v; want %+v", state, err, second)
+		}
+
+		// A replacement that fails writes neither the prices nor the state.
+		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, sonnet}, first, t1.Add(time.Minute)); err == nil {
+			t.Fatal("Replace accepted a duplicate model")
+		}
+		if state, _ := repo.State(ctx); state != second {
+			t.Fatalf("a failed replace changed the state to %+v", state)
+		}
+
+		failed := second
+		failed.LastError = "the catalog answered 503"
+		if err := repo.SetState(ctx, failed); err != nil {
+			t.Fatalf("SetState: %v", err)
+		}
+		if state, err := repo.State(ctx); err != nil || state != failed {
+			t.Fatalf("State = %+v, %v; want %+v", state, err, failed)
+		}
+		if after, _ := repo.List(ctx); len(after) != 2 {
+			t.Fatalf("SetState changed the prices: %+v", after)
+		}
+	})
 }

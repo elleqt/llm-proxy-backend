@@ -492,6 +492,13 @@ type Logger interface {
 	Warnf(format string, args ...any)
 }
 
+// InfoLogger is a Logger that also reports routine outcomes, for a service whose
+// successes are worth a line too.
+type InfoLogger interface {
+	Logger
+	Infof(format string, args ...any)
+}
+
 // SettingsRepo stores the editable upstream configuration document, verbatim as the
 // administrator wrote it. Postgres is its source of truth: the gateway's boot
 // configuration is built from it (LoadBootConfig).
@@ -521,7 +528,7 @@ type ModelPrice struct {
 	UpdatedAt  time.Time
 }
 
-// PriceRepo stores the price list.
+// PriceRepo stores the manual price list: the administrator's overrides.
 type PriceRepo interface {
 	// List returns every price ordered by provider, then model.
 	List(ctx context.Context) ([]ModelPrice, error)
@@ -534,4 +541,67 @@ type PriceRepo interface {
 // estimate reads prices from memory rather than the database on every request.
 type PriceSink interface {
 	SetPrices(prices []ModelPrice)
+}
+
+// ErrCatalogDisabled refuses a price catalog check when no catalog source is
+// configured.
+var ErrCatalogDisabled = errors.New("app: price catalog disabled")
+
+// CatalogValidators are the HTTP cache validators of the last catalog a check
+// accepted, sent back so an unchanged catalog costs a 304 rather than a download.
+type CatalogValidators struct {
+	ETag         string
+	LastModified string
+}
+
+// CatalogFetch is one answer of the price catalog.
+type CatalogFetch struct {
+	// Unchanged is true when the catalog has not changed since the validators
+	// Fetch was given; Prices and Validators are then empty.
+	Unchanged bool
+	// Prices are the catalog's prices under our provider names, UpdatedAt unset.
+	Prices     []ModelPrice
+	Validators CatalogValidators
+}
+
+// PriceCatalogSource fetches the upstream price catalog. An error means the
+// catalog could not be read or understood; its text is short, safe to show an
+// administrator and never carries the response body.
+type PriceCatalogSource interface {
+	Fetch(ctx context.Context, since CatalogValidators) (CatalogFetch, error)
+}
+
+// CatalogState is what the store keeps about the catalog's checks. A zero time
+// means never.
+type CatalogState struct {
+	Validators CatalogValidators
+	// CheckedAt is the last successful check, whether or not the catalog changed.
+	CheckedAt time.Time
+	// ChangedAt is when the catalog prices in force last changed.
+	ChangedAt time.Time
+	// LastError is why the last check failed; empty once a check succeeds.
+	LastError string
+}
+
+// PriceCatalogRepo stores the catalog's prices and the state of its checks.
+type PriceCatalogRepo interface {
+	// List returns every catalog price ordered by provider, then model.
+	List(ctx context.Context) ([]ModelPrice, error)
+	// State returns the check state; the zero value before the first check.
+	State(ctx context.Context) (CatalogState, error)
+	// Replace makes prices the whole catalog price list and state the check
+	// state, atomically. A row whose rates did not change keeps its UpdatedAt; a
+	// new or changed row gets at.
+	Replace(ctx context.Context, prices []ModelPrice, state CatalogState, at time.Time) error
+	// SetState records the check state alone.
+	SetState(ctx context.Context, state CatalogState) error
+}
+
+// PriceCatalogMetrics is the price catalog's part of the metrics.
+type PriceCatalogMetrics interface {
+	// SetPriceCatalog reports the catalog prices in force and the last
+	// successful check (zero: never).
+	SetPriceCatalog(models int, checkedAt time.Time)
+	// ObservePriceCatalogFailure counts a failed check.
+	ObservePriceCatalogFailure()
 }

@@ -8,10 +8,12 @@ import (
 
 type priceKey struct{ provider, model string }
 
-// PriceTable is the in-memory price list: app.Prices fills it at boot and on every
-// replacement (it is an app.PriceSink), and ObserveUsage reads it (it is a
-// PriceLookup). A replacement swaps the whole table at once, so a request is priced
-// entirely at the old list or entirely at the new one, and reads take no lock.
+// PriceTable is the in-memory price list: app.Prices fills it with the effective
+// list (catalog prices under the manual overrides) at boot, on every replacement
+// and on every catalog change (it is an app.PriceSink), and ObserveUsage reads it
+// (it is a PriceLookup). A replacement swaps the whole table at once, so a request
+// is priced entirely at the old list or entirely at the new one, and reads take
+// no lock.
 type PriceTable struct {
 	table atomic.Pointer[map[priceKey]app.ModelPrice]
 }

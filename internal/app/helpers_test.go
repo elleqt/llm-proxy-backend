@@ -40,6 +40,7 @@ func mustPolicy(t *testing.T, rules ...string) access.Policy {
 type discardLogger struct{}
 
 func (discardLogger) Warnf(string, ...any) {}
+func (discardLogger) Infof(string, ...any) {}
 
 // testHasher runs the real argon2 derivations with room for every test in the package
 // to derive at once: the bound is under test in hasher_test.go, not here.
@@ -50,7 +51,7 @@ func testHasher() *app.PasswordHasher {
 // Pin each double to the port it stands in for: a double that stops satisfying its
 // interface fails here rather than in a service test months later.
 var (
-	_ app.AuditSink = nopAudit{}
-	_ app.Clock     = systemClock{}
-	_ app.Logger    = discardLogger{}
+	_ app.AuditSink  = nopAudit{}
+	_ app.Clock      = systemClock{}
+	_ app.InfoLogger = discardLogger{}
 )

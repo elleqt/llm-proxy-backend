@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -98,9 +99,9 @@ func TestSettingsRefusalsNameTheField(t *testing.T) {
 }
 
 // Rates are float64 end to end: a price that float32 cannot hold exactly reaches the
-// store as sent, and comes back as sent.
+// store as sent, and comes back as sent, as a manual row.
 func TestPricesAreReplacedAtFullPrecision(t *testing.T) {
-	e := newEnv(t)
+	e := newEnv(t, withoutPriceCatalog)
 	var stored []app.ModelPrice
 	e.prices.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, l []app.ModelPrice, _ time.Time) error {
 		stored = l
@@ -110,29 +111,73 @@ func TestPricesAreReplacedAtFullPrecision(t *testing.T) {
 	e.prices.EXPECT().List(mock.Anything).RunAndReturn(func(context.Context) ([]app.ModelPrice, error) { return stored, nil })
 	const body = `[{"provider":"claude","model":"m","input":0.15,"output":1.2,"cacheRead":0.015,"cacheWrite":0.1875}]`
 	rec := e.do(http.MethodPut, "/api/admin/prices", body, withCookie(e.signedIn(admin())))
-	var got []api.ModelPrice
+	var got api.PriceList
 	decodeBody(t, rec, http.StatusOK, &got)
 	want := app.ModelPrice{Provider: "claude", Model: "m", Input: 0.15, Output: 1.2, CacheRead: 0.015, CacheWrite: 0.1875}
 	if len(stored) != 1 || stored[0] != want {
 		t.Fatalf("stored %+v, want %+v", stored, want)
 	}
-	if len(got) != 1 || got[0] != (api.ModelPrice{Provider: "claude", Model: "m", Input: 0.15, Output: 1.2, CacheRead: 0.015, CacheWrite: 0.1875}) {
-		t.Fatalf("answered %+v, want the list as sent", got)
+	if len(got.Prices) != 1 || got.Prices[0] != (api.PriceEntry{Provider: "claude", Model: "m", Input: 0.15, Output: 1.2,
+		CacheRead: 0.015, CacheWrite: 0.1875, Source: api.PriceEntrySourceManual}) {
+		t.Fatalf("answered %+v, want the list as sent", got.Prices)
 	}
 }
 
+// GET answers the contract's PriceList: a manual row over a catalog row carries
+// the catalog's rates, a catalog row does not, and the catalog's status has null
+// for what never happened.
 func TestGetPrices(t *testing.T) {
 	e := newEnv(t)
-	cookie := withCookie(e.signedIn(admin()))
-	e.prices.EXPECT().List(mock.Anything).Return(nil, nil).Once()
-	if rec := e.do(http.MethodGet, "/api/admin/prices", "", cookie); strings.TrimSpace(rec.Body.String()) != "[]" {
-		t.Fatalf("empty list = %s, want []", rec.Body)
+	checked := e.clock.Now().Add(-time.Hour)
+	catalogSonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, UpdatedAt: checked}
+	e.prices.EXPECT().List(mock.Anything).Return([]app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5", Input: 2, UpdatedAt: checked}}, nil)
+	e.priceCat.EXPECT().List(mock.Anything).Return([]app.ModelPrice{catalogSonnet,
+		{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, UpdatedAt: checked}}, nil)
+	e.priceCat.EXPECT().State(mock.Anything).Return(app.CatalogState{CheckedAt: checked, LastError: "the catalog answered 503"}, nil)
+	e.priceMet.EXPECT().SetPriceCatalog(2, checked).Return()
+	e.priceSet.EXPECT().SetPrices(mock.Anything).Return()
+	if err := e.deps.Prices.Load(context.Background()); err != nil {
+		t.Fatalf("Load: %v", err)
 	}
-	e.prices.EXPECT().List(mock.Anything).Return([]app.ModelPrice{{Provider: "claude", Model: "m", Input: 3, Output: 15}}, nil).Once()
-	var got []api.ModelPrice
-	decodeBody(t, e.do(http.MethodGet, "/api/admin/prices", "", cookie), http.StatusOK, &got)
-	if len(got) != 1 || got[0].Provider != "claude" || got[0].Input != 3 || got[0].Output != 15 {
-		t.Fatalf("prices = %+v", got)
+
+	rec := e.do(http.MethodGet, "/api/admin/prices", "", withCookie(e.signedIn(admin())))
+	var got api.PriceList
+	decodeBody(t, rec, http.StatusOK, &got)
+	if len(got.Prices) != 2 {
+		t.Fatalf("prices = %+v", got.Prices)
+	}
+	gpt, sonnet := got.Prices[0], got.Prices[1]
+	if gpt.Model != "gpt-6" || gpt.Source != api.PriceEntrySourceCatalog || gpt.CatalogRates != nil || !gpt.UpdatedAt.Equal(checked) {
+		t.Fatalf("gpt-6 = %+v, want the catalog row first", gpt)
+	}
+	if sonnet.Source != api.PriceEntrySourceManual || sonnet.Input != 2 ||
+		sonnet.CatalogRates == nil || *sonnet.CatalogRates != (api.PriceRates{Input: 3, Output: 15}) {
+		t.Fatalf("sonnet = %+v, want the override with the catalog's rates", sonnet)
+	}
+	c := got.Catalog
+	if !c.Enabled || c.Models != 2 || c.CheckedAt == nil || !c.CheckedAt.Equal(checked) || c.ChangedAt != nil ||
+		c.LastError == nil || *c.LastError != "the catalog answered 503" {
+		t.Fatalf("catalog = %+v", c)
+	}
+}
+
+// Without a catalog source a refresh is a conflict, not a failed check.
+func TestRefreshWithoutACatalogIsRefused(t *testing.T) {
+	e := newEnv(t, withoutPriceCatalog)
+	apiError(t, e.do(http.MethodPost, "/api/admin/prices/refresh", "", withCookie(e.signedIn(admin()))),
+		http.StatusConflict, codeCatalogDisabled)
+}
+
+// A failed check is still answered 200: the reason is in catalog.lastError.
+func TestRefreshReportsAFailedCheckInTheStatus(t *testing.T) {
+	e := newEnv(t)
+	e.priceSrc.EXPECT().Fetch(mock.Anything, mock.Anything).Return(app.CatalogFetch{}, errors.New("the catalog answered 502 Bad Gateway"))
+	e.priceMet.EXPECT().ObservePriceCatalogFailure().Return().Once()
+	e.priceCat.EXPECT().SetState(mock.Anything, mock.Anything).Return(nil)
+	var got api.PriceList
+	decodeBody(t, e.do(http.MethodPost, "/api/admin/prices/refresh", "", withCookie(e.signedIn(admin()))), http.StatusOK, &got)
+	if !got.Catalog.Enabled || got.Catalog.LastError == nil || *got.Catalog.LastError != "the catalog answered 502 Bad Gateway" {
+		t.Fatalf("catalog = %+v, want the failure", got.Catalog)
 	}
 }
 

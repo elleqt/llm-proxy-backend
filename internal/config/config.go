@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -33,7 +34,33 @@ type Config struct {
 	PasswordHashConcurrency int
 	OIDC                    OIDC
 	Web                     Web
+	PriceCatalog            PriceCatalog
 }
+
+// PriceCatalogOff is the LLMPROXY_PRICES_CATALOG_URL value that turns the price
+// catalog off.
+const PriceCatalogOff = "off"
+
+// DefaultPriceCatalogURL is the model catalog of oh-my-pi (MIT), whose per-model
+// costs are the catalog's prices.
+const DefaultPriceCatalogURL = "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/catalog/src/models.json"
+
+// MinPriceCatalogInterval is the shortest LLMPROXY_PRICES_CATALOG_INTERVAL accepted.
+const MinPriceCatalogInterval = 5 * time.Minute
+
+// PriceCatalog configures the automatically updated price catalog. It is on unless
+// LLMPROXY_PRICES_CATALOG_URL is PriceCatalogOff; while it is off Interval is
+// ignored and not validated.
+type PriceCatalog struct {
+	// URL is LLMPROXY_PRICES_CATALOG_URL, default DefaultPriceCatalogURL: an
+	// absolute http(s) URL. Empty when off.
+	URL string
+	// Interval is LLMPROXY_PRICES_CATALOG_INTERVAL, default 6h, at least
+	// MinPriceCatalogInterval: how often the catalog is checked.
+	Interval time.Duration
+}
+
+func (p PriceCatalog) Enabled() bool { return p.URL != "" }
 
 // WebAddrOff is the LLMPROXY_WEB_ADDR value that turns the web listener off.
 const WebAddrOff = "off"
@@ -166,7 +193,29 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.Web = web
+	catalog, err := loadPriceCatalog()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PriceCatalog = catalog
 	return cfg, nil
+}
+
+// loadPriceCatalog reads the LLMPROXY_PRICES_CATALOG_* variables.
+func loadPriceCatalog() (PriceCatalog, error) {
+	raw := envOr("LLMPROXY_PRICES_CATALOG_URL", DefaultPriceCatalogURL)
+	if raw == PriceCatalogOff {
+		return PriceCatalog{}, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return PriceCatalog{}, errors.New("config: LLMPROXY_PRICES_CATALOG_URL must be an absolute http(s) URL or off")
+	}
+	interval, err := time.ParseDuration(envOr("LLMPROXY_PRICES_CATALOG_INTERVAL", "6h"))
+	if err != nil || interval < MinPriceCatalogInterval {
+		return PriceCatalog{}, fmt.Errorf("config: LLMPROXY_PRICES_CATALOG_INTERVAL must be a duration of at least %s", MinPriceCatalogInterval)
+	}
+	return PriceCatalog{URL: raw, Interval: interval}, nil
 }
 
 // loadWeb reads the web listener's variables. Like loadOIDC, its errors name the

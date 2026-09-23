@@ -46,6 +46,7 @@ const (
 	codeLoginExpired        = "login_expired"
 	codeLoginFailed         = "login_failed"
 	codeTokenLimit          = "token_limit"
+	codeCatalogDisabled     = "catalog_disabled"
 )
 
 // appRefusals is how the administration API answers every refusal its application
@@ -82,6 +83,7 @@ var appRefusals = []struct {
 	{app.ErrLoginExpired, http.StatusGone, codeLoginExpired, "", "the vendor login timed out or was already used"},
 	{app.ErrLoginFailed, http.StatusUnprocessableEntity, codeLoginFailed, "", "the vendor sign-in was not accepted"},
 	{app.ErrTokenLimit, http.StatusConflict, codeTokenLimit, "", tokenLimitMessage},
+	{app.ErrCatalogDisabled, http.StatusConflict, codeCatalogDisabled, "", "no price catalog source is configured"},
 }
 
 // tokenLimitMessage explains token_limit on both routes that issue tokens.
