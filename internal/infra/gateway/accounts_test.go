@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,11 +55,39 @@ func registeredModels(id string) int {
 }
 
 // startProduction starts a gateway wired as production wires it and returns it
-// with its core auth manager.
+// with its core auth manager, once boot has finished (startBooted).
 func startProduction(t *testing.T) (*running, *coreauth.Manager) {
 	t.Helper()
 	p := productionParams(t)
-	return startWith(t, p), p.CoreAuth
+	return startBooted(t, p), p.CoreAuth
+}
+
+// startBooted is startWith for a test that changes accounts straight after
+// the gateway starts. Upstream goes on booting after the watcher exists:
+// it hands the watcher the configuration and then registers the models of
+// every account the manager holds (service_lifecycle.go:196-205,
+// syncPluginModelRuntime), reading the service configuration without its
+// lock, and reports nowhere when it is done. An account change re-applies the
+// configuration under the lock and would race it, and an account registered
+// meanwhile would get its models from boot instead of from the change (see
+// WaitReload). So the auth directory holds one credential before boot, which
+// only that last step registers models for — the manager loads it without
+// any, unlike a config-derived account — and startBooted returns once its
+// models are in the registry. The credential is an account like any other,
+// in the directory, the manager and Accounts.
+func startBooted(t *testing.T, p Params) *running {
+	t.Helper()
+	boot := claudeGrantNamed(t, "boot-"+strconv.FormatInt(wireSeq.Add(1), 10))
+	if _, err := p.Store.Save(context.Background(), boot); err != nil {
+		t.Fatalf("save the boot credential: %v", err)
+	}
+	r := startWith(t, p)
+	for deadline := time.Now().Add(10 * time.Second); registeredModels(boot.ID) == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("boot never registered the models of the account it loaded")
+		}
+	}
+	return r
 }
 
 // TestBareRegisterLeavesAnAccountUnroutable is the reason the account methods
@@ -157,7 +186,7 @@ func TestRemoveAccountUnregistersModels(t *testing.T) {
 func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 	p := productionParams(t)
 	authDir := p.Config.AuthDir
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	kept := claudeGrantNamed(t, t.Name()+"-kept")
 	removed := claudeGrantNamed(t, t.Name()+"-removed")
 	removed.FileName = "file-of-" + removed.ID
@@ -203,7 +232,7 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 func TestRemoveAccountDeletesACredentialInASubdirectory(t *testing.T) {
 	p := productionParams(t)
 	authDir := p.Config.AuthDir
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	grant.FileName = "team/sub/../" + grant.ID
 	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
@@ -353,7 +382,7 @@ func TestSetAccountDisabledReportsAnUnsavedFlag(t *testing.T) {
 	p := productionParams(t)
 	store := &faultyStore{Store: p.Store}
 	p.Store = store
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
 		t.Fatalf("AddAccount: %v", err)
@@ -389,7 +418,7 @@ func TestRemoveAccountReportsAnUndeletedCredential(t *testing.T) {
 	p := productionParams(t)
 	store := &faultyStore{Store: p.Store}
 	p.Store = store
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
 		t.Fatalf("AddAccount: %v", err)
@@ -433,7 +462,7 @@ func TestRemoveAccountReportsAnUnsavedDisable(t *testing.T) {
 	p := productionParams(t)
 	store := &faultyStore{Store: p.Store}
 	p.Store = store
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
 		t.Fatalf("AddAccount: %v", err)
@@ -451,7 +480,8 @@ func TestRemoveAccountReportsAnUnsavedDisable(t *testing.T) {
 }
 
 func TestAccountChangesRefuseAnUnknownAccount(t *testing.T) {
-	r, manager := startProduction(t)
+	p := productionParams(t)
+	r, manager := startWith(t, p), p.CoreAuth
 
 	if err := r.gateway.SetAccountDisabled(context.Background(), "no-such-account", true); !errors.Is(err, ErrUnknownAccount) {
 		t.Fatalf("SetAccountDisabled(unknown) = %v, want ErrUnknownAccount", err)
@@ -524,7 +554,7 @@ func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 	p := productionParams(t)
 	store := &faultyStore{Store: p.Store}
 	p.Store = store
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	store.refuseSave.Store(true)
 
 	grant := claudeGrant(t)
@@ -554,7 +584,7 @@ func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 func TestAddAccountKeepsADisabledAccountAcrossARestart(t *testing.T) {
 	p := productionParams(t)
 	authDir := p.Config.AuthDir
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	grant.Disabled = true
 	grant.Status = coreauth.StatusDisabled
@@ -580,7 +610,8 @@ func TestAddAccountKeepsADisabledAccountAcrossARestart(t *testing.T) {
 // policies do (codex is chatgpt), ordered by provider, with the email and
 // never a token.
 func TestAccountsListsUnderPolicyNames(t *testing.T) {
-	r, manager := startProduction(t)
+	p := productionParams(t)
+	r, manager := startWith(t, p), p.CoreAuth
 	codex := &coreauth.Auth{
 		ID:       "codex-" + strings.ToLower(t.Name()) + ".json",
 		Provider: "codex",
@@ -595,8 +626,8 @@ func TestAccountsListsUnderPolicyNames(t *testing.T) {
 		t.Fatalf("Register: %v", err)
 	}
 	grant := claudeGrant(t)
-	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
+	if _, err := manager.Register(context.Background(), grant); err != nil {
+		t.Fatalf("Register: %v", err)
 	}
 
 	got := r.gateway.Accounts()

@@ -34,7 +34,14 @@ func NewTestPool(t *testing.T) *pgxpool.Pool {
 		tcpostgres.WithDatabase("test"),
 		tcpostgres.WithUsername("test"),
 		tcpostgres.WithPassword("test"),
-		testcontainers.WithWaitStrategy(wait.ForListeningPort("5432/tcp")),
+		// The image's entrypoint runs initdb against a temporary server that
+		// listens and logs "ready" too, then restarts it: only the second
+		// "ready" is the server the tests use. The port alone can answer
+		// "the database system is starting up" (57P03) on a slow runner.
+		testcontainers.WithWaitStrategy(wait.ForAll(
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			wait.ForListeningPort("5432/tcp"),
+		)),
 	)
 	// Run can return a live container alongside an error; register cleanup before
 	// the error check or a started-but-unhealthy container leaks until session end.

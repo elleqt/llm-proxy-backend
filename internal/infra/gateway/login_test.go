@@ -211,7 +211,7 @@ func callbackFor(t *testing.T, authURL, code string) string {
 // routable and persisted, and upstream saved nothing itself.
 func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 	p := productionParams(t)
-	r := startWith(t, p)
+	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	login, _ := fakeLogin(t, func(code string) *coreauth.Auth {
 		if code != "code-1" {
