@@ -1,0 +1,17 @@
+# Builds the backend and the frontend from source instead of pulling the published
+# images: this checkout and the frontend's, cloned side by side as ../frontend.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# The local image names keep a source build from ever passing for a published
+# image; pull_policy: build never pulls them.
+services:
+  backend:
+    image: llm-proxy-backend:local
+    build: .
+    pull_policy: build
+
+  frontend:
+    image: llm-proxy-frontend:local
+    build: ../frontend
+    pull_policy: build
