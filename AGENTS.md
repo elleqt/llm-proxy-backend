@@ -126,7 +126,7 @@ The full variable reference is in `internal/config/config.go` and the README.
 - A Docker daemon is required for tests.
 - The image is a static `CGO_ENABLED=0` build; the version is injected with `-X main.version=...`.
 - Releases follow `RELEASING.md`: tag backend and frontend together as `vX.Y.Z`. Bump image pins only after the images are published.
-- `main` accepts only squash-merged pull requests with green CI (`test`, `image-check`); direct and force pushes are refused. Work on a branch, open a PR, and title it like a commit (`type(scope): summary`): the title becomes the commit on `main`.
+- `main` accepts only squash-merged pull requests with green CI (`test`, `image-check`, `pr-title`); direct and force pushes are refused. Work on a branch and open a PR titled as a Conventional Commits subject, `type(scope)!: summary` with type one of `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`: the title becomes the commit on `main`, and the required `pr-title` check refuses any other form.
 
 ## Testing & QA
 

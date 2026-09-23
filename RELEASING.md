@@ -35,7 +35,8 @@ Pushes to `main` publish `edge` and `sha-<commit>` only; `latest` moves only wit
 
 Both repositories have the same rules, including for their owner:
 
-- `main` changes only through pull requests, merged by squash once CI has passed on them: `test` and `image-check` here, `check` and `image` in the frontend. Direct pushes, force-pushes and deleting `main` are refused. The pull request's title becomes the commit's subject, so write it as one.
+- `main` changes only through pull requests, merged by squash once CI has passed on them: `test`, `image-check` and `pr-title` here, `check`, `image` and `pr-title` in the frontend. Direct pushes, force-pushes and deleting `main` are refused.
+- The pull request's title becomes the commit on `main`. Titles follow [Conventional Commits](https://www.conventionalcommits.org): `type(scope)!: description`, with type one of `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`; the required `pr-title` check refuses anything else.
 - Release tags `v*` can be created but never moved or deleted: a published version always points at the commit it was built from.
 - CI from a first-time outside contributor's pull request waits for the owner's approval; Actions may only use GitHub's and Docker's own actions, pinned by commit SHA.
 - Dependabot opens security updates as advisories appear and grouped version updates once a month (see `.github/dependabot.yml`); CodeQL scans every pull request and `main`.

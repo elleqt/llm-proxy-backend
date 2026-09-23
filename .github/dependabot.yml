@@ -1,3 +1,4 @@
+# Titles follow Conventional Commits: build(deps): ... and ci(deps): ....
 # Version updates, once a month and grouped, so they arrive as a few pull requests
 # rather than one per dependency. Security updates are separate: Dependabot opens
 # those as soon as an advisory is published.
@@ -11,7 +12,8 @@ updates:
     schedule:
       interval: monthly
     commit-message:
-      prefix: deps
+      prefix: build
+      include: scope
     groups:
       go-minor-and-patch:
         patterns: ["*"]
@@ -24,6 +26,7 @@ updates:
       interval: monthly
     commit-message:
       prefix: ci
+      include: scope
     groups:
       actions:
         patterns: ["*"]
@@ -33,7 +36,8 @@ updates:
     schedule:
       interval: monthly
     commit-message:
-      prefix: docker
+      prefix: build
+      include: scope
     groups:
       base-images:
         patterns: ["*"]
