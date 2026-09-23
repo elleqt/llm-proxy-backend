@@ -182,7 +182,8 @@ func TestRemoveAccountUnregistersModels(t *testing.T) {
 // stay removed when a fresh gateway starts on the same auth directory. The kept
 // account shows the fresh gateway does load what the directory holds, so the
 // removed one's absence is not an empty boot. The removed account's file name
-// differs from its id, so deleting by id alone would miss the file.
+// differs from the id it was added with; it is held, as a restart loads it,
+// under its file name.
 func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 	p := productionParams(t)
 	authDir := p.Config.AuthDir
@@ -191,15 +192,19 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 	removed := claudeGrantNamed(t, t.Name()+"-removed")
 	removed.FileName = "file-of-" + removed.ID
 	for _, grant := range []*coreauth.Auth{kept, removed} {
-		if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
+		stored, err := r.gateway.AddAccount(context.Background(), grant)
+		if err != nil {
 			t.Fatalf("AddAccount(%s): %v", grant.ID, err)
+		}
+		if stored.ID != grant.FileName {
+			t.Fatalf("AddAccount(%s) holds %q, want the id a restart gives it, its file name %q", grant.ID, stored.ID, grant.FileName)
 		}
 		if _, err := os.Stat(filepath.Join(authDir, grant.FileName)); err != nil {
 			t.Fatalf("the added account's credential was not persisted: %v", err)
 		}
 	}
 
-	if err := r.gateway.RemoveAccount(context.Background(), removed.ID); err != nil {
+	if err := r.gateway.RemoveAccount(context.Background(), removed.FileName); err != nil {
 		t.Fatalf("RemoveAccount: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(authDir, removed.FileName)); !os.IsNotExist(err) {
@@ -235,7 +240,8 @@ func TestRemoveAccountDeletesACredentialInASubdirectory(t *testing.T) {
 	r := startBooted(t, p)
 	grant := claudeGrant(t)
 	grant.FileName = "team/sub/../" + grant.ID
-	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
+	stored, err := r.gateway.AddAccount(context.Background(), grant)
+	if err != nil {
 		t.Fatalf("AddAccount: %v", err)
 	}
 	inTeam := filepath.Join("team", grant.ID)
@@ -244,7 +250,7 @@ func TestRemoveAccountDeletesACredentialInASubdirectory(t *testing.T) {
 		t.Fatalf("the added account's credential was not persisted under the auth directory: %v", err)
 	}
 
-	if err := r.gateway.RemoveAccount(context.Background(), grant.ID); err != nil {
+	if err := r.gateway.RemoveAccount(context.Background(), stored.ID); err != nil {
 		t.Fatalf("RemoveAccount: %v", err)
 	}
 	if _, err := os.Stat(onDisk); !os.IsNotExist(err) {
@@ -296,9 +302,9 @@ func TestRemoveAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
 
 // TestAddAccountRefusesACredentialOutsideTheAuthDirectory: Save writes to the
 // first of the path attribute, the file name and the id that is set, so each
-// one that escapes is refused before Register — including one Save would not
-// use now, which a later save without the path attribute would fall back to.
-// Nothing is written and nothing is held.
+// one that escapes is refused before anything is saved — including one Save
+// would not use now, which a later save without the path attribute would fall
+// back to. Nothing is written and nothing is held.
 func TestAddAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -546,10 +552,11 @@ func TestAccountChangesWithoutAStoreRefuse(t *testing.T) {
 }
 
 // TestAddAccountWithdrawsAnUnsavedCredential: Register discards its save
-// error, so without the gateway's own save a failed write would return
-// success and the account would be gone after a restart. The failed add is
-// withdrawn — not held, not routable, no credential left — so nothing serves
-// traffic on an account the caller was told failed; a retry adds it.
+// error, so an add that registered first and saved second would return
+// success on a failed write and the account would be gone after a restart.
+// A failed save adds nothing — not held, not routable, no credential left —
+// so nothing serves traffic on an account the caller was told failed; a retry
+// adds it.
 func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 	p := productionParams(t)
 	store := &faultyStore{Store: p.Store}

@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
@@ -69,8 +70,9 @@ type Params struct {
 	// this manager. Without it they return ErrNoCoreAuth.
 	CoreAuth *coreauth.Manager
 	// Store is the token store CoreAuth persists to, as NewCoreAuthManager
-	// returned it for Config.AuthDir. SetAccountDisabled saves through it and
-	// RemoveAccount deletes the account's credential from it; without it both
+	// returned it for Config.AuthDir. AddAccount saves the account through it
+	// and loads it back from it, SetAccountDisabled saves through it and
+	// RemoveAccount deletes the account's credential from it; without it they
 	// return ErrNoTokenStore.
 	Store coreauth.Store
 	// Resolver authenticates the API tokens proxied requests present, and
@@ -575,31 +577,40 @@ func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
 	g.apply(reload, g.CurrentConfig())
 }
 
-// AddAccount registers auth with the core auth manager, re-applies the current
-// configuration, so its models become routable, and saves it through the token
-// store. It returns what the manager stored. Like PushConfig it needs a running
-// service (ErrNotRunning), and like the other account changes a token store
-// (ErrNoTokenStore).
+// AddAccount saves auth through the token store, loads it back from what was
+// saved, registers that with the core auth manager and re-applies the current
+// configuration, so its models become routable. It returns what the manager
+// stored. Like PushConfig it needs a running service (ErrNotRunning), and like
+// the other account changes a token store (ErrNoTokenStore).
+//
+// The account held is the one a restart would load: the store's List reads
+// the saved file the way boot does (sdk/auth/filestore.go readAuthFiles), so
+// its id is the file's, Metadata carries everything the file holds, and
+// Label, Status, Disabled and the path attributes are set as on load. A login
+// record keeps its tokens only in Storage, which Save writes into the file
+// (upstream/internal/api/handlers/management/auth_files_fields.go
+// saveTokenRecord does the same); the executors read them from Metadata, so
+// registering the record itself would send requests without a credential.
+// Accounts the store never holds — config-derived API keys, runtime-only and
+// plugin-virtual accounts — are registered as given.
 //
 // An account whose credential would be stored outside the auth directory is
-// refused (ErrCredentialPath) before Register, which is where upstream writes
-// the file: RemoveAccount could never remove it, and the store would not load
-// it on start.
+// refused (ErrCredentialPath) before anything is saved: RemoveAccount could
+// never remove it, and the store would not load it on start. An account with
+// no id, file name or path gets a UUID id, as Register would give it.
 //
-// Register's own save discards its error (conductor_lifecycle.go Register →
-// persist), and upstream's file store writes nothing for a disabled account
-// whose file does not exist yet unless the save carries creation intent
-// (sdk/auth/filestore.go Save, coreauth.WithAuthCreationIntent) — so an
-// account added already disabled would vanish on restart. The gateway's own
-// save carries that intent and returns its error.
+// The save carries creation intent (coreauth.WithAuthCreationIntent):
+// upstream's file store writes nothing for a disabled account whose file does
+// not exist yet without it (sdk/auth/filestore.go Save), so an account added
+// already disabled would vanish on restart.
 //
-// If that save fails, the account is withdrawn again (RemoveAccount's steps)
-// and the error returned: an account is either added and durable or not
-// routable. Withdrawing a credential is always safe; leaving it routable
-// would serve traffic on an account the caller was told failed and that the
-// next restart drops. An account id that was already held is replaced by
-// Register, so a failed re-add withdraws that account too. If the withdrawal
-// fails as well, the error says the account is still held.
+// An account is either added and durable or not routable. If the save fails,
+// nothing is registered and the manager is left as it was. If the saved
+// account cannot be loaded back or registered, the credential is withdrawn
+// again — deleted, and an account the manager already held under that id
+// withdrawn with it (RemoveAccount's steps), since its file is the one just
+// overwritten — and the error returned. If the withdrawal fails as well, the
+// error says so.
 func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	if auth == nil {
 		return nil, errors.New("gateway: nil account")
@@ -612,29 +623,74 @@ func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreaut
 	if g.store == nil {
 		return nil, ErrNoTokenStore
 	}
-	if _, err := g.credentialPath(auth); err != nil {
+	path, err := g.credentialPath(auth)
+	if err != nil {
 		return nil, err
 	}
 	reload, err := g.reloadLocked()
 	if err != nil {
 		return nil, err
 	}
-	stored, err := g.coreAuth.Register(ctx, auth)
+	if auth.Storage != nil && auth.Metadata == nil {
+		auth.Metadata = make(map[string]any) // as Save does
+	}
+	if !storeHolds(auth) {
+		stored, err := g.coreAuth.Register(ctx, auth)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: register account: %w", err)
+		}
+		g.reapplyLocked(reload)
+		return stored, nil
+	}
+	if path == "" {
+		auth.ID = uuid.NewString()
+		path = filepath.Join(g.authDir, auth.ID)
+	}
+	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
+		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
+	}
+	stored, err := g.loadLocked(ctx, path)
+	if err == nil {
+		stored, err = g.coreAuth.Register(ctx, stored)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("gateway: register account: %w", err)
+		if errWithdraw := g.withdrawLocked(ctx, reload, path); errWithdraw != nil {
+			return nil, fmt.Errorf("gateway: account %q was saved but not added, and its credential %q could not be withdrawn (retry RemoveAccount): %w", auth.ID, path, errors.Join(err, errWithdraw))
+		}
+		return nil, fmt.Errorf("gateway: account %q was saved but not added, so its credential was withdrawn: %w", auth.ID, err)
 	}
 	g.reapplyLocked(reload)
-	if err := g.saveLocked(coreauth.WithAuthCreationIntent(ctx), stored); err != nil {
-		held, ok := g.coreAuth.GetByID(stored.ID)
-		if !ok {
-			return nil, fmt.Errorf("gateway: account %q was not saved: %w", stored.ID, err)
-		}
-		if errRemove := g.removeLocked(ctx, reload, held); errRemove != nil {
-			return nil, fmt.Errorf("gateway: account %q was not saved and could not be withdrawn, so it is still held (retry RemoveAccount): %w", stored.ID, errors.Join(err, errRemove))
-		}
-		return nil, fmt.Errorf("gateway: account %q was not saved, so it was withdrawn: %w", stored.ID, err)
-	}
 	return stored, nil
+}
+
+// loadLocked returns the account the token store loads from the credential at
+// path (as credentialPath resolves it), as boot loads it: the first one List
+// reads from that file, as upstream's readAuthFile takes the first. The
+// caller holds pushMu.
+func (g *Gateway) loadLocked(ctx context.Context, path string) (*coreauth.Auth, error) {
+	listed, err := g.store.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list the token store: %w", err)
+	}
+	for _, auth := range listed {
+		if p, err := g.credentialPath(auth); err == nil && p == path {
+			return auth, nil
+		}
+	}
+	return nil, fmt.Errorf("the token store does not load the saved credential %q", path)
+}
+
+// withdrawLocked undoes a save AddAccount could not complete: an account the
+// manager holds for the credential at path is removed with RemoveAccount's
+// steps, since the save overwrote its file; otherwise the file is deleted. The
+// caller holds pushMu.
+func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfig.Config), path string) error {
+	for _, held := range g.coreAuth.List() {
+		if p, err := g.credentialPath(held); err == nil && p == path {
+			return g.removeLocked(ctx, reload, held)
+		}
+	}
+	return g.store.Delete(ctx, path)
 }
 
 // SetAccountDisabled disables or re-enables account id and re-applies the
@@ -782,8 +838,8 @@ func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
 // load it on start, and the gateway neither writes nor deletes a file it does
 // not own. The check is lexical; symlinks are not resolved.
 //
-// The path is empty only for an account with none of the fields set; Register
-// gives it a UUID id, which Save joins to the auth directory.
+// The path is empty only for an account with none of the fields set;
+// AddAccount gives it a UUID id, which Save joins to the auth directory.
 func (g *Gateway) credentialPath(auth *coreauth.Auth) (string, error) {
 	if g.authDir == "" {
 		return "", fmt.Errorf("%w: no auth directory is configured", ErrCredentialPath)
@@ -836,18 +892,23 @@ func (g *Gateway) inAuthDir(path string, fromCWD bool) (string, error) {
 }
 
 // saveLocked writes auth through the token store and returns the error the
-// manager's own save discards. It skips what upstream's Manager.persist skips
-// (conductor_lifecycle.go persist): accounts the store never holds. The
-// caller holds pushMu.
+// manager's own save discards. It skips accounts the store never holds
+// (storeHolds). The caller holds pushMu.
 func (g *Gateway) saveLocked(ctx context.Context, auth *coreauth.Auth) error {
-	if coreauth.IsConfigAPIKeyAuth(auth) || coreauth.IsPluginVirtualAuth(auth) || auth.Metadata == nil ||
-		strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true") {
+	if !storeHolds(auth) {
 		return nil
 	}
 	if _, err := g.store.Save(ctx, auth); err != nil {
 		return fmt.Errorf("gateway: save account %q: %w", auth.ID, err)
 	}
 	return nil
+}
+
+// storeHolds reports whether the token store holds auth: upstream's
+// Manager.persist skips the rest (conductor_lifecycle.go persist).
+func storeHolds(auth *coreauth.Auth) bool {
+	return !coreauth.IsConfigAPIKeyAuth(auth) && !coreauth.IsPluginVirtualAuth(auth) && auth.Metadata != nil &&
+		!strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
 }
 
 // setDisabledLocked mirrors upstream's management applyAuthDisabledState

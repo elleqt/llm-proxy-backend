@@ -83,7 +83,8 @@ type loginFlow struct {
 //     the code and passes the record to the post-auth hook before it would
 //     save it. The hook gives the record to the waiting CompleteLogin, which
 //     adds it through AddAccount, and returns an error so upstream saves
-//     nothing itself.
+//     nothing itself. The record carries its tokens only in Storage;
+//     AddAccount saves it and holds the account the store loads back.
 //   - A login ends — expired, given up or finished — with
 //     sdkapi.CompleteOAuthSession(state): upstream's goroutine stops at its
 //     next poll, and its pre-save guard (guardOAuthSessionPendingForSave)
