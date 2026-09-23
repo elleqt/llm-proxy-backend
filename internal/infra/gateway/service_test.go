@@ -17,6 +17,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	log "github.com/sirupsen/logrus"
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 )
@@ -57,6 +58,7 @@ func startWith(t *testing.T, p Params) *running {
 	// configuration arrives through PushConfig, not from disk.
 	p.ConfigPath = filepath.Join(t.TempDir(), "unused.yaml")
 
+	booted := watchWatcherStarted(t)
 	g, err := New(p)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -86,6 +88,16 @@ func startWith(t *testing.T, p Params) *running {
 	if err := g.WaitReload(waitCtx); err != nil {
 		t.Fatalf("watcher was never created: %v", err)
 	}
+	// WaitReload returns as the watcher is created; Run then reads the
+	// service configuration unlocked to hand it to the watcher
+	// (service_lifecycle.go:196), and a push writing it would race that read
+	// however much later it came, with nothing ordering the two. Its next
+	// step logs, which orders everything before it ahead of a push.
+	select {
+	case <-booted:
+	case <-waitCtx.Done():
+		t.Fatal("upstream never logged that it started the watcher")
+	}
 
 	r := &running{
 		gateway:    g,
@@ -95,6 +107,44 @@ func startWith(t *testing.T, p Params) *running {
 	}
 	waitHealthy(t, r.baseURL)
 	return r
+}
+
+// watcherStarted is what upstream logs right after handing the watcher its
+// configuration (service_lifecycle.go:203).
+const watcherStarted = "file watcher started for config and auth directory changes"
+
+// watchWatcherStarted returns a channel closed when upstream next logs
+// watcherStarted, through a hook on the standard logger it logs to, removed
+// when the test ends. Tests are serial, so the next such line is from the
+// gateway the caller starts.
+func watchWatcherStarted(t *testing.T) <-chan struct{} {
+	t.Helper()
+	h := &logHook{message: watcherStarted, seen: make(chan struct{})}
+	logger := log.StandardLogger()
+	hooks := make(log.LevelHooks)
+	for level, hs := range logger.Hooks {
+		hooks[level] = append([]log.Hook(nil), hs...)
+	}
+	hooks.Add(h)
+	old := logger.ReplaceHooks(hooks)
+	t.Cleanup(func() { logger.ReplaceHooks(old) })
+	return h.seen
+}
+
+// logHook closes seen the first time message is logged.
+type logHook struct {
+	message string
+	once    sync.Once
+	seen    chan struct{}
+}
+
+func (h *logHook) Levels() []log.Level { return log.AllLevels }
+
+func (h *logHook) Fire(e *log.Entry) error {
+	if e.Message == h.message {
+		h.once.Do(func() { close(h.seen) })
+	}
+	return nil
 }
 
 // freePort reserves and releases a port so the gateway can bind it.

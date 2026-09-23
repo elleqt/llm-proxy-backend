@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -245,6 +246,21 @@ func (r *running) pprofOn(t *testing.T) (*cliproxyconfig.Config, string) {
 	return cfg, "http://" + net.JoinHostPort("", port) + "/debug/pprof/"
 }
 
+// awaitPprof waits until url answers 200: upstream starts the pprof server
+// listening in the background once a push enables it (pprof_server.go).
+func awaitPprof(t *testing.T, url, when string) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		code, _ := get(t, url)
+		if code == http.StatusOK {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("GET %s %s = %d, want %d", url, when, code, http.StatusOK)
+		}
+	}
+}
+
 // TestPushedConfigReachesTheServer: a pushed value changes what the running
 // service does. Upstream's pprof server is off at boot and pushed on.
 func TestPushedConfigReachesTheServer(t *testing.T) {
@@ -257,9 +273,7 @@ func TestPushedConfigReachesTheServer(t *testing.T) {
 	if err := r.gateway.PushConfig(on); err != nil {
 		t.Fatalf("PushConfig: %v", err)
 	}
-	if code, _ := get(t, url); code != http.StatusOK {
-		t.Fatalf("GET %s after pushing pprof on = %d, want %d", url, code, http.StatusOK)
-	}
+	awaitPprof(t, url, "after pushing pprof on")
 }
 
 // TestPushConfigRejectsWhatUpstreamWouldDrop covers a configuration upstream
@@ -271,6 +285,7 @@ func TestPushConfigRejectsWhatUpstreamWouldDrop(t *testing.T) {
 	if err := r.gateway.PushConfig(accepted); err != nil {
 		t.Fatalf("PushConfig: %v", err)
 	}
+	awaitPprof(t, url, "after pushing pprof on")
 
 	// pprof off, so accepting it would stop the pprof server again.
 	tooHeavy := 1_000_001
