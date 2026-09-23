@@ -302,9 +302,15 @@ func (s *UsageSink) eventOf(r cliproxyusage.Record) app.UsageEvent {
 	return ev
 }
 
-// qualityReconstructed is the BreakdownQuality of a row whose token kinds the
-// sink derived from the raw detail, upstream having sent no valid breakdown.
-const qualityReconstructed = "reconstructed"
+// BreakdownQuality of a row whose token kinds the sink derived from the raw
+// detail, upstream having sent no valid breakdown: reconstructed when the kinds
+// partition the request, else unclassified (a protocol not recognised) or
+// inconsistent (counts that contradict each other), with every token unpriced.
+const (
+	qualityReconstructed = "reconstructed"
+	qualityUnclassified  = "unclassified"
+	qualityInconsistent  = "inconsistent"
+)
 
 // partitionDetail maps a raw usage detail onto ev's token kinds, which partition
 // the request, by how the upstream provider key's protocol reports usage (as
@@ -314,48 +320,80 @@ const qualityReconstructed = "reconstructed"
 //     includes the cached and cache-written tokens, and the completion count
 //     the reasoning tokens, so both are taken out.
 //   - Gemini-style: the prompt count includes the cache; reasoning is separate.
-//   - Anthropic, and any protocol not recognised: every count is separate.
+//   - Anthropic: the cache counts are separate from the input; the output count
+//     includes thinking, so reasoning is taken out.
 //
-// A count never goes below zero. The total is kept as reported.
+// Where upstream would not guess, neither does the sink: a protocol it does not
+// recognise, a cache larger than the prompt that includes it, reasoning larger
+// than the output that includes it, or kinds adding up to more than a reported
+// total leave every token unclassified, so none is priced. A zero reported total
+// is taken from the kinds.
 func partitionDetail(ev *app.UsageEvent, providerKey string, d cliproxyusage.Detail) {
-	cacheRead := d.CacheReadTokens
-	if cacheRead == 0 {
-		cacheRead = d.CachedTokens
+	in, out, reasoning := max(d.InputTokens, 0), max(d.OutputTokens, 0), max(d.ReasoningTokens, 0)
+	cacheRead, cacheWrite := max(d.CacheReadTokens, 0), max(d.CacheCreationTokens, 0)
+	// A legacy cached count stands for the cache reads only when neither cache
+	// count is set: upstream copies cache creation into it when there are no reads.
+	if cacheRead == 0 && cacheWrite == 0 {
+		cacheRead = max(d.CachedTokens, 0)
 	}
-	ev.TokensInput, ev.TokensOutput, ev.TokensReasoning = d.InputTokens, d.OutputTokens, d.ReasoningTokens
-	ev.TokensCacheRead, ev.TokensCacheWrite = cacheRead, d.CacheCreationTokens
-	ev.TokensTotal = d.TotalTokens
-	ev.BreakdownQuality = qualityReconstructed
-	cacheInInput, reasoningInOutput := detailSemantics(providerKey)
-	if cacheInInput {
-		ev.TokensInput = max(ev.TokensInput-max(cacheRead, 0)-max(d.CacheCreationTokens, 0), 0)
+	total := max(d.TotalTokens, 0)
+
+	quality := qualityReconstructed
+	cacheInInput, reasoningInOutput, known := detailSemantics(providerKey)
+	switch {
+	case !known:
+		quality = qualityUnclassified
+	case cacheInInput && cacheRead+cacheWrite > in, reasoningInOutput && reasoning > out:
+		quality = qualityInconsistent
+	default:
+		if cacheInInput {
+			in -= cacheRead + cacheWrite
+		}
+		if reasoningInOutput {
+			out -= reasoning
+		}
+		if classified := in + out + reasoning + cacheRead + cacheWrite; total == 0 {
+			total = classified
+		} else if classified > total {
+			quality = qualityInconsistent
+		}
 	}
-	if reasoningInOutput {
-		ev.TokensOutput = max(ev.TokensOutput-max(d.ReasoningTokens, 0), 0)
+	ev.BreakdownQuality = quality
+	if quality != qualityReconstructed {
+		// Every token unclassified: the total, or the least the counts imply.
+		if total == 0 {
+			total = max(in, cacheRead+cacheWrite, max(d.CachedTokens, 0)) + max(out, reasoning)
+		}
+		ev.TokensTotal = total
+		return
 	}
+	ev.TokensInput, ev.TokensOutput, ev.TokensReasoning = in, out, reasoning
+	ev.TokensCacheRead, ev.TokensCacheWrite = cacheRead, cacheWrite
+	ev.TokensTotal = total
 }
 
 // detailSemantics says whether an upstream provider key's raw usage counts cache
-// tokens inside the prompt count and reasoning inside the completion count.
-func detailSemantics(providerKey string) (cacheInInput, reasoningInOutput bool) {
+// tokens inside the prompt count and reasoning inside the completion count; known
+// is false for a protocol it does not recognise.
+func detailSemantics(providerKey string) (cacheInInput, reasoningInOutput, known bool) {
 	key := strings.ToLower(strings.TrimSpace(providerKey))
 	if key == "openai-compatibility" || strings.HasPrefix(key, openAICompatiblePrefix) {
-		return true, true
+		return true, true, true
 	}
 	if strings.Contains(key, "claude") || strings.Contains(key, "anthropic") {
-		return false, false
+		return false, true, true
 	}
 	for _, marker := range [...]string{"gemini", "aistudio", "antigravity", "vertex", "interaction"} {
 		if strings.Contains(key, marker) {
-			return true, false
+			return true, false, true
 		}
 	}
 	for _, marker := range [...]string{"openai", "codex", "xai", "grok", "kimi", "qwen", "deepseek", "openrouter"} {
 		if strings.Contains(key, marker) {
-			return true, true
+			return true, true, true
 		}
 	}
-	return false, false
+	return false, false, false
 }
 
 // touch stamps each token and owner in events once, with the latest time one

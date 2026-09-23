@@ -83,13 +83,24 @@ type Metrics struct {
 	catalogModels   prometheus.Gauge
 	catalogFailures prometheus.Counter
 
-	// quotaMu guards lastQuota: the latest used ratio of each quota window, the
-	// reference the next observation's rise is measured from.
+	// quotaMu guards burnMarks: each quota window's high-water mark, what the next
+	// reading's rise is measured from.
 	quotaMu   sync.Mutex
-	lastQuota map[quotaKey]float64
+	burnMarks map[quotaKey]burnMark
 }
 
 type quotaKey struct{ account, provider, window string }
+
+// burnMark is the highest used ratio seen in the window that resets at resetAt
+// (zero when no reading has carried a reset time yet).
+type burnMark struct {
+	high    float64
+	resetAt time.Time
+}
+
+// resetTolerance is how far a window's reported reset time may move and still be
+// the same window: codex reports it as seconds from the response, which jitters.
+const resetTolerance = time.Minute
 
 // Request latency runs from sub-second errors to multi-minute reasoning completions.
 var durationBuckets = []float64{0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 180, 300, 600}
@@ -114,7 +125,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		clock:      cfg.clock,
 		gatherer:   reg,
 		knownModel: cfg.knownModel,
-		lastQuota:  map[quotaKey]float64{},
+		burnMarks:  map[quotaKey]burnMark{},
 		tokens: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "tokens_total",
 			Help: "Tokens consumed, by kind and service tier.",
@@ -179,7 +190,7 @@ func New(reg Registry, opts ...Option) *Metrics {
 		}, []string{"provider", "model"}),
 		quotaBurned: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "vendor_quota_burned_ratio_total",
-			Help: "Vendor quota burned, summed over the rises of llmproxy_vendor_quota_used_ratio seen by this process (a drop, the window rolling over, adds nothing; quota burned while the process was down is not counted). 1.0 = one full window; pair with llmproxy_cost_usd_total / llmproxy_tokens_total to estimate the capacity of a window.",
+			Help: "Vendor quota burned, summed over the rises of llmproxy_vendor_quota_used_ratio above its highest reading in the window seen by this process (a lower, late reading adds nothing; after the window resets its first reading counts from zero; quota burned while the process was down is not counted). 1.0 = one full window; pair with llmproxy_cost_usd_total / llmproxy_tokens_total to estimate the capacity of a window.",
 		}, quotaLabels),
 		catalogChecked: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: namespace, Name: "price_catalog_checked_timestamp_seconds",
@@ -324,24 +335,50 @@ func statusClass(ev app.UsageEvent) string {
 // 0..1: converting a percentage is the caller's job. A zero resetAt leaves the reset
 // gauge as it was. The observed timestamp is taken from the clock.
 //
-// It also counts the quota burned: the rise of ratio since the window's previous
-// observation. A drop, the window having rolled over, adds nothing, and so does
-// the first observation of a window since the process started: it only sets the
-// reference.
+// It also counts the quota burned, against a high-water mark per window: a reading
+// above the mark adds the difference and raises it; one at or below it adds
+// nothing, for readings arrive in completion order, and a long stream reports the
+// ratio of when it started. The window has rolled over only when resetAt moves
+// forward by more than resetTolerance: the first reading of the new window counts
+// from zero, since all of it was burned there. A reading whose resetAt is more than
+// resetTolerance before the mark's is a late one from an earlier window and counts
+// nothing. The first reading of a window since the process started only sets the
+// mark: what was burned before is not known.
 func (m *Metrics) ObserveVendorQuota(account, provider, window string, ratio float64, resetAt time.Time) {
 	m.quotaUsed.WithLabelValues(account, provider, window).Set(ratio)
-	k := quotaKey{account, provider, window}
-	m.quotaMu.Lock()
-	previous, seen := m.lastQuota[k]
-	m.lastQuota[k] = ratio
-	m.quotaMu.Unlock()
-	if seen && ratio > previous {
-		m.quotaBurned.WithLabelValues(account, provider, window).Add(ratio - previous)
+	if burned := m.burn(quotaKey{account, provider, window}, ratio, resetAt); burned > 0 {
+		m.quotaBurned.WithLabelValues(account, provider, window).Add(burned)
 	}
 	if !resetAt.IsZero() {
 		m.quotaReset.WithLabelValues(account, provider, window).Set(unixSeconds(resetAt))
 	}
 	m.quotaObserved.WithLabelValues(account, provider, window).Set(unixSeconds(m.clock.Now()))
+}
+
+// burn moves k's high-water mark for a reading and returns what it burned.
+func (m *Metrics) burn(k quotaKey, ratio float64, resetAt time.Time) float64 {
+	m.quotaMu.Lock()
+	defer m.quotaMu.Unlock()
+	mark, seen := m.burnMarks[k]
+	switch {
+	case !seen:
+		m.burnMarks[k] = burnMark{high: ratio, resetAt: resetAt}
+		return 0
+	case resetAt.IsZero():
+	case mark.resetAt.IsZero():
+		mark.resetAt = resetAt
+	case resetAt.After(mark.resetAt.Add(resetTolerance)):
+		m.burnMarks[k] = burnMark{high: ratio, resetAt: resetAt}
+		return ratio
+	case resetAt.Before(mark.resetAt.Add(-resetTolerance)):
+		return 0
+	}
+	var burned float64
+	if ratio > mark.high {
+		burned, mark.high = ratio-mark.high, ratio
+	}
+	m.burnMarks[k] = mark
+	return burned
 }
 
 func unixSeconds(t time.Time) float64 { return float64(t.UnixNano()) / 1e9 }
@@ -429,9 +466,9 @@ func (m *Metrics) ForgetAccount(account, provider string) {
 	m.quotaObserved.DeletePartialMatch(match)
 	m.quotaBurned.DeletePartialMatch(match)
 	m.quotaMu.Lock()
-	for k := range m.lastQuota {
+	for k := range m.burnMarks {
 		if k.account == account && k.provider == provider {
-			delete(m.lastQuota, k)
+			delete(m.burnMarks, k)
 		}
 	}
 	m.quotaMu.Unlock()

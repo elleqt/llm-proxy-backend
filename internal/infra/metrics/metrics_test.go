@@ -383,36 +383,96 @@ func TestCostIsCountedByKind(t *testing.T) {
 	}
 }
 
-// The burned counter sums each window's rises since this process first saw it.
-func TestQuotaBurnedCountsRisesOnly(t *testing.T) {
-	m := New(prometheus.NewRegistry())
-	at := time.Now()
-	burned := func(account, window string) float64 {
+// The burned counter counts rises above each window's high-water mark.
+func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
+	reset := time.Date(2026, 9, 23, 15, 0, 0, 0, time.UTC)
+	burned := func(m *Metrics, account, window string) float64 {
 		return testutil.ToFloat64(m.quotaBurned.WithLabelValues(account, "claude", window))
 	}
 
-	m.ObserveVendorQuota("a", "claude", "5h", 0.5, at) // first observation: the reference only
-	if got := burned("a", "5h"); got != 0 {
-		t.Fatalf("burned after the first observation = %v, want 0", got)
-	}
-	m.ObserveVendorQuota("a", "claude", "5h", 0.75, at) // +0.25
-	m.ObserveVendorQuota("a", "claude", "5h", 0.25, at) // rolled over: nothing
-	m.ObserveVendorQuota("a", "claude", "5h", 0.5, at)  // +0.25 from the new reference
-	if got := burned("a", "5h"); got != 0.5 {
-		t.Fatalf("burned = %v, want 0.25 + 0.25 (the drop adds nothing, and resets the reference)", got)
-	}
+	t.Run("a late lower reading adds nothing and keeps the mark", func(t *testing.T) {
+		m := New(prometheus.NewRegistry())
+		// A stream started at 0.40 finishes after shorter requests reported 0.41..0.45.
+		for _, r := range []float64{0.40, 0.41, 0.42, 0.43, 0.44, 0.45, 0.40, 0.46} {
+			m.ObserveVendorQuota("a", "claude", "5h", r, reset)
+		}
+		if got := burned(m, "a", "5h"); math.Abs(got-0.06) > 1e-12 {
+			t.Fatalf("burned = %v, want 0.06", got)
+		}
+	})
 
-	// Other windows and accounts keep references of their own.
-	m.ObserveVendorQuota("a", "claude", "7d", 0.9, at)
-	m.ObserveVendorQuota("b", "claude", "5h", 0.1, at)
-	m.ObserveVendorQuota("b", "claude", "5h", 0.2, at)
-	if got := burned("a", "7d"); got != 0 {
-		t.Errorf("a/7d burned = %v, want 0 (first observation of that window)", got)
+	t.Run("the first reading of a new window counts from zero", func(t *testing.T) {
+		m := New(prometheus.NewRegistry())
+		m.ObserveVendorQuota("a", "claude", "5h", 0.5, reset) // the reference only
+		m.ObserveVendorQuota("a", "claude", "5h", 0.75, reset)
+		// The window reset; its first reading is higher than the old mark.
+		next := reset.Add(5 * time.Hour)
+		m.ObserveVendorQuota("a", "claude", "5h", 0.9, next)
+		// A late reading of the old window counts nothing.
+		m.ObserveVendorQuota("a", "claude", "5h", 0.8, reset)
+		m.ObserveVendorQuota("a", "claude", "5h", 0.95, next)
+		if got := burned(m, "a", "5h"); math.Abs(got-(0.25+0.9+0.05)) > 1e-12 {
+			t.Fatalf("burned = %v, want 0.25 + 0.9 + 0.05", got)
+		}
+	})
+
+	t.Run("a late reading of the previous window counts nothing", func(t *testing.T) {
+		m := New(prometheus.NewRegistry())
+		m.ObserveVendorQuota("a", "claude", "5h", 0.7, reset)
+		next := reset.Add(5 * time.Hour)
+		m.ObserveVendorQuota("a", "claude", "5h", 0.1, next)  // new window: +0.1
+		m.ObserveVendorQuota("a", "claude", "5h", 0.8, reset) // late, old window
+		m.ObserveVendorQuota("a", "claude", "5h", 0.15, next) // +0.05
+		if got := burned(m, "a", "5h"); math.Abs(got-0.15) > 1e-12 {
+			t.Fatalf("burned = %v, want 0.1 + 0.05", got)
+		}
+	})
+
+	t.Run("reset time jitter is the same window", func(t *testing.T) {
+		m := New(prometheus.NewRegistry())
+		m.ObserveVendorQuota("a", "codex", "5h", 0.3, reset)
+		m.ObserveVendorQuota("a", "codex", "5h", 0.2, reset.Add(30*time.Second)) // late, not a new window
+		m.ObserveVendorQuota("a", "codex", "5h", 0.35, reset.Add(-20*time.Second))
+		if got := testutil.ToFloat64(m.quotaBurned.WithLabelValues("a", "codex", "5h")); math.Abs(got-0.05) > 1e-12 {
+			t.Fatalf("burned = %v, want 0.05", got)
+		}
+	})
+
+	t.Run("windows and accounts are apart", func(t *testing.T) {
+		m := New(prometheus.NewRegistry())
+		m.ObserveVendorQuota("a", "claude", "5h", 0.5, reset)
+		m.ObserveVendorQuota("a", "claude", "7d", 0.9, reset)
+		m.ObserveVendorQuota("b", "claude", "5h", 0.1, reset)
+		m.ObserveVendorQuota("b", "claude", "5h", 0.2, reset)
+		m.ObserveVendorQuota("a", "claude", "5h", 0.6, reset)
+		if got := burned(m, "a", "7d"); got != 0 {
+			t.Errorf("a/7d burned = %v, want 0 (first reading of that window)", got)
+		}
+		if got := burned(m, "b", "5h"); math.Abs(got-0.1) > 1e-12 {
+			t.Errorf("b/5h burned = %v, want 0.1", got)
+		}
+		if got := burned(m, "a", "5h"); math.Abs(got-0.1) > 1e-12 {
+			t.Errorf("a/5h burned = %v, want 0.1", got)
+		}
+	})
+}
+
+// ForgetAccount drops the burned series and the mark: the first reading after it
+// is a first reading again.
+func TestForgetAccountForgetsTheBurnedMark(t *testing.T) {
+	m := New(prometheus.NewRegistry())
+	reset := time.Now().Add(time.Hour)
+	m.ObserveVendorQuota("gone", "claude", "5h", 0.2, reset)
+	m.ObserveVendorQuota("gone", "claude", "5h", 0.5, reset)
+	m.ObserveVendorQuota("kept", "claude", "5h", 0.2, reset)
+	m.ObserveVendorQuota("kept", "claude", "5h", 0.3, reset)
+	m.ForgetAccount("gone", "claude")
+	if n := testutil.CollectAndCount(m.quotaBurned); n != 1 {
+		t.Fatalf("burned series = %d after ForgetAccount, want the kept account's only", n)
 	}
-	if got := burned("b", "5h"); math.Abs(got-0.1) > 1e-12 {
-		t.Errorf("b/5h burned = %v, want 0.1", got)
-	}
-	if got := burned("a", "5h"); got != 0.5 {
-		t.Errorf("a/5h burned = %v after other windows moved, want 0.5", got)
+	m.ObserveVendorQuota("gone", "claude", "5h", 0.9, reset)
+	if n := testutil.CollectAndCount(m.quotaBurned); n != 1 {
+		t.Fatalf("a first reading after ForgetAccount burned %v, want nothing",
+			testutil.ToFloat64(m.quotaBurned.WithLabelValues("gone", "claude", "5h")))
 	}
 }

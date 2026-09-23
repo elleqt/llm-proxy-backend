@@ -274,6 +274,8 @@ func TestMigrations(t *testing.T) {
 			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensTotal: 500}, manual, true},
 			// No price at all.
 			{app.UsageEvent{Provider: "claude", Model: "unknown", TokensInput: 10, TokensOutput: 5, TokensTotal: 20}, app.ModelPrice{}, false},
+			// No price, and kinds above the total: every classified token is unpriced.
+			{app.UsageEvent{Provider: "claude", Model: "unknown", TokensInput: 50, TokensOutput: 30, TokensTotal: 40}, app.ModelPrice{}, false},
 		}
 		for i, r := range rows {
 			e := r.ev

@@ -148,16 +148,17 @@ func TestSinkAttributesRecordToPrincipal(t *testing.T) {
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{
 		Provider: "claude", Model: "claude-sonnet-5", Alias: "sonnet", APIKey: sinkKey, AuthID: "claude-1.json",
 		RequestedAt: at, Stream: true, Latency: 1500 * time.Millisecond, TTFT: 300 * time.Millisecond,
-		Detail: cliproxyusage.Detail{InputTokens: 10, OutputTokens: 20, ReasoningTokens: 3, CacheReadTokens: 5, CacheCreationTokens: 2, TotalTokens: 35},
+		// Anthropic's output count includes the thinking.
+		Detail: cliproxyusage.Detail{InputTokens: 10, OutputTokens: 20, ReasoningTokens: 3, CacheReadTokens: 5, CacheCreationTokens: 2, TotalTokens: 37},
 	})
 	flushed(t, sink)
 
 	want := app.UsageEvent{
 		At: at, UserID: sinkUser, TokenID: sinkToken, Provider: "claude", Model: "claude-sonnet-5", Alias: "sonnet",
-		Stream: true, TokensInput: 10, TokensOutput: 20, TokensReasoning: 3, TokensCacheRead: 5, TokensCacheWrite: 2,
-		TokensTotal: 35, BreakdownQuality: "reconstructed", LatencyMS: 1500, TTFTMS: 300, VendorAccountID: "claude-1.json",
-		// No price: every classified token is unpriced.
-		Cost: app.UsageCost{UnpricedTokens: 40},
+		Stream: true, TokensInput: 10, TokensOutput: 17, TokensReasoning: 3, TokensCacheRead: 5, TokensCacheWrite: 2,
+		TokensTotal: 37, BreakdownQuality: "reconstructed", LatencyMS: 1500, TTFTMS: 300, VendorAccountID: "claude-1.json",
+		// No price: every token is unpriced.
+		Cost: app.UsageCost{UnpricedTokens: 37},
 	}
 	if got := events.written(); len(got) != 1 || !reflect.DeepEqual(got[0], want) {
 		t.Fatalf("ledger = %+v\nwant   [%+v]", got, want)
@@ -320,10 +321,12 @@ func TestSinkPrefersCanonicalBreakdown(t *testing.T) {
 	}
 }
 
-// TestSinkReconstructsARawBreakdown: without a valid canonical breakdown, an
-// OpenAI-style prompt count includes the cached tokens and the completion count
-// the reasoning ones, so they are taken out before pricing; Anthropic's counts
-// are already separate and are kept.
+// TestSinkReconstructsARawBreakdown: without a valid canonical breakdown the sink
+// partitions the raw counts by the provider's protocol before pricing: OpenAI-style
+// prompts include the cache and completions the reasoning; Gemini-style prompts
+// include the cache and reasoning is separate; Anthropic's cache counts are
+// separate and its output includes the thinking. Where upstream would not guess
+// (an unknown protocol, counts above the reported total) nothing is priced.
 func TestSinkReconstructsARawBreakdown(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
@@ -332,38 +335,58 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 	prices.SetPrices([]app.ModelPrice{
 		{Provider: "chatgpt", Model: "gpt-6", Input: 2, Output: 10, CacheRead: 0.5},
 		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
+		{Provider: "gemini", Model: "gemini-3", Input: 1, Output: 8, CacheRead: 0.25},
+		{Provider: "mystery", Model: "m", Input: 1, Output: 1},
 	})
 	sink := NewUsageSink(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
 
-	sink.HandleUsage(context.Background(), cliproxyusage.Record{
-		Provider: "codex", Model: "gpt-6", APIKey: sinkKey,
-		Detail: cliproxyusage.Detail{InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120},
-	})
-	sink.HandleUsage(context.Background(), cliproxyusage.Record{
-		Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
-		Detail: cliproxyusage.Detail{InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10, OutputTokens: 20, TotalTokens: 170},
-	})
+	for _, r := range []cliproxyusage.Record{
+		{Provider: "codex", Model: "gpt-6", Detail: cliproxyusage.Detail{
+			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120}},
+		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{
+			InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10, OutputTokens: 50, ReasoningTokens: 30, TotalTokens: 200}},
+		// No reads: upstream copies the cache creation into the cached count.
+		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{
+			InputTokens: 100, CacheCreationTokens: 10, CachedTokens: 10, OutputTokens: 20}},
+		{Provider: "gemini", Model: "gemini-3", Detail: cliproxyusage.Detail{
+			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 125}},
+		{Provider: "mystery", Model: "m", Detail: cliproxyusage.Detail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120}},
+		// Claude counts adding up to more than the reported total.
+		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{InputTokens: 100, OutputTokens: 50, TotalTokens: 120}},
+	} {
+		r.APIKey = sinkKey
+		sink.HandleUsage(context.Background(), r)
+	}
 	flushed(t, sink)
 
 	got := events.written()
-	if len(got) != 2 {
+	if len(got) != 6 {
 		t.Fatalf("ledger = %+v", got)
 	}
-	codex, claude := got[0], got[1]
-	if codex.TokensInput != 60 || codex.TokensCacheRead != 40 || codex.TokensOutput != 15 || codex.TokensReasoning != 5 ||
-		codex.TokensTotal != 120 || codex.BreakdownQuality != "reconstructed" {
-		t.Fatalf("codex tokens = in %d cache %d out %d reasoning %d total %d quality %q, want 60/40/15/5/120 reconstructed",
-			codex.TokensInput, codex.TokensCacheRead, codex.TokensOutput, codex.TokensReasoning, codex.TokensTotal, codex.BreakdownQuality)
+	type kinds struct {
+		in, out, reasoning, read, write, total int64
+		quality                                string
+		usd                                    float64
+		unpriced                               int64
 	}
-	if want := (60*2 + 40*0.5 + 20*10) / 1e6; math.Abs(codex.Cost.TotalUSD()-want) > 1e-15 || codex.Cost.UnpricedTokens != 0 {
-		t.Fatalf("codex cost = %+v, want $%v with nothing unpriced", codex.Cost, want)
-	}
-	if claude.TokensInput != 100 || claude.TokensCacheRead != 40 || claude.TokensCacheWrite != 10 || claude.TokensOutput != 20 ||
-		claude.TokensTotal != 170 || claude.BreakdownQuality != "reconstructed" {
-		t.Fatalf("claude tokens = %+v, want the counts as reported", claude)
-	}
-	if want := (100*3 + 40*0.3 + 10*3.75 + 20*15) / 1e6; math.Abs(claude.Cost.TotalUSD()-want) > 1e-15 {
-		t.Fatalf("claude cost = %+v, want $%v", claude.Cost, want)
+	for i, want := range []kinds{
+		{60, 15, 5, 40, 0, 120, "reconstructed", (60*2 + 40*0.5 + 20*10) / 1e6, 0},
+		{100, 20, 30, 40, 10, 200, "reconstructed", (100*3 + 50*15 + 40*0.3 + 10*3.75) / 1e6, 0},
+		{100, 20, 0, 0, 10, 130, "reconstructed", (100*3 + 20*15 + 10*3.75) / 1e6, 0},
+		{60, 20, 5, 40, 0, 125, "reconstructed", (60*1 + 25*8 + 40*0.25) / 1e6, 0},
+		{0, 0, 0, 0, 0, 120, "unclassified", 0, 120},
+		{0, 0, 0, 0, 0, 120, "inconsistent", 0, 120},
+	} {
+		e := got[i]
+		have := kinds{e.TokensInput, e.TokensOutput, e.TokensReasoning, e.TokensCacheRead, e.TokensCacheWrite, e.TokensTotal,
+			e.BreakdownQuality, e.Cost.TotalUSD(), e.Cost.UnpricedTokens}
+		if math.Abs(have.usd-want.usd) > 1e-15 {
+			t.Errorf("%s record %d: cost $%v, want $%v", e.Provider, i, have.usd, want.usd)
+		}
+		have.usd = want.usd
+		if have != want {
+			t.Errorf("%s record %d: %+v\nwant %+v", e.Provider, i, have, want)
+		}
 	}
 }
 
