@@ -829,7 +829,6 @@ All settings are environment variables. In the compose setup they come from `.en
 - `make test`: `go test ./... -race`. Tests need **Docker**: integration and end-to-end tests start PostgreSQL with [testcontainers-go](https://golang.testcontainers.org/). Vendors are replaced by a wire-level fake, so no real accounts are needed.
 - `make generate`: regenerates the mocks (mockery) and the server types from the contract (oapi-codegen).
 - **`api/openapi.yaml` is the source of truth** for the web API, shared with the frontend. After changing it, run `make generate` here and `scripts/sync-contract.sh` in the frontend repository (it copies the contract from `../backend` and regenerates the TypeScript types).
-- Design documents: `docs/specs/` (design) and `docs/plans/` (implementation plans).
 
 Layout: `cmd/gateway` (entry point), `internal/domain` (entities and rules), `internal/app` (use cases), `internal/infra` (Postgres, gateway embedding, OIDC, metrics), `internal/iface/http` (web API), `internal/boot` (wiring), `test/e2e`.
 

@@ -21,7 +21,7 @@ import (
 
 // Tests that push run on gateways without a boot-declared vendor: a push
 // shortly after a boot that declared config-derived credentials races inside
-// upstream (amendment A3; see startOnTheWire). /v1/models sits behind the same
+// upstream (see startOnTheWire). /v1/models sits behind the same
 // access middleware as every proxied route and answers 200 once admitted, so
 // it shows admission without a vendor.
 
