@@ -736,7 +736,8 @@ All settings are environment variables, set in the backend's `environment` in th
 
 - **Go**: the version in `go.mod`. The `Dockerfile` builds with the matching `golang` alpine image, cross-compiling for the target platform.
 - To run the whole stack from your checkouts, see [Building from source](#building-from-source).
-- `scripts/check-readme-compose.sh` fails when the compose file shown in this README drifts from `docker-compose.minimal.yml` (CI runs it). Releases: [RELEASING.md](RELEASING.md).
+- `scripts/check-readme-compose.sh` fails when the compose file shown in this README drifts from `docker-compose.minimal.yml` (CI runs it). Releases and repository rules: [RELEASING.md](RELEASING.md).
+- Changes reach `main` only as pull requests, squash-merged after CI passes; direct pushes to `main` are refused. The PR title becomes the commit and must follow [Conventional Commits](https://www.conventionalcommits.org) (`fix(gateway): ...`). Security issues: [SECURITY.md](SECURITY.md), never a public issue.
 - `make build`: `go build ./...`
 - `make test`: `go test ./... -race`. Tests need **Docker**: integration and end-to-end tests start PostgreSQL with [testcontainers-go](https://golang.testcontainers.org/). Vendors are replaced by a wire-level fake, so no real accounts are needed.
 - `make generate`: regenerates the mocks (mockery) and the server types from the contract (oapi-codegen).

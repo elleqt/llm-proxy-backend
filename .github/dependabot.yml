@@ -1,0 +1,43 @@
+# Titles follow Conventional Commits: build(deps): ... and ci(deps): ....
+# Version updates, once a month and grouped, so they arrive as a few pull requests
+# rather than one per dependency. Security updates are separate: Dependabot opens
+# those as soon as an advisory is published.
+#
+# CLIProxyAPI is left out of the Go group on purpose: the gateway embeds it and
+# relies on its behaviour, so each upgrade arrives as its own pull request.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      go-minor-and-patch:
+        patterns: ["*"]
+        exclude-patterns: ["github.com/router-for-me/*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      base-images:
+        patterns: ["*"]

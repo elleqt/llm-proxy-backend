@@ -17,7 +17,7 @@ llm-proxy is versioned with [semver](https://semver.org/) (`vX.Y.Z`). The backen
    ```
 
 3. CI runs the tests on the tag, then publishes `yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend` for `linux/amd64` and `linux/arm64` as `X.Y.Z`, `X.Y`, `latest` (and `X` once the major version is 1 or more), and smoke-tests each platform. Check both runs, then `docker buildx imagetools inspect docker.io/yoonaowo/llm-proxy-backend:X.Y.Z`.
-4. Only after both images are published, bump the pins in the backend repository in one commit on `main`: the tag of both images (`yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend`) in `docker-compose.yml` and in `docker-compose.minimal.yml`, and the copy of `docker-compose.minimal.yml` shown inline in `README.md`.
+4. Only after both images are published, bump the pins in the backend repository in one pull request to `main`: the tag of both images (`yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend`) in `docker-compose.yml` and in `docker-compose.minimal.yml`, and the copy of `docker-compose.minimal.yml` shown inline in `README.md`.
 
    The image tags in the two compose files (and the README's copy of the minimal one) are the only place a release version is written. No README prose names a version and needs a bump: the README downloads the compose files from `main` and sends readers to the releases and Docker Hub tags pages for the current release. `scripts/check-readme-compose.sh` fails if the README's copy differs from `docker-compose.minimal.yml`.
 
@@ -30,3 +30,14 @@ Pushes to `main` publish `edge` and `sha-<commit>` only; `latest` moves only wit
 - Publishing runs only in the `publish` job, only on `push` events to `main` or `v*` tags, and only after the tests pass. It is the only job that declares the `dockerhub` environment, which holds the Docker Hub token and whose deployment policy admits only the `main` branch and `v*` tags.
 - Pull requests, forks included, run the tests and a two-platform image build with no secrets, no registry login and no push. The workflow uses neither `pull_request_target` nor `workflow_run`, so PR code never runs next to a secret.
 - The workflow token is read-only (`permissions: contents: read`), and every action is pinned to a full commit SHA with its version in a comment.
+
+## Repository rules
+
+Both repositories have the same rules, including for their owner:
+
+- `main` changes only through pull requests, merged by squash once CI has passed on them: `test`, `image-check` and `pr-title` here, `check`, `image` and `pr-title` in the frontend. Direct pushes, force-pushes and deleting `main` are refused.
+- The pull request's title becomes the commit on `main`. Titles follow [Conventional Commits](https://www.conventionalcommits.org): `type(scope)!: description`, with type one of `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`; the required `pr-title` check refuses anything else.
+- Release tags `v*` can be created but never moved or deleted: a published version always points at the commit it was built from.
+- CI from a first-time outside contributor's pull request waits for the owner's approval; Actions may only use GitHub's and Docker's own actions, pinned by commit SHA.
+- Dependabot opens security updates as advisories appear and grouped version updates once a month (see `.github/dependabot.yml`); CodeQL scans every pull request and `main`.
+- Vulnerabilities are reported privately, see [SECURITY.md](SECURITY.md).
