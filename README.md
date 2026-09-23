@@ -1,5 +1,7 @@
 # llm-proxy
 
+[![backend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-backend?sort=semver&label=backend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-backend) [![frontend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-frontend?sort=semver&label=frontend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) [![ci](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml)
+
 A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
 
 > **llm-proxy is one system in two repositories:** [llm-proxy-backend](https://github.com/elleqt/llm-proxy-backend) — the gateway, web API and metrics (start here to run it) · [llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend) — the web interface: cabinet and admin panel.
@@ -10,6 +12,10 @@ A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/
 - [Screenshots](#screenshots)
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
+- [First sign-in](#first-sign-in)
+- [Upgrading](#upgrading)
+- [Images](#images)
+- [Building from source](#building-from-source)
 - [Connecting clients](#connecting-clients)
 - [Access control](#access-control)
 - [Sign-in with an identity provider (OIDC)](#sign-in-with-an-identity-provider-oidc)
@@ -89,7 +95,7 @@ In `docker-compose.yml` only the gateway (host port `8080`) and the frontend (ho
 
 ## Quick start
 
-You need Docker with the Compose v2 plugin, git, and openssl.
+Ready-made images for `linux/amd64` and `linux/arm64` are published on Docker Hub; nothing is built on your machine. You need Docker with the Compose v2 plugin, and openssl for the secrets.
 
 ### 1. Install Docker
 
@@ -109,75 +115,211 @@ docker --version
 docker compose version   # must work: the Compose v2 plugin is required
 ```
 
-### 2. Clone both repositories side by side
-
-The compose file builds the frontend from `../frontend`, so the directory names matter:
+### 2. Make a directory for the stack
 
 ```sh
 mkdir llm-proxy && cd llm-proxy
-git clone https://github.com/elleqt/llm-proxy-backend.git backend
-git clone https://github.com/elleqt/llm-proxy-frontend.git frontend
-cd backend
 ```
 
-### 3. Configure
+### 3. Create `docker-compose.yml`
+
+Download it:
 
 ```sh
-cp .env.example .env
+curl -fsSLO https://raw.githubusercontent.com/elleqt/llm-proxy-backend/v0.1.0/docker-compose.yml
 ```
 
-Set these values in `.env`:
+or save this as `docker-compose.yml` (it is the same file). Every value has a working default except the database password; the comments say what to change.
 
-| Variable | Why |
-|---|---|
-| `POSTGRES_USER`, `POSTGRES_DB` | Required by compose. The defaults (`llmproxy`) are fine. Use only letters, digits and `_ - .` because they go into the connection URL |
-| `POSTGRES_PASSWORD` | Required. Replace `change-me` |
-| `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` | The first administrator's login. Without it no administrator is created |
-| `LLMPROXY_PUBLIC_API_URL` | The URL clients use for the API, shown on the Connect page. `http://localhost:8080` works locally |
-| `LLMPROXY_SESSION_KEY` | Only needed when OIDC is on (at least 32 bytes). Set it now if you plan to add OIDC later |
+<!-- readme-sync: docker-compose.yml -->
+```yaml
+# llm-proxy: Postgres, the backend and the frontend, from the published images.
+#
+# Put this file in an empty directory with a .env file next to it that sets the one
+# required secret (CHANGE ME below), then run `docker compose up -d`. Every other
+# value has a working default; override any of them in .env (.env.example in the
+# llm-proxy-backend repository documents each one).
+#
+# Only the proxied API (host port 8080) and the web interface (host port 8081) are
+# published. Three networks keep each listener to the containers that need it: `web`
+# joins the frontend and the backend's web API, `db` the backend and Postgres,
+# `metrics` the backend's /metrics and a scraper, which an operator attaches to it.
+# The web API and /metrics listen only on their network's address (the backend's
+# alias there), so a container on another network cannot reach them. The web API
+# trusts X-Real-IP only because the frontend alone can reach it.
+services:
+  postgres:
+    image: postgres:17-alpine
+    networks: [db]
+    environment:
+      # The user and database names go into the backend's connection URL as they
+      # are: keep them to letters, digits and _ - .
+      POSTGRES_USER: ${POSTGRES_USER:-llmproxy}
+      # CHANGE ME: required, set it in .env (e.g. openssl rand -hex 24).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
+      POSTGRES_DB: ${POSTGRES_DB:-llmproxy}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
-Generate the secrets:
+  backend:
+    # The backend and the frontend are released together: keep one version for both.
+    image: yoonaowo/llm-proxy-backend:${LLMPROXY_VERSION:-0.1.0}
+    environment:
+      # The password travels as PGPASSWORD, which the driver reads when the URL
+      # carries none, so it needs no URL encoding.
+      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER:-llmproxy}@postgres:5432/${POSTGRES_DB:-llmproxy}?sslmode=disable
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
+      # The proxied LLM API: the one backend listener published.
+      LLMPROXY_LISTEN_ADDR: ":8080"
+      # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
+      # network only; no ports entry publishes either. A scraper must join
+      # `metrics` and scrape http://backend-metrics:9090/metrics.
+      LLMPROXY_WEB_ADDR: "backend-web:8081"
+      LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
+      LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
+      LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
+      # The first administrator's login. While no administrator exists, the backend
+      # creates it and prints a one-time password in its log. Empty disables this.
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
+      # Where clients reach the proxied API; shown on the Connect page. Behind a
+      # reverse proxy: https://llm-proxy.example.com.
+      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
+      # false only because this stack serves the web interface over plain http, where
+      # a Secure cookie would not be sent back. Behind TLS, set it to true.
+      LLMPROXY_COOKIE_SECURE: ${LLMPROXY_COOKIE_SECURE:-false}
+      # Parallel password hashes (about 19 MiB each); empty: the CPU count.
+      LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
+      # on fetches upstream's model catalogue from the internet at start and every
+      # three hours; off keeps the one compiled into the build.
+      LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
+      # The price catalog (empty: oh-my-pi's model catalog; off: manual prices
+      # only) and how often it is checked (empty: 6h, at least 5m).
+      LLMPROXY_PRICES_CATALOG_URL: ${LLMPROXY_PRICES_CATALOG_URL:-}
+      LLMPROXY_PRICES_CATALOG_INTERVAL: ${LLMPROXY_PRICES_CATALOG_INTERVAL:-}
+      # OIDC sign-in, off while LLMPROXY_OIDC_ISSUER is empty. When on, the session
+      # key (CHANGE ME then: at least 32 bytes, openssl rand -base64 48), client id,
+      # secret and redirect URL are required.
+      LLMPROXY_SESSION_KEY: ${LLMPROXY_SESSION_KEY:-}
+      LLMPROXY_OIDC_ISSUER: ${LLMPROXY_OIDC_ISSUER:-}
+      LLMPROXY_OIDC_CLIENT_ID: ${LLMPROXY_OIDC_CLIENT_ID:-}
+      LLMPROXY_OIDC_CLIENT_SECRET: ${LLMPROXY_OIDC_CLIENT_SECRET:-}
+      LLMPROXY_OIDC_REDIRECT_URL: ${LLMPROXY_OIDC_REDIRECT_URL:-}
+      LLMPROXY_OIDC_REQUIRED_GROUP: ${LLMPROXY_OIDC_REQUIRED_GROUP:-}
+      LLMPROXY_OIDC_ALLOW_SIGNUP: ${LLMPROXY_OIDC_ALLOW_SIGNUP:-}
+      LLMPROXY_OIDC_DEFAULT_POLICY: ${LLMPROXY_OIDC_DEFAULT_POLICY:-}
+      LLMPROXY_OIDC_GROUP_POLICY: ${LLMPROXY_OIDC_GROUP_POLICY:-}
+      LLMPROXY_OIDC_GROUPS_CLAIM: ${LLMPROXY_OIDC_GROUPS_CLAIM:-}
+      LLMPROXY_OIDC_DISPLAY_NAME: ${LLMPROXY_OIDC_DISPLAY_NAME:-}
+      # false turns the email-and-password form off (an OIDC-only installation).
+      LLMPROXY_LOCAL_LOGIN: ${LLMPROXY_LOCAL_LOGIN:-}
+    networks:
+      web:
+        aliases: [backend-web]
+      db: {}
+      metrics:
+        aliases: [backend-metrics]
+    volumes:
+      - grants:/var/lib/llmproxy/auths
+      - runtime:/var/lib/llmproxy/runtime
+    ports:
+      # Host port of the proxied API, or address:port (127.0.0.1:8080 behind a
+      # reverse proxy on the same host).
+      - "${LLMPROXY_API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # On SIGTERM, requests in flight get 30 s to finish (streams included), then
+    # writing the queued usage records up to 5 s; give it that long before SIGKILL.
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  frontend:
+    image: yoonaowo/llm-proxy-frontend:${LLMPROXY_VERSION:-0.1.0}
+    environment:
+      # The backend's web listener, on the `web` network.
+      BACKEND_ORIGIN: http://backend:8081
+      # Addresses/CIDRs of your reverse proxy, trusted for X-Forwarded-For; empty
+      # trusts none.
+      REAL_IP_FROM: ${REAL_IP_FROM:-}
+    networks: [web]
+    ports:
+      # Host port of the web interface, or address:port (127.0.0.1:8081).
+      - "${LLMPROXY_UI_PORT:-8081}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+networks:
+  web:
+  db:
+  metrics:
+
+volumes:
+  pgdata:
+  # The vendors' OAuth grants: losing this volume means signing every vendor
+  # account in again.
+  grants:
+  runtime:
+```
+
+### 4. Create `.env`
+
+Next to `docker-compose.yml`, create `.env` with the secrets and anything you want to change. A minimal one:
+
+<!-- readme-sync: env -->
+```sh
+# The llm-proxy release to run (the tag of both images).
+LLMPROXY_VERSION=0.1.0
+# Required. Generate it with: openssl rand -hex 24
+POSTGRES_PASSWORD=
+# The first administrator's login.
+LLMPROXY_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
+```
+
+Fill in the password:
 
 ```sh
 openssl rand -hex 24      # POSTGRES_PASSWORD
-openssl rand -base64 48   # LLMPROXY_SESSION_KEY
+openssl rand -base64 48   # LLMPROXY_SESSION_KEY, only needed once you turn OIDC on
 ```
 
-Everything else can stay empty. See the [Configuration reference](#configuration-reference).
+Everything else keeps the compose file's default until you set it here: the database user and name (`llmproxy`), `LLMPROXY_PUBLIC_API_URL` (`http://localhost:8080`, the URL shown on the Connect page), the host ports (`8080`, `8081`), OIDC (off). The full list, with a comment on each variable, is [`.env.example`](.env.example); see also the [Configuration reference](#configuration-reference).
 
-### 4. Start
+### 5. Start
 
 ```sh
-docker compose up -d --build
+docker compose up -d
 ```
 
-The first build takes a few minutes. The images are built from source; none are published. Database migrations run when the backend starts.
+Compose pulls the images and starts Postgres, the backend and the frontend. Database migrations run when the backend starts. `docker compose ps` shows all three as `healthy` once they are up.
 
-### 5. Sign in as the bootstrap administrator
+### 6. Sign in as the bootstrap administrator
 
-On its first start the backend creates the administrator and prints a one-time temporary password to its output:
+On its first start the backend creates the administrator and prints a one-time temporary password (details and recovery: [First sign-in](#first-sign-in)):
 
 ```sh
-docker compose logs backend
+docker compose logs backend | grep -A1 'account:'
 ```
 
-```text
-=================== llm-proxy: bootstrap administrator ===================
-  account:            admin@example.com
-  temporary password: <random password>
-  Shown this once. Sign in on the web interface and choose a new password.
-===========================================================================
-```
+Open **http://localhost:8081**, sign in with that email and password, and choose a new password. Then give yourself model access: your administrator starts with **no model access**. Open **Admin → Users**, select your account and add a rule such as `claude:*` or `chatgpt:*` (see [Access control](#access-control)).
 
-The password is printed only once and is not stored in plain text. It stays in the container log until the container is recreated.
+### 7. Add a vendor account
 
-Open **http://localhost:8081**, sign in with that email and password, and choose a new password. A session opened with a temporary password can only change the password.
-
-Your administrator starts with **no model access**. Open **Admin → Users**, select your account and add a rule such as `claude:*` or `chatgpt:*` (see [Access control](#access-control)).
-
-### 6. Add a vendor account
-
-![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)
+__omp_shell("[Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)")
 
 1. Go to **Admin → Providers → Add account** and choose `claude` or `chatgpt`.
 2. Open the sign-in link and sign in to the vendor with the subscription account you want to share.
@@ -186,7 +328,7 @@ Your administrator starts with **no model access**. Open **Admin → Users**, se
 
 The link is valid for 5 minutes. If the pasted URL is wrong, the sign-in stays open and you can paste again. The vendor grant is stored in the `grants` volume.
 
-### 7. Issue a key and test it
+### 8. Issue a key and test it
 
 In the **Cabinet**, click **Issue a key**, give it a label, and copy the key. It is shown only once.
 
@@ -197,16 +339,138 @@ curl http://localhost:8080/v1/models \
 
 The list contains only the models your rules allow. An empty list usually means no vendor account is added yet or your policy has no rules.
 
+## First sign-in
+
+### The bootstrap administrator
+
+- **When it is created.** At every start the backend checks whether any administrator exists (blocked ones count). Only while none does, it creates a local administrator with the email in `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` (default `admin@example.com`; set it empty to turn this off). Once an administrator exists, the variable does nothing: changing it later creates no second administrator.
+- **If the email already belongs to an account** that is not an administrator, the backend refuses to start with an error rather than promote it.
+- **The temporary password** is printed once, to the backend's output, never through the logger:
+
+  ```text
+  =================== llm-proxy: bootstrap administrator ===================
+    account:            admin@example.com
+    temporary password: <random password>
+    Shown this once. Sign in on the web interface and choose a new password.
+  ===========================================================================
+  ```
+
+  ```sh
+  docker compose logs backend | grep -A1 'account:'
+  ```
+
+  It is stored only as a hash and stays in the container log until the container is recreated (for example by `docker compose up -d` after an upgrade). The bootstrap password does **not** expire; every temporary password an administrator issues later (new users, resets) expires after **72 hours**. An expired temporary password no longer signs in.
+- **Forced password change.** A session opened with a temporary password can do nothing but change the password. After the change the account works normally.
+- **Model access.** Every new administrator starts with an empty policy: add a rule for yourself in **Admin → Users** before issuing keys.
+- If `LLMPROXY_LOCAL_LOGIN=false`, the bootstrap administrator cannot sign in with the password; the backend warns about it at start. Keep local sign-in on until another way in works.
+
+### Lost access
+
+While the stack is running, the backend's command line issues a new temporary password for any local account (people, not service accounts):
+
+```sh
+docker compose exec backend gateway reset-password admin@example.com
+```
+
+It prints the new temporary password once, valid for 72 hours:
+
+```text
+======================= llm-proxy: password reset ========================
+  account:            admin@example.com
+  temporary password: <random password>
+  expires:            2026-09-26T09:15:56Z
+  Shown this once. Sign in on the web interface and choose a new password.
+===========================================================================
+```
+
+The account must change the password at the next sign-in, is signed out everywhere and its sign-in lockout is cleared; its API keys keep working. The reset is recorded in the audit log. The command refuses (exit code `1`, reason on stderr) an unknown email, a service account and a blocked account. `gateway reset-password --unblock <email>` also unblocks the account, but only while no other administrator is active, i.e. when the only administrator was blocked; otherwise an administrator unblocks it in the web interface.
+
+Use it when:
+
+- the bootstrap password scrolled out of the log or the container was recreated before the first sign-in;
+- a temporary password expired;
+- the only administrator forgot their password.
+
+With a second administrator, **Admin → Users → reset password** does the same from the web interface. Keeping two administrators is the simplest insurance.
+
+### More administrators
+
+- **Promote an existing person:** **Admin → Users**, open the user and change the role to administrator. Nobody can demote or block themselves, so an installation always keeps the administrator doing the edit.
+- **Create one:** **Admin → Users → create**, role administrator, with a local password (a 72-hour temporary password is shown once) or an identity-provider invitation.
+
+### Administrators and the identity provider
+
+An account is linked to an identity-provider login in one of two ways, never by a matching email alone:
+
+- **Invitation.** A user created with an invitation, or any person whose user page shows **renew invitation** (also your own bootstrap administrator), gets an invitation for their email that lasts 72 hours. The first OIDC sign-in whose provider reports that email **as verified** claims it and links the login to the account for good, role included. The group check (`LLMPROXY_OIDC_REQUIRED_GROUP`) still applies.
+- **Sign-up** (`LLMPROXY_OIDC_ALLOW_SIGNUP=true`) creates a new, non-administrator account; promote it afterwards. A sign-up whose email already belongs to another account is refused.
+
+With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from its groups at every sign-in, administrators included. The role never comes from the identity provider.
+
+## Upgrading
+
+1. **Back up Postgres first** (see [Backups](#production-deployment)): migrations run automatically when the backend starts and are not rolled back by going back to an older image.
+2. Set the new version in `.env`, for both images at once (they are released together, always use one version):
+
+   ```sh
+   LLMPROXY_VERSION=0.2.0
+   ```
+
+3. Pull and restart:
+
+   ```sh
+   docker compose pull && docker compose up -d
+   ```
+
+If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer `docker-compose.yml` is not required for an upgrade unless the release notes say so.
+
+## Images
+
+| Image | Docker Hub |
+|---|---|
+| backend | [`yoonaowo/llm-proxy-backend`](https://hub.docker.com/r/yoonaowo/llm-proxy-backend) |
+| frontend | [`yoonaowo/llm-proxy-frontend`](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) |
+
+**Platforms:** every tag is one multi-arch manifest for `linux/amd64` and `linux/arm64`, so the same compose file runs on x86-64 servers and PCs, a Raspberry Pi 4 or 5 with a 64-bit OS, Apple Silicon Macs (Docker Desktop) and ARM servers. Docker picks the right one.
+
+**Tags:**
+
+| Tag | Meaning |
+|---|---|
+| `X.Y.Z` (e.g. `0.1.0`) | One release, never moves. **Recommended**: set it as `LLMPROXY_VERSION` |
+| `X.Y` (e.g. `0.1`) | The newest patch release of `X.Y` |
+| `X` | The newest release of major version `X`; published from `1.0.0` on |
+| `latest` | The newest release |
+| `edge` | The current `main` branch: untested between releases, not for production |
+| `sha-<commit>` | One `main` commit |
+
+Images carry OCI labels (source, revision, version) and an SBOM and provenance attestation; the backend reports its version in the `llmproxy_build_info` metric.
+
+## Building from source
+
+For development, or to run unreleased changes: clone both repositories side by side (the build override builds the frontend from `../frontend`, so the directory names matter) and add `docker-compose.build.yml` to the compose command:
+
+```sh
+mkdir llm-proxy && cd llm-proxy
+git clone https://github.com/elleqt/llm-proxy-backend.git backend
+git clone https://github.com/elleqt/llm-proxy-frontend.git frontend
+cd backend
+cp .env.example .env      # then set POSTGRES_PASSWORD
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+The override tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in `.env`. To update: `git pull` in both checkouts and run the same `up -d --build`.
+
 ## Connecting clients
 
 ![Connect page](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/connect.png)
 
-The web UI's **Connect** page shows the same snippets with your key and your deployment's API URL filled in. Below, `https://api.llm.example.com` is `LLMPROXY_PUBLIC_API_URL`.
+The web UI's **Connect** page shows the same snippets with your key and your deployment's API URL filled in. Below, `https://llm-proxy.example.com` is `LLMPROXY_PUBLIC_API_URL`.
 
 **Claude Code**: the base URL has no `/v1`.
 
 ```sh
-export ANTHROPIC_BASE_URL="https://api.llm.example.com"
+export ANTHROPIC_BASE_URL="https://llm-proxy.example.com"
 export ANTHROPIC_AUTH_TOKEN="sk-..."
 claude
 ```
@@ -216,22 +480,22 @@ claude
 ```yaml
 providers:
   anthropic:
-    baseUrl: https://api.llm.example.com
+    baseUrl: https://llm-proxy.example.com
     apiKey: "sk-..."
     api: anthropic-messages
     authHeader: true
     compat:
       supportsEagerToolInputStreaming: true
   openai-codex:
-    baseUrl: https://api.llm.example.com/backend-api
+    baseUrl: https://llm-proxy.example.com/backend-api
     apiKey: "sk-..."
     authHeader: true
 ```
 
-**OpenAI-compatible clients**: use `https://api.llm.example.com/v1` as the base URL and the key as the API key.
+**OpenAI-compatible clients**: use `https://llm-proxy.example.com/v1` as the base URL and the key as the API key.
 
 ```sh
-curl https://api.llm.example.com/v1/chat/completions \
+curl https://llm-proxy.example.com/v1/chat/completions \
   -H "Authorization: Bearer sk-..." \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-5", "messages": [{"role": "user", "content": "Hello"}]}'
@@ -320,48 +584,40 @@ Rules are checked at startup. A malformed rule stops the backend with an error t
 
 Put a TLS reverse proxy (Caddy, Traefik, nginx, …) in front of the stack, with two hostnames:
 
-| Hostname | Route to | Serves |
+| Hostname | What it is | Route to |
 |---|---|---|
-| `llm.example.com` | `frontend` container, port `8080` (published on host `8081`) | web UI and `/api/*` |
-| `api.llm.example.com` | `backend` container, port `8080` (published on host `8080`) | the proxied LLM API |
+| `llm.example.com` | The **web interface** people open in a browser: cabinet, admin panel, sign-in. The frontend's nginx serves the UI and forwards `/api/*` to the backend's web API inside the Docker network; the web API itself is never exposed | `frontend` container, port `8080` (published on host port `8081`) |
+| `llm-proxy.example.com` | The **LLM proxy API** that clients use (Claude Code, omp, OpenAI SDKs) with their `sk-…` keys. This is `LLMPROXY_PUBLIC_API_URL` | the backend's gateway listener, container port `8080` (published on host port `8080`) |
 
-The images are built from source by `docker compose`; there are no published images. Use a `docker-compose.override.yml` next to `docker-compose.yml` for production settings, so `git pull` stays clean:
+Both names can point at the same server and the same reverse proxy; only the routing by hostname differs.
 
-```yaml
-services:
-  backend:
-    environment:
-      # The compose file sets "false" for plain-http local use; behind TLS use secure cookies.
-      LLMPROXY_COOKIE_SECURE: "true"
-    ports: !override
-      - "127.0.0.1:8080:8080"
-  frontend:
-    environment:
-      # Addresses/CIDRs of your reverse proxy; only these are trusted for X-Forwarded-For.
-      REAL_IP_FROM: "172.16.0.0/12"
-    ports: !override
-      - "127.0.0.1:8081:8080"
-```
-
-(`!override` needs Docker Compose 2.24.4 or newer. On older versions, edit the ports in `docker-compose.yml` or use a firewall.)
-
-And in `.env`:
+Keep `docker-compose.yml` as it is and put the production settings in `.env`:
 
 ```sh
-LLMPROXY_PUBLIC_API_URL=https://api.llm.example.com
+LLMPROXY_PUBLIC_API_URL=https://llm-proxy.example.com
+# Behind TLS, cookies must be Secure.
+LLMPROXY_COOKIE_SECURE=true
+# Publish both ports on loopback only, for a reverse proxy on the same host.
+LLMPROXY_API_PORT=127.0.0.1:8080
+LLMPROXY_UI_PORT=127.0.0.1:8081
+# Addresses/CIDRs of your reverse proxy; only these are trusted for X-Forwarded-For.
+REAL_IP_FROM=172.16.0.0/12
 LLMPROXY_OIDC_REDIRECT_URL=https://llm.example.com/api/auth/oidc/callback   # if OIDC is on
 ```
 
+For anything `.env` cannot express, add a `docker-compose.override.yml` next to `docker-compose.yml`; Compose merges it automatically.
+
 Checklist:
 
-- **Secure cookies:** `LLMPROXY_COOKIE_SECURE` must be `true` (the default when unset) whenever the UI is served over HTTPS.
+- **Secure cookies:** `LLMPROXY_COOKIE_SECURE` must be `true` whenever the UI is served over HTTPS. The compose file defaults to `false` for plain-http local use.
 - **`REAL_IP_FROM`** (frontend container): the comma-separated addresses or CIDRs of your reverse proxy. nginx then trusts `X-Forwarded-For` only from them. The backend uses the resulting client address for sign-in rate limits and the audit log. Unset, nothing is trusted and every request appears to come from the proxy.
 - **Never expose the web API or metrics listeners.** In compose they have no published port. Keep it that way.
 - **Expose the gateway only through the reverse proxy.** Its server has no header or idle timeouts, so slow-client protection comes from the proxy. Allow long responses on the API host: streams can last minutes.
+- **Pin the version:** keep `LLMPROXY_VERSION` at a release (`X.Y.Z`), never `edge`.
 - **Backups:**
   - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (use your `POSTGRES_USER` / `POSTGRES_DB`).
-  - The **`grants` volume** holds the vendor OAuth grants. They are files, not database rows. If you lose it, every vendor account must be signed in again. Back it up with your usual volume backup (e.g. `docker run --rm -v <project>_grants:/data -v "$PWD":/backup alpine tar czf /backup/grants.tgz -C /data .`, where `<project>` is the compose project name, `backend` by default).
-- **Upgrades:** `git pull` in both checkouts, then `docker compose up -d --build`. Migrations run automatically when the backend starts. If a migration fails, the backend does not start.
+  - The **`grants` volume** holds the vendor OAuth grants. They are files, not database rows. If you lose it, every vendor account must be signed in again. Back it up with your usual volume backup (e.g. `docker run --rm -v <project>_grants:/data -v "$PWD":/backup alpine tar czf /backup/grants.tgz -C /data .`, where `<project>` is the compose project name, by default the directory's name).
+- **Upgrades:** see [Upgrading](#upgrading).
 - **Shutdown:** on stop the backend lets in-flight requests finish for up to 30 s. Compose gives it 45 s (`stop_grace_period`).
 
 ## Administration
@@ -379,7 +635,7 @@ Checklist:
 
 ### Vendor accounts
 
-**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add account** opens the sign-in wizard described in [Quick start](#6-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
+**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add account** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
 ### Gateway settings
 
@@ -469,7 +725,7 @@ sum by (provider, model) (increase(llmproxy_cost_unpriced_tokens_total[1d])) > 0
 
 ## Configuration reference
 
-All settings are environment variables. In the compose setup they come from `.env`, except the listener addresses, directories, database URL and `LLMPROXY_COOKIE_SECURE`, which `docker-compose.yml` sets itself. A value the backend cannot parse stops it with an error that names the variable and never shows the value.
+All settings are environment variables. In the compose setup they come from `.env`, except the listener addresses, directories and database URL, which `docker-compose.yml` sets itself; for the others, the compose file supplies the defaults listed in it. A value the backend cannot parse stops it with an error that names the variable and never shows the value.
 
 **Core**
 
@@ -499,7 +755,7 @@ All settings are environment variables. In the compose setup they come from `.en
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_LOCAL_LOGIN` | `true` | Email-and-password sign-in. `false` leaves OIDC as the only way in |
-| `LLMPROXY_COOKIE_SECURE` | `true` | `Secure` flag on cookies. `false` only for plain-http local use (compose sets `false`) |
+| `LLMPROXY_COOKIE_SECURE` | `true` | `Secure` flag on cookies. `false` only for plain-http local use (compose default: `false`; set `true` behind TLS) |
 | `LLMPROXY_SESSION_KEY` | — | Seals the OIDC sign-in cookie. At least 32 bytes; required when `LLMPROXY_OIDC_ISSUER` is set |
 
 **OIDC** (on when `LLMPROXY_OIDC_ISSUER` is set; all other OIDC variables are ignored otherwise)
@@ -521,7 +777,7 @@ All settings are environment variables. In the compose setup they come from `.en
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` | empty (no bootstrap) | Creates this administrator with a one-time password while no administrator exists |
+| `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` | empty (no bootstrap); compose default `admin@example.com` | Creates this administrator with a one-time password while no administrator exists (see [First sign-in](#first-sign-in)) |
 
 **Gateway / model catalog**
 
@@ -542,10 +798,12 @@ All settings are environment variables. In the compose setup they come from `.en
 
 | Variable | Where | Description |
 |---|---|---|
-| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `.env` → compose | Database credentials (Postgres container and backend) |
+| `LLMPROXY_VERSION` | `.env` → compose | Tag of both images (one version for both); the compose file's default is the release it was written for. Set it explicitly |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `.env` → compose | Database credentials (Postgres container and backend). `POSTGRES_PASSWORD` is required; user and database default to `llmproxy` |
+| `LLMPROXY_API_PORT`, `LLMPROXY_UI_PORT` | `.env` → compose | Host port (or `address:port`) of the proxied API and the web interface; defaults `8080`, `8081` |
 | `MANAGEMENT_PASSWORD` | backend | Must **not** be set: it would enable CLIProxyAPI's management API, so the backend refuses to start |
 | `BACKEND_ORIGIN` | frontend container | Backend web listener origin; compose sets `http://backend:8081` |
-| `REAL_IP_FROM` | frontend container | Reverse proxy addresses/CIDRs trusted for `X-Forwarded-For`; unset trusts none |
+| `REAL_IP_FROM` | `.env` → frontend container | Reverse proxy addresses/CIDRs trusted for `X-Forwarded-For`; empty trusts none |
 
 ## Security notes
 
@@ -564,7 +822,9 @@ All settings are environment variables. In the compose setup they come from `.en
 
 ## Development
 
-- **Go 1.26** (`go.mod`). The Dockerfile builds with `golang:1.26-alpine`.
+- **Go 1.26** (`go.mod`). The Dockerfile builds with `golang:1.26-alpine`, cross-compiling for the target platform.
+- To run the whole stack from your checkouts, see [Building from source](#building-from-source).
+- `scripts/check-readme-compose.sh` fails when the compose file or `.env` example in this README drifts from `docker-compose.yml` / `.env.example` (CI runs it). Releases: [RELEASING.md](RELEASING.md).
 - `make build`: `go build ./...`
 - `make test`: `go test ./... -race`. Tests need **Docker**: integration and end-to-end tests start PostgreSQL with [testcontainers-go](https://golang.testcontainers.org/). Vendors are replaced by a wire-level fake, so no real accounts are needed.
 - `make generate`: regenerates the mocks (mockery) and the server types from the contract (oapi-codegen).
@@ -575,7 +835,7 @@ Layout: `cmd/gateway` (entry point), `internal/domain` (entities and rules), `in
 
 ## Related repository
 
-[llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend): the web interface (React + TypeScript, served by nginx), with the cabinet, the Connect page and the admin panel. `docker compose` in this repository builds it from a sibling `../frontend` checkout.
+[llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend): the web interface (React + TypeScript, served by nginx), with the cabinet, the Connect page and the admin panel. Published as [`yoonaowo/llm-proxy-frontend`](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) with the same version as the backend; `docker-compose.build.yml` builds it from a sibling `../frontend` checkout.
 
 ## License
 

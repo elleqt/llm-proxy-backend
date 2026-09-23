@@ -1,21 +1,28 @@
-# The local stack: Postgres, the backend and the frontend, built from source (the
-# frontend from the sibling ../frontend checkout). Values come from .env; see
-# .env.example. Only the proxied API (8080) and the frontend (8081) are published.
+# llm-proxy: Postgres, the backend and the frontend, from the published images.
 #
-# Three networks keep each listener to the containers that need it: `web` joins the
-# frontend and the backend's web API, `db` the backend and Postgres, `metrics` the
-# backend's /metrics and a scraper, which an operator attaches to it. The web API and
-# /metrics listen only on their network's address (the backend's alias there), so a
-# container on another network cannot reach them. The web API trusts X-Real-IP only
-# because the frontend alone can reach it.
+# Put this file in an empty directory with a .env file next to it that sets the one
+# required secret (CHANGE ME below), then run `docker compose up -d`. Every other
+# value has a working default; override any of them in .env (.env.example in the
+# llm-proxy-backend repository documents each one).
+#
+# Only the proxied API (host port 8080) and the web interface (host port 8081) are
+# published. Three networks keep each listener to the containers that need it: `web`
+# joins the frontend and the backend's web API, `db` the backend and Postgres,
+# `metrics` the backend's /metrics and a scraper, which an operator attaches to it.
+# The web API and /metrics listen only on their network's address (the backend's
+# alias there), so a container on another network cannot reach them. The web API
+# trusts X-Real-IP only because the frontend alone can reach it.
 services:
   postgres:
     image: postgres:17-alpine
     networks: [db]
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      # The user and database names go into the backend's connection URL as they
+      # are: keep them to letters, digits and _ - .
+      POSTGRES_USER: ${POSTGRES_USER:-llmproxy}
+      # CHANGE ME: required, set it in .env (e.g. openssl rand -hex 24).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
+      POSTGRES_DB: ${POSTGRES_DB:-llmproxy}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -25,13 +32,13 @@ services:
       retries: 10
 
   backend:
-    build: .
+    # The backend and the frontend are released together: keep one version for both.
+    image: yoonaowo/llm-proxy-backend:${LLMPROXY_VERSION:-0.1.0}
     environment:
       # The password travels as PGPASSWORD, which the driver reads when the URL
-      # carries none, so it needs no URL encoding. The user and database names
-      # go into the URL as they are: keep them to letters, digits and _ - .
-      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER}@postgres:5432/${POSTGRES_DB}?sslmode=disable
-      PGPASSWORD: ${POSTGRES_PASSWORD}
+      # carries none, so it needs no URL encoding.
+      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER:-llmproxy}@postgres:5432/${POSTGRES_DB:-llmproxy}?sslmode=disable
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
       # The proxied LLM API: the one backend listener published.
       LLMPROXY_LISTEN_ADDR: ":8080"
       # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
@@ -41,24 +48,28 @@ services:
       LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
       LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
       LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
-      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL:-}
+      # The first administrator's login. While no administrator exists, the backend
+      # creates it and prints a one-time password in its log. Empty disables this.
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
+      # Where clients reach the proxied API; shown on the Connect page. Behind a
+      # reverse proxy: https://llm-proxy.example.com.
+      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
+      # false only because this stack serves the web interface over plain http, where
+      # a Secure cookie would not be sent back. Behind TLS, set it to true.
+      LLMPROXY_COOKIE_SECURE: ${LLMPROXY_COOKIE_SECURE:-false}
+      # Parallel password hashes (about 19 MiB each); empty: the CPU count.
       LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
-      # on (the default) fetches upstream's model catalogue from the internet at
-      # start and every three hours; off keeps the one compiled into the build.
+      # on fetches upstream's model catalogue from the internet at start and every
+      # three hours; off keeps the one compiled into the build.
       LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
       # The price catalog (empty: oh-my-pi's model catalog; off: manual prices
       # only) and how often it is checked (empty: 6h, at least 5m).
       LLMPROXY_PRICES_CATALOG_URL: ${LLMPROXY_PRICES_CATALOG_URL:-}
       LLMPROXY_PRICES_CATALOG_INTERVAL: ${LLMPROXY_PRICES_CATALOG_INTERVAL:-}
-      # Where clients reach the proxied API; shown in the cabinet's connection
-      # instructions. A local default - every deployment overrides it.
-      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
-      # Only because this local stack serves the web interface over plain http:
-      # a Secure cookie would not be sent back. Behind TLS, leave it unset (true).
-      LLMPROXY_COOKIE_SECURE: "false"
-      # Required, at least 32 bytes, when OIDC sign-in is on.
+      # OIDC sign-in, off while LLMPROXY_OIDC_ISSUER is empty. When on, the session
+      # key (CHANGE ME then: at least 32 bytes, openssl rand -base64 48), client id,
+      # secret and redirect URL are required.
       LLMPROXY_SESSION_KEY: ${LLMPROXY_SESSION_KEY:-}
-      # OIDC sign-in is on when an issuer is set.
       LLMPROXY_OIDC_ISSUER: ${LLMPROXY_OIDC_ISSUER:-}
       LLMPROXY_OIDC_CLIENT_ID: ${LLMPROXY_OIDC_CLIENT_ID:-}
       LLMPROXY_OIDC_CLIENT_SECRET: ${LLMPROXY_OIDC_CLIENT_SECRET:-}
@@ -81,7 +92,9 @@ services:
       - grants:/var/lib/llmproxy/auths
       - runtime:/var/lib/llmproxy/runtime
     ports:
-      - "8080:8080"
+      # Host port of the proxied API, or address:port (127.0.0.1:8080 behind a
+      # reverse proxy on the same host).
+      - "${LLMPROXY_API_PORT:-8080}:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,13 +108,17 @@ services:
       retries: 5
 
   frontend:
-    build: ../frontend
+    image: yoonaowo/llm-proxy-frontend:${LLMPROXY_VERSION:-0.1.0}
     environment:
       # The backend's web listener, on the `web` network.
       BACKEND_ORIGIN: http://backend:8081
+      # Addresses/CIDRs of your reverse proxy, trusted for X-Forwarded-For; empty
+      # trusts none.
+      REAL_IP_FROM: ${REAL_IP_FROM:-}
     networks: [web]
     ports:
-      - "8081:8080"
+      # Host port of the web interface, or address:port (127.0.0.1:8081).
+      - "${LLMPROXY_UI_PORT:-8081}:8080"
     depends_on:
       backend:
         condition: service_healthy
