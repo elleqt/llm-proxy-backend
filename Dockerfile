@@ -11,7 +11,7 @@ ARG VERSION
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/gateway ./cmd/gateway
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN adduser -D -u 10001 app \
  && mkdir -p /var/lib/llmproxy/runtime /var/lib/llmproxy/auths \
  && chown -R app /var/lib/llmproxy
