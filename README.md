@@ -91,11 +91,11 @@ The backend is one process with three listeners.
 
 **Metrics listener** (`LLMPROXY_METRICS_ADDR`, default `127.0.0.1:9090`). Serves `/metrics` for Prometheus, with no authentication. **Never expose it.** Only a scraper inside your network should reach it.
 
-In `docker-compose.yml` only the gateway (host port `8080`) and the frontend (host port `8081`) are published. The web API listens only on the `web` network, and metrics only on the `metrics` network.
+In both compose files only the gateway (host port `8080`) and the frontend (host port `8081`) are published. In the full `docker-compose.yml` the web API listens only on the `web` network, and metrics only on the `metrics` network; the minimal file puts all three containers on one network and leaves metrics on the backend's loopback.
 
 ## Quick start
 
-Ready-made images for `linux/amd64` and `linux/arm64` are published on Docker Hub; nothing is built on your machine. You need Docker with the Compose v2 plugin, and openssl for the secrets.
+Ready-made images for `linux/amd64` and `linux/arm64` are published on Docker Hub; nothing is built on your machine. You need Docker with the Compose v2 plugin, and openssl for the database password.
 
 ### 1. Install Docker
 
@@ -123,181 +123,88 @@ mkdir llm-proxy && cd llm-proxy
 
 ### 3. Create `docker-compose.yml`
 
-Download it:
+There are two versions of the compose file. Both run the same images and start the same stack; pick one.
+
+**Minimal** (the shortest path): only what the stack needs to start and to let you sign in over plain http. Download it as `docker-compose.yml`:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/elleqt/llm-proxy-backend/v0.1.0/docker-compose.yml
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/elleqt/llm-proxy-backend/main/docker-compose.minimal.yml
 ```
 
-or save this as `docker-compose.yml` (it is the same file). Every value has a working default except the database password; the comments say what to change.
+or save this as `docker-compose.yml` (it is the same file):
 
-<!-- readme-sync: docker-compose.yml -->
+<!-- readme-sync: docker-compose.minimal.yml -->
 ```yaml
-# llm-proxy: Postgres, the backend and the frontend, from the published images.
-#
-# Put this file in an empty directory with a .env file next to it that sets the one
-# required secret (CHANGE ME below), then run `docker compose up -d`. Every other
-# value has a working default; override any of them in .env (.env.example in the
-# llm-proxy-backend repository documents each one).
-#
-# Only the proxied API (host port 8080) and the web interface (host port 8081) are
-# published. Three networks keep each listener to the containers that need it: `web`
-# joins the frontend and the backend's web API, `db` the backend and Postgres,
-# `metrics` the backend's /metrics and a scraper, which an operator attaches to it.
-# The web API and /metrics listen only on their network's address (the backend's
-# alias there), so a container on another network cannot reach them. The web API
-# trusts X-Real-IP only because the frontend alone can reach it.
+# llm-proxy, minimal version: only what the stack needs to start and to sign in
+# over plain http. docker-compose.yml has every setting, with comments.
 services:
   postgres:
     image: postgres:17-alpine
-    networks: [db]
     environment:
-      # The user and database names go into the backend's connection URL as they
-      # are: keep them to letters, digits and _ - .
-      POSTGRES_USER: ${POSTGRES_USER:-llmproxy}
-      # CHANGE ME: required, set it in .env (e.g. openssl rand -hex 24).
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
-      POSTGRES_DB: ${POSTGRES_DB:-llmproxy}
+      POSTGRES_USER: llmproxy
+      # CHANGE ME: the same value as PGPASSWORD below. Postgres takes it only on its
+      # first start, with an empty volume.
+      POSTGRES_PASSWORD: change-me-db-password
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD", "pg_isready", "-U", "llmproxy"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   backend:
-    # The backend and the frontend are released together: keep one version for both.
-    image: yoonaowo/llm-proxy-backend:${LLMPROXY_VERSION:-0.1.0}
+    # Keep one version for both images.
+    image: yoonaowo/llm-proxy-backend:0.1.0
     environment:
-      # The password travels as PGPASSWORD, which the driver reads when the URL
-      # carries none, so it needs no URL encoding.
-      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER:-llmproxy}@postgres:5432/${POSTGRES_DB:-llmproxy}?sslmode=disable
-      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
-      # The proxied LLM API: the one backend listener published.
-      LLMPROXY_LISTEN_ADDR: ":8080"
-      # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
-      # network only; no ports entry publishes either. A scraper must join
-      # `metrics` and scrape http://backend-metrics:9090/metrics.
-      LLMPROXY_WEB_ADDR: "backend-web:8081"
-      LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
-      LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
-      LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
-      # The first administrator's login. While no administrator exists, the backend
-      # creates it and prints a one-time password in its log. Empty disables this.
-      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
-      # Where clients reach the proxied API; shown on the Connect page. Behind a
-      # reverse proxy: https://llm-proxy.example.com.
-      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
-      # false only because this stack serves the web interface over plain http, where
-      # a Secure cookie would not be sent back. Behind TLS, set it to true.
-      LLMPROXY_COOKIE_SECURE: ${LLMPROXY_COOKIE_SECURE:-false}
-      # Parallel password hashes (about 19 MiB each); empty: the CPU count.
-      LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
-      # on fetches upstream's model catalogue from the internet at start and every
-      # three hours; off keeps the one compiled into the build.
-      LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
-      # The price catalog (empty: oh-my-pi's model catalog; off: manual prices
-      # only) and how often it is checked (empty: 6h, at least 5m).
-      LLMPROXY_PRICES_CATALOG_URL: ${LLMPROXY_PRICES_CATALOG_URL:-}
-      LLMPROXY_PRICES_CATALOG_INTERVAL: ${LLMPROXY_PRICES_CATALOG_INTERVAL:-}
-      # OIDC sign-in, off while LLMPROXY_OIDC_ISSUER is empty. When on, the session
-      # key (CHANGE ME then: at least 32 bytes, openssl rand -base64 48), client id,
-      # secret and redirect URL are required.
-      LLMPROXY_SESSION_KEY: ${LLMPROXY_SESSION_KEY:-}
-      LLMPROXY_OIDC_ISSUER: ${LLMPROXY_OIDC_ISSUER:-}
-      LLMPROXY_OIDC_CLIENT_ID: ${LLMPROXY_OIDC_CLIENT_ID:-}
-      LLMPROXY_OIDC_CLIENT_SECRET: ${LLMPROXY_OIDC_CLIENT_SECRET:-}
-      LLMPROXY_OIDC_REDIRECT_URL: ${LLMPROXY_OIDC_REDIRECT_URL:-}
-      LLMPROXY_OIDC_REQUIRED_GROUP: ${LLMPROXY_OIDC_REQUIRED_GROUP:-}
-      LLMPROXY_OIDC_ALLOW_SIGNUP: ${LLMPROXY_OIDC_ALLOW_SIGNUP:-}
-      LLMPROXY_OIDC_DEFAULT_POLICY: ${LLMPROXY_OIDC_DEFAULT_POLICY:-}
-      LLMPROXY_OIDC_GROUP_POLICY: ${LLMPROXY_OIDC_GROUP_POLICY:-}
-      LLMPROXY_OIDC_GROUPS_CLAIM: ${LLMPROXY_OIDC_GROUPS_CLAIM:-}
-      LLMPROXY_OIDC_DISPLAY_NAME: ${LLMPROXY_OIDC_DISPLAY_NAME:-}
-      # false turns the email-and-password form off (an OIDC-only installation).
-      LLMPROXY_LOCAL_LOGIN: ${LLMPROXY_LOCAL_LOGIN:-}
-    networks:
-      web:
-        aliases: [backend-web]
-      db: {}
-      metrics:
-        aliases: [backend-metrics]
+      LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
+      # CHANGE ME: the same value as POSTGRES_PASSWORD above.
+      PGPASSWORD: change-me-db-password
+      LLMPROXY_WEB_ADDR: ":8081"
+      LLMPROXY_PUBLIC_API_URL: http://localhost:8080
+      LLMPROXY_COOKIE_SECURE: "false"
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
     volumes:
       - grants:/var/lib/llmproxy/auths
-      - runtime:/var/lib/llmproxy/runtime
     ports:
-      # Host port of the proxied API, or address:port (127.0.0.1:8080 behind a
-      # reverse proxy on the same host).
-      - "${LLMPROXY_API_PORT:-8080}:8080"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
-    # On SIGTERM, requests in flight get 30 s to finish (streams included), then
-    # writing the queued usage records up to 5 s; give it that long before SIGKILL.
-    stop_grace_period: 45s
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
 
   frontend:
-    image: yoonaowo/llm-proxy-frontend:${LLMPROXY_VERSION:-0.1.0}
-    environment:
-      # The backend's web listener, on the `web` network.
-      BACKEND_ORIGIN: http://backend:8081
-      # Addresses/CIDRs of your reverse proxy, trusted for X-Forwarded-For; empty
-      # trusts none.
-      REAL_IP_FROM: ${REAL_IP_FROM:-}
-    networks: [web]
+    image: yoonaowo/llm-proxy-frontend:0.1.0
     ports:
-      # Host port of the web interface, or address:port (127.0.0.1:8081).
-      - "${LLMPROXY_UI_PORT:-8081}:8080"
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-networks:
-  web:
-  db:
-  metrics:
+      - "8081:8080"
 
 volumes:
   pgdata:
-  # The vendors' OAuth grants: losing this volume means signing every vendor
-  # account in again.
   grants:
-  runtime:
 ```
 
-### 4. Create `.env`
-
-Next to `docker-compose.yml`, create `.env` with the secrets and anything you want to change. A minimal one:
-
-<!-- readme-sync: env -->
-```sh
-# The llm-proxy release to run (the tag of both images).
-LLMPROXY_VERSION=0.1.0
-# Required. Generate it with: openssl rand -hex 24
-POSTGRES_PASSWORD=
-# The first administrator's login.
-LLMPROXY_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
-```
-
-Fill in the password:
+**Full**: [`docker-compose.yml`](docker-compose.yml) in this repository. Use it for a production deployment: it keeps the web API and the metrics on their own Docker networks, exposes `/metrics` to a scraper, and writes every setting out with a comment, defaults as values and optional settings (OIDC and others) as commented-out examples. Download it instead of the minimal file:
 
 ```sh
-openssl rand -hex 24      # POSTGRES_PASSWORD
-openssl rand -base64 48   # LLMPROXY_SESSION_KEY, only needed once you turn OIDC on
+curl -fsSLO https://raw.githubusercontent.com/elleqt/llm-proxy-backend/main/docker-compose.yml
 ```
 
-Everything else keeps the compose file's default until you set it here: the database user and name (`llmproxy`), `LLMPROXY_PUBLIC_API_URL` (`http://localhost:8080`, the URL shown on the Connect page), the host ports (`8080`, `8081`), OIDC (off). The full list, with a comment on each variable, is [`.env.example`](.env.example); see also the [Configuration reference](#configuration-reference).
+No `.env` file is needed with either: every value is in the compose file, and you change a setting by editing it there. `CHANGE ME` marks what must change. Both files use the same volume, user and database names, so you can switch from the minimal file to the full one later and keep your data: put the database password you already use into the new file instead of a new one.
+
+### 4. Set the database password
+
+Replace the placeholder `change-me-db-password` (it appears twice: Postgres and the backend) with a random password:
+
+```sh
+sed -i "s/change-me-db-password/$(openssl rand -hex 24)/g" docker-compose.yml
+```
+
+On macOS:
+
+```sh
+sed -i '' "s/change-me-db-password/$(openssl rand -hex 24)/g" docker-compose.yml
+```
+
+Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database.
 
 ### 5. Start
 
@@ -305,7 +212,7 @@ Everything else keeps the compose file's default until you set it here: the data
 docker compose up -d
 ```
 
-Compose pulls the images and starts Postgres, the backend and the frontend. Database migrations run when the backend starts. `docker compose ps` shows all three as `healthy` once they are up.
+Compose pulls the images and starts Postgres, the backend and the frontend. Database migrations run when the backend starts. `docker compose ps` shows all three as `healthy` once they are up (with the minimal file, which gives the backend no healthcheck, the backend as `Up`).
 
 ### 6. Sign in as the bootstrap administrator
 
@@ -410,11 +317,13 @@ With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from 
 ## Upgrading
 
 1. **Back up Postgres first** (see [Backups](#production-deployment)): migrations run automatically when the backend starts and are not rolled back by going back to an older image.
-2. Set the new version in `.env`, for both images at once (they are released together, always use one version):
+2. In `docker-compose.yml`, change the tag of both images, `yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend`, to the new release (they are released together, always use one version for both). The current release is on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases) and the [Docker Hub tags page](https://hub.docker.com/r/yoonaowo/llm-proxy-backend/tags). With `X.Y.Z` the new version:
 
    ```sh
-   LLMPROXY_VERSION=0.2.0
+   sed -i -E 's#(yoonaowo/llm-proxy-(backend|frontend)):[^ ]+#\1:X.Y.Z#' docker-compose.yml
    ```
+
+   (on macOS: `sed -i '' -E …`).
 
 3. Pull and restart:
 
@@ -422,7 +331,7 @@ With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from 
    docker compose pull && docker compose up -d
    ```
 
-If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer `docker-compose.yml` is not required for an upgrade unless the release notes say so.
+If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer compose file is not required for an upgrade unless the release notes say so.
 
 ## Images
 
@@ -437,8 +346,8 @@ If a migration fails, the backend does not start; `docker compose logs backend` 
 
 | Tag | Meaning |
 |---|---|
-| `X.Y.Z` (e.g. `0.1.0`) | One release, never moves. **Recommended**: set it as `LLMPROXY_VERSION` |
-| `X.Y` (e.g. `0.1`) | The newest patch release of `X.Y` |
+| `X.Y.Z` | One release, never moves. **Recommended**: the compose files name one |
+| `X.Y` | The newest patch release of `X.Y` |
 | `X` | The newest release of major version `X`; published from `1.0.0` on |
 | `latest` | The newest release |
 | `edge` | The current `main` branch: untested between releases, not for production |
@@ -455,11 +364,10 @@ mkdir llm-proxy && cd llm-proxy
 git clone https://github.com/elleqt/llm-proxy-backend.git backend
 git clone https://github.com/elleqt/llm-proxy-frontend.git frontend
 cd backend
-cp .env.example .env      # then set POSTGRES_PASSWORD
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The override tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or set `COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in `.env`. To update: `git pull` in both checkouts and run the same `up -d --build`.
+The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password stays the file's placeholder, which is enough for a local build: Postgres is not published. To update: `git pull` in both checkouts and run the same `up -d --build`.
 
 ## Connecting clients
 
@@ -549,19 +457,18 @@ These steps work with any OpenID Connect provider (Keycloak, Authentik, Zitadel,
 2. **Redirect URI:** `https://llm.example.com/api/auth/oidc/callback`, where `llm.example.com` is your web UI host. Locally: `http://localhost:8081/api/auth/oidc/callback`.
 3. **Scopes:** the backend requests `openid email profile`.
 4. **Groups claim:** make the provider put the user's groups into the **ID token** as a list of strings. The default claim name is `groups` (`LLMPROXY_OIDC_GROUPS_CLAIM`). Group names are compared exactly as sent, so `/llm-users` and `llm-users` are different.
-5. Configure the backend in `.env` and restart with `docker compose up -d`:
+5. Configure the backend in `docker-compose.yml`: the full file has the OIDC lines, commented out, in the backend's `environment` (with the minimal file, add them there). Uncomment the ones you need, fill them in, and restart with `docker compose up -d`:
 
-```sh
-LLMPROXY_SESSION_KEY=<openssl rand -base64 48>
-LLMPROXY_OIDC_ISSUER=https://idp.example.com/realms/example
-LLMPROXY_OIDC_CLIENT_ID=llm-proxy
-LLMPROXY_OIDC_CLIENT_SECRET=<client secret>
-LLMPROXY_OIDC_REDIRECT_URL=https://llm.example.com/api/auth/oidc/callback
-LLMPROXY_OIDC_REQUIRED_GROUP=/llm-users
-LLMPROXY_OIDC_ALLOW_SIGNUP=true
-LLMPROXY_OIDC_GROUP_POLICY=/llm-users=chatgpt:*;/llm-claude=claude:*,chatgpt:*
-LLMPROXY_OIDC_DEFAULT_POLICY=
-LLMPROXY_OIDC_DISPLAY_NAME=Example SSO
+```yaml
+      LLMPROXY_SESSION_KEY: <output of: openssl rand -base64 48>
+      LLMPROXY_OIDC_ISSUER: https://idp.example.com/realms/example
+      LLMPROXY_OIDC_CLIENT_ID: llm-proxy
+      LLMPROXY_OIDC_CLIENT_SECRET: <client secret>
+      LLMPROXY_OIDC_REDIRECT_URL: https://llm.example.com/api/auth/oidc/callback
+      LLMPROXY_OIDC_REQUIRED_GROUP: /llm-users
+      LLMPROXY_OIDC_ALLOW_SIGNUP: "true"
+      LLMPROXY_OIDC_GROUP_POLICY: /llm-users=chatgpt:*;/llm-claude=claude:*,chatgpt:*
+      LLMPROXY_OIDC_DISPLAY_NAME: Example SSO
 ```
 
 | Variable | Meaning |
@@ -576,7 +483,7 @@ Rules are checked at startup. A malformed rule stops the backend with an error t
 
 - A user who fails the group check or is not allowed to sign up goes back to the login page with *"Your identity-provider account is not allowed to use this service."*
 - **Group changes apply at the user's next sign-in.** Their API keys keep the policy from their last sign-in until then. To cut someone off at once, **block them in the admin panel**.
-- `LLMPROXY_LOCAL_LOGIN=false` hides the password form, so OIDC is the only way in. If the identity provider goes down, set it back to `true` and restart to let local administrators in.
+- `LLMPROXY_LOCAL_LOGIN=false` hides the password form, so OIDC is the only way in. If the identity provider goes down, set it back to `"true"` in `docker-compose.yml` and restart to let local administrators in.
 
 **Keycloak example.** In the realm, create a client `llm-proxy` with *Client authentication* on and *Standard flow* enabled, and set the redirect URI as above. In *Client scopes → llm-proxy-dedicated*, add a **Group Membership** mapper with *Token claim name* `groups`, **Full group path on**, and *Add to ID token* on. Groups then arrive as `/llm-users`, `/llm-claude`. The issuer is `https://idp.example.com/realms/<realm>`.
 
@@ -591,31 +498,37 @@ Put a TLS reverse proxy (Caddy, Traefik, nginx, …) in front of the stack, with
 
 Both names can point at the same server and the same reverse proxy; only the routing by hostname differs.
 
-Keep `docker-compose.yml` as it is and put the production settings in `.env`:
+Use the full `docker-compose.yml` and change these values in it:
 
-```sh
-LLMPROXY_PUBLIC_API_URL=https://llm-proxy.example.com
-# Behind TLS, cookies must be Secure.
-LLMPROXY_COOKIE_SECURE=true
-# Publish both ports on loopback only, for a reverse proxy on the same host.
-LLMPROXY_API_PORT=127.0.0.1:8080
-LLMPROXY_UI_PORT=127.0.0.1:8081
-# Addresses/CIDRs of your reverse proxy; only these are trusted for X-Forwarded-For.
-REAL_IP_FROM=172.16.0.0/12
-LLMPROXY_OIDC_REDIRECT_URL=https://llm.example.com/api/auth/oidc/callback   # if OIDC is on
+```yaml
+  backend:
+    environment:
+      LLMPROXY_PUBLIC_API_URL: https://llm-proxy.example.com
+      # Behind TLS, cookies must be Secure.
+      LLMPROXY_COOKIE_SECURE: "true"
+      LLMPROXY_OIDC_REDIRECT_URL: https://llm.example.com/api/auth/oidc/callback   # if OIDC is on
+    ports:
+      # Loopback only, for a reverse proxy on the same host.
+      - "127.0.0.1:8080:8080"
+  frontend:
+    environment:
+      # Addresses/CIDRs of your reverse proxy; only these are trusted for X-Forwarded-For.
+      REAL_IP_FROM: 172.16.0.0/12
+    ports:
+      - "127.0.0.1:8081:8080"
 ```
 
-For anything `.env` cannot express, add a `docker-compose.override.yml` next to `docker-compose.yml`; Compose merges it automatically.
+Each of these lines is already in the file: change the value, or uncomment the example and replace the commented port line with it. To keep your changes apart from the file you downloaded, you can put them in a `docker-compose.override.yml` next to it instead; Compose merges it automatically (ports are added to the file's list, not replaced, so change those in `docker-compose.yml` itself).
 
 Checklist:
 
-- **Secure cookies:** `LLMPROXY_COOKIE_SECURE` must be `true` whenever the UI is served over HTTPS. The compose file defaults to `false` for plain-http local use.
+- **Secure cookies:** `LLMPROXY_COOKIE_SECURE` must be `true` whenever the UI is served over HTTPS. The compose files set `"false"` for plain-http local use.
 - **`REAL_IP_FROM`** (frontend container): the comma-separated addresses or CIDRs of your reverse proxy. nginx then trusts `X-Forwarded-For` only from them. The backend uses the resulting client address for sign-in rate limits and the audit log. Unset, nothing is trusted and every request appears to come from the proxy.
 - **Never expose the web API or metrics listeners.** In compose they have no published port. Keep it that way.
 - **Expose the gateway only through the reverse proxy.** Its server has no header or idle timeouts, so slow-client protection comes from the proxy. Allow long responses on the API host: streams can last minutes.
-- **Pin the version:** keep `LLMPROXY_VERSION` at a release (`X.Y.Z`), never `edge`.
+- **Pin the version:** keep both image tags at a release (`X.Y.Z`), never `edge`.
 - **Backups:**
-  - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (use your `POSTGRES_USER` / `POSTGRES_DB`).
+  - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file).
   - The **`grants` volume** holds the vendor OAuth grants. They are files, not database rows. If you lose it, every vendor account must be signed in again. Back it up with your usual volume backup (e.g. `docker run --rm -v <project>_grants:/data -v "$PWD":/backup alpine tar czf /backup/grants.tgz -C /data .`, where `<project>` is the compose project name, by default the directory's name).
 - **Upgrades:** see [Upgrading](#upgrading).
 - **Shutdown:** on stop the backend lets in-flight requests finish for up to 30 s. Compose gives it 45 s (`stop_grace_period`).
@@ -725,13 +638,13 @@ sum by (provider, model) (increase(llmproxy_cost_unpriced_tokens_total[1d])) > 0
 
 ## Configuration reference
 
-All settings are environment variables. In the compose setup they come from `.env`, except the listener addresses, directories and database URL, which `docker-compose.yml` sets itself; for the others, the compose file supplies the defaults listed in it. A value the backend cannot parse stops it with an error that names the variable and never shows the value.
+All settings are environment variables, set in the backend's `environment` in the compose file. The full `docker-compose.yml` lists every one: a setting with a default is written with that default, a setting that is off or computed by default is a commented-out example. A value the backend cannot parse stops it with an error that names the variable and never shows the value.
 
 **Core**
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_PUBLIC_API_URL` | — (required while the web listener is on) | Absolute http(s) URL clients reach the API at; shown on the Connect page. Compose default: `http://localhost:8080` |
+| `LLMPROXY_PUBLIC_API_URL` | — (required while the web listener is on) | Absolute http(s) URL clients reach the API at; shown on the Connect page. Compose files: `http://localhost:8080` |
 | `LLMPROXY_RUNTIME_DIR` | `/var/lib/llmproxy/runtime` | CLIProxyAPI's working directory (its request logs). No config file is read from it |
 | `LLMPROXY_AUTH_DIR` | `/var/lib/llmproxy/auths` | Vendor OAuth grants. Must be persistent (`grants` volume) |
 | `LLMPROXY_PASSWORD_HASH_CONCURRENCY` | CPU count | How many argon2 password hashes (about 19 MiB each) may run at once |
@@ -740,22 +653,22 @@ All settings are environment variables. In the compose setup they come from `.en
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_LISTEN_ADDR` | `:8080` | Gateway (proxied API). Compose: `:8080` |
-| `LLMPROXY_WEB_ADDR` | `127.0.0.1:8081` | Web API (`/api/*`); `off` disables it and the web interface. Compose: `backend-web:8081` |
-| `LLMPROXY_METRICS_ADDR` | `127.0.0.1:9090` | `/metrics`. Compose: `backend-metrics:9090` |
+| `LLMPROXY_LISTEN_ADDR` | `:8080` | Gateway (proxied API) |
+| `LLMPROXY_WEB_ADDR` | `127.0.0.1:8081` | Web API (`/api/*`); `off` disables it and the web interface. Full compose file: `backend-web:8081`; minimal: `:8081` |
+| `LLMPROXY_METRICS_ADDR` | `127.0.0.1:9090` | `/metrics`. Full compose file: `backend-metrics:9090` |
 
 **Database**
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_DATABASE_URL` | — (required) | PostgreSQL connection URL. Compose builds it from `POSTGRES_USER` / `POSTGRES_DB` and passes the password separately as `PGPASSWORD` |
+| `LLMPROXY_DATABASE_URL` | — (required) | PostgreSQL connection URL. The compose files write the user and database into it and pass the password separately as `PGPASSWORD` |
 
 **Auth and sessions**
 
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_LOCAL_LOGIN` | `true` | Email-and-password sign-in. `false` leaves OIDC as the only way in |
-| `LLMPROXY_COOKIE_SECURE` | `true` | `Secure` flag on cookies. `false` only for plain-http local use (compose default: `false`; set `true` behind TLS) |
+| `LLMPROXY_COOKIE_SECURE` | `true` | `Secure` flag on cookies. `false` only for plain-http local use (compose files: `false`; set `true` behind TLS) |
 | `LLMPROXY_SESSION_KEY` | — | Seals the OIDC sign-in cookie. At least 32 bytes; required when `LLMPROXY_OIDC_ISSUER` is set |
 
 **OIDC** (on when `LLMPROXY_OIDC_ISSUER` is set; all other OIDC variables are ignored otherwise)
@@ -777,7 +690,7 @@ All settings are environment variables. In the compose setup they come from `.en
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` | empty (no bootstrap); compose default `admin@example.com` | Creates this administrator with a one-time password while no administrator exists (see [First sign-in](#first-sign-in)) |
+| `LLMPROXY_BOOTSTRAP_ADMIN_EMAIL` | empty (no bootstrap); compose files: `admin@example.com` | Creates this administrator with a one-time password while no administrator exists (see [First sign-in](#first-sign-in)) |
 
 **Gateway / model catalog**
 
@@ -798,12 +711,11 @@ All settings are environment variables. In the compose setup they come from `.en
 
 | Variable | Where | Description |
 |---|---|---|
-| `LLMPROXY_VERSION` | `.env` → compose | Tag of both images (one version for both); the compose file's default is the release it was written for. Set it explicitly |
-| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | `.env` → compose | Database credentials (Postgres container and backend). `POSTGRES_PASSWORD` is required; user and database default to `llmproxy` |
-| `LLMPROXY_API_PORT`, `LLMPROXY_UI_PORT` | `.env` → compose | Host port (or `address:port`) of the proxied API and the web interface; defaults `8080`, `8081` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | postgres container | Database credentials; the compose files use `llmproxy` for the user and the database. The password must equal the backend's `PGPASSWORD` |
+| `PGPASSWORD` | backend | The database password, kept out of `LLMPROXY_DATABASE_URL` so it needs no URL encoding |
 | `MANAGEMENT_PASSWORD` | backend | Must **not** be set: it would enable CLIProxyAPI's management API, so the backend refuses to start |
-| `BACKEND_ORIGIN` | frontend container | Backend web listener origin; compose sets `http://backend:8081` |
-| `REAL_IP_FROM` | `.env` → frontend container | Reverse proxy addresses/CIDRs trusted for `X-Forwarded-For`; empty trusts none |
+| `BACKEND_ORIGIN` | frontend container | Backend web listener origin; default `http://backend:8081`, the backend service in both compose files |
+| `REAL_IP_FROM` | frontend container | Reverse proxy addresses/CIDRs trusted for `X-Forwarded-For`; unset trusts none |
 
 ## Security notes
 
@@ -822,9 +734,9 @@ All settings are environment variables. In the compose setup they come from `.en
 
 ## Development
 
-- **Go 1.26** (`go.mod`). The Dockerfile builds with `golang:1.26-alpine`, cross-compiling for the target platform.
+- **Go**: the version in `go.mod`. The `Dockerfile` builds with the matching `golang` alpine image, cross-compiling for the target platform.
 - To run the whole stack from your checkouts, see [Building from source](#building-from-source).
-- `scripts/check-readme-compose.sh` fails when the compose file or `.env` example in this README drifts from `docker-compose.yml` / `.env.example` (CI runs it). Releases: [RELEASING.md](RELEASING.md).
+- `scripts/check-readme-compose.sh` fails when the compose file shown in this README drifts from `docker-compose.minimal.yml` (CI runs it). Releases: [RELEASING.md](RELEASING.md).
 - `make build`: `go build ./...`
 - `make test`: `go test ./... -race`. Tests need **Docker**: integration and end-to-end tests start PostgreSQL with [testcontainers-go](https://golang.testcontainers.org/). Vendors are replaced by a wire-level fake, so no real accounts are needed.
 - `make generate`: regenerates the mocks (mockery) and the server types from the contract (oapi-codegen).

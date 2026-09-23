@@ -5,11 +5,9 @@
 # Secrets and local environment
 .env
 .env.*
-!.env.example
 
 # Planning and documentation, not needed by the build
 .superpowers
-docs
 *.md
 
 # Build output and test artefacts

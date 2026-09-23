@@ -74,7 +74,7 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.AuthDir != "/tmp/auths" {
 		t.Fatalf("AuthDir = %q, want \"/tmp/auths\"", cfg.AuthDir)
 	}
-	// The name is fixed by docker-compose.yml and .env.example; reading any other
+	// The name is fixed by the docker-compose files; reading any other
 	// spelling silently disables the bootstrap on a fresh install.
 	if cfg.BootstrapAdminEmail != "admin@example.com" {
 		t.Fatalf("BootstrapAdminEmail = %q, want \"admin@example.com\"", cfg.BootstrapAdminEmail)

@@ -10,21 +10,18 @@ llm-proxy is versioned with [semver](https://semver.org/) (`vX.Y.Z`). The backen
    ```sh
    # in llm-proxy-backend
    git switch main && git pull --ff-only
-   git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+   git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z
    # in llm-proxy-frontend
    git switch main && git pull --ff-only
-   git tag -a v0.2.0 -m v0.2.0 && git push origin v0.2.0
+   git tag -a vX.Y.Z -m vX.Y.Z && git push origin vX.Y.Z
    ```
 
-3. CI runs the tests on the tag, then publishes `yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend` for `linux/amd64` and `linux/arm64` as `0.2.0`, `0.2`, `latest` (and `0` once the major version is 1 or more: `X` tags start at `1.0.0`), and smoke-tests each platform. Check both runs, then `docker buildx imagetools inspect docker.io/yoonaowo/llm-proxy-backend:0.2.0`.
-4. Only after both images are published, bump the pins in the backend repository in one commit on `main`:
-   - `LLMPROXY_VERSION` in `.env.example`;
-   - the default `${LLMPROXY_VERSION:-X.Y.Z}` of both images in `docker-compose.yml`, and the same file inline in `README.md`;
-   - the README's `curl` URL (`.../llm-proxy-backend/vX.Y.Z/docker-compose.yml`) and its `.env` example.
+3. CI runs the tests on the tag, then publishes `yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend` for `linux/amd64` and `linux/arm64` as `X.Y.Z`, `X.Y`, `latest` (and `X` once the major version is 1 or more), and smoke-tests each platform. Check both runs, then `docker buildx imagetools inspect docker.io/yoonaowo/llm-proxy-backend:X.Y.Z`.
+4. Only after both images are published, bump the pins in the backend repository in one commit on `main`: the tag of both images (`yoonaowo/llm-proxy-backend` and `yoonaowo/llm-proxy-frontend`) in `docker-compose.yml` and in `docker-compose.minimal.yml`, and the copy of `docker-compose.minimal.yml` shown inline in `README.md`.
 
-   `scripts/check-readme-compose.sh` fails if the README's copy of the compose file differs from `docker-compose.yml`.
+   The image tags in the two compose files (and the README's copy of the minimal one) are the only place a release version is written. No README prose names a version and needs a bump: the README downloads the compose files from `main` and sends readers to the releases and Docker Hub tags pages for the current release. `scripts/check-readme-compose.sh` fails if the README's copy differs from `docker-compose.minimal.yml`.
 
-Why the pins lag the tag: the README on `main` is what users copy, and every version it names must already exist on Docker Hub. A tag's images appear only after its CI run passes; pins bumped before that would send users to a version that cannot be pulled, or to one whose release failed. So a tag's own `docker-compose.yml` still names the previous release as its default, and the README's `.env` example sets `LLMPROXY_VERSION` explicitly.
+Why the pins lag the tag: the README and the compose files on `main` are what users copy (the README's `curl` commands download from `main`), and every version they name must already exist on Docker Hub. A tag's images appear only after its CI run passes; pins bumped before that would send users to a version that cannot be pulled, or to one whose release failed. So a tag's own compose files still name the previous release, and `main` names the new one only after its images are published.
 
 Pushes to `main` publish `edge` and `sha-<commit>` only; `latest` moves only with a version tag.
 

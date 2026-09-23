@@ -30,12 +30,14 @@ jobs:
         run: |
           make generate
           git diff --exit-code
-      - name: README matches docker-compose.yml and .env.example
+      - name: README matches docker-compose.minimal.yml
         run: scripts/check-readme-compose.sh
       - name: Compose files are valid
         run: |
-          docker compose --env-file .env.example config -q
-          docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.build.yml config -q
+          docker compose -f docker-compose.yml config -q
+          docker compose -f docker-compose.minimal.yml config -q
+          docker compose -f docker-compose.yml -f docker-compose.build.yml config -q
+          docker compose -f docker-compose.minimal.yml -f docker-compose.build.yml config -q
 
   # Pull requests: build both platforms, never log in, never push.
   image-check:

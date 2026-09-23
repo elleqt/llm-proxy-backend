@@ -1,7 +1,9 @@
 # Builds the backend and the frontend from source instead of pulling the published
 # images: this checkout and the frontend's, cloned side by side as ../frontend.
+# It works on top of either compose file:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#   docker compose -f docker-compose.minimal.yml -f docker-compose.build.yml up -d --build
 #
 # The local image names keep a source build from ever passing for a published
 # image; pull_policy: build never pulls them.

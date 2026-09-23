@@ -1,9 +1,10 @@
 # llm-proxy: Postgres, the backend and the frontend, from the published images.
 #
-# Put this file in an empty directory with a .env file next to it that sets the one
-# required secret (CHANGE ME below), then run `docker compose up -d`. Every other
-# value has a working default; override any of them in .env (.env.example in the
-# llm-proxy-backend repository documents each one).
+# No .env file is needed: every setting is written here. Edit the values in this
+# file, then run `docker compose up -d`. CHANGE ME marks what must change before the
+# first start. A setting that has a default is written with that default; a setting
+# that is off or computed by default is a commented-out example. The minimal
+# version of this stack is docker-compose.minimal.yml.
 #
 # Only the proxied API (host port 8080) and the web interface (host port 8081) are
 # published. Three networks keep each listener to the containers that need it: `web`
@@ -17,28 +18,30 @@ services:
     image: postgres:17-alpine
     networks: [db]
     environment:
-      # The user and database names go into the backend's connection URL as they
-      # are: keep them to letters, digits and _ - .
-      POSTGRES_USER: ${POSTGRES_USER:-llmproxy}
-      # CHANGE ME: required, set it in .env (e.g. openssl rand -hex 24).
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
-      POSTGRES_DB: ${POSTGRES_DB:-llmproxy}
+      # The user and database names are also in the backend's connection URL and in
+      # the healthcheck below: keep them to letters, digits and _ - .
+      POSTGRES_USER: llmproxy
+      # CHANGE ME (e.g. openssl rand -hex 24). It must match PGPASSWORD in the
+      # backend. Postgres takes it only on its first start, with an empty volume.
+      POSTGRES_PASSWORD: change-me-db-password
+      POSTGRES_DB: llmproxy
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD", "pg_isready", "-U", "llmproxy", "-d", "llmproxy"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   backend:
     # The backend and the frontend are released together: keep one version for both.
-    image: yoonaowo/llm-proxy-backend:${LLMPROXY_VERSION:-0.1.0}
+    image: yoonaowo/llm-proxy-backend:0.1.0
     environment:
       # The password travels as PGPASSWORD, which the driver reads when the URL
       # carries none, so it needs no URL encoding.
-      LLMPROXY_DATABASE_URL: postgres://${POSTGRES_USER:-llmproxy}@postgres:5432/${POSTGRES_DB:-llmproxy}?sslmode=disable
-      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (CHANGE ME, e.g. openssl rand -hex 24)}
+      LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
+      # CHANGE ME: the same value as POSTGRES_PASSWORD above.
+      PGPASSWORD: change-me-db-password
       # The proxied LLM API: the one backend listener published.
       LLMPROXY_LISTEN_ADDR: ":8080"
       # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
@@ -46,42 +49,54 @@ services:
       # `metrics` and scrape http://backend-metrics:9090/metrics.
       LLMPROXY_WEB_ADDR: "backend-web:8081"
       LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
+      # Upstream's working directory (its request logs) and the vendors' OAuth grants.
       LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
       LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
       # The first administrator's login. While no administrator exists, the backend
       # creates it and prints a one-time password in its log. Empty disables this.
-      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: ${LLMPROXY_BOOTSTRAP_ADMIN_EMAIL-admin@example.com}
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
       # Where clients reach the proxied API; shown on the Connect page. Behind a
       # reverse proxy: https://llm-proxy.example.com.
-      LLMPROXY_PUBLIC_API_URL: ${LLMPROXY_PUBLIC_API_URL:-http://localhost:8080}
+      LLMPROXY_PUBLIC_API_URL: http://localhost:8080
       # false only because this stack serves the web interface over plain http, where
-      # a Secure cookie would not be sent back. Behind TLS, set it to true.
-      LLMPROXY_COOKIE_SECURE: ${LLMPROXY_COOKIE_SECURE:-false}
-      # Parallel password hashes (about 19 MiB each); empty: the CPU count.
-      LLMPROXY_PASSWORD_HASH_CONCURRENCY: ${LLMPROXY_PASSWORD_HASH_CONCURRENCY:-}
-      # on fetches upstream's model catalogue from the internet at start and every
-      # three hours; off keeps the one compiled into the build.
-      LLMPROXY_MODEL_CATALOG_UPDATES: ${LLMPROXY_MODEL_CATALOG_UPDATES:-on}
-      # The price catalog (empty: oh-my-pi's model catalog; off: manual prices
-      # only) and how often it is checked (empty: 6h, at least 5m).
-      LLMPROXY_PRICES_CATALOG_URL: ${LLMPROXY_PRICES_CATALOG_URL:-}
-      LLMPROXY_PRICES_CATALOG_INTERVAL: ${LLMPROXY_PRICES_CATALOG_INTERVAL:-}
-      # OIDC sign-in, off while LLMPROXY_OIDC_ISSUER is empty. When on, the session
-      # key (CHANGE ME then: at least 32 bytes, openssl rand -base64 48), client id,
-      # secret and redirect URL are required.
-      LLMPROXY_SESSION_KEY: ${LLMPROXY_SESSION_KEY:-}
-      LLMPROXY_OIDC_ISSUER: ${LLMPROXY_OIDC_ISSUER:-}
-      LLMPROXY_OIDC_CLIENT_ID: ${LLMPROXY_OIDC_CLIENT_ID:-}
-      LLMPROXY_OIDC_CLIENT_SECRET: ${LLMPROXY_OIDC_CLIENT_SECRET:-}
-      LLMPROXY_OIDC_REDIRECT_URL: ${LLMPROXY_OIDC_REDIRECT_URL:-}
-      LLMPROXY_OIDC_REQUIRED_GROUP: ${LLMPROXY_OIDC_REQUIRED_GROUP:-}
-      LLMPROXY_OIDC_ALLOW_SIGNUP: ${LLMPROXY_OIDC_ALLOW_SIGNUP:-}
-      LLMPROXY_OIDC_DEFAULT_POLICY: ${LLMPROXY_OIDC_DEFAULT_POLICY:-}
-      LLMPROXY_OIDC_GROUP_POLICY: ${LLMPROXY_OIDC_GROUP_POLICY:-}
-      LLMPROXY_OIDC_GROUPS_CLAIM: ${LLMPROXY_OIDC_GROUPS_CLAIM:-}
-      LLMPROXY_OIDC_DISPLAY_NAME: ${LLMPROXY_OIDC_DISPLAY_NAME:-}
-      # false turns the email-and-password form off (an OIDC-only installation).
-      LLMPROXY_LOCAL_LOGIN: ${LLMPROXY_LOCAL_LOGIN:-}
+      # a Secure cookie would not be sent back. Behind TLS, set it to "true".
+      LLMPROXY_COOKIE_SECURE: "false"
+      # "false" turns the email-and-password form off (an OIDC-only installation).
+      LLMPROXY_LOCAL_LOGIN: "true"
+      # Parallel password hashes (about 19 MiB each); unset: the CPU count.
+      # LLMPROXY_PASSWORD_HASH_CONCURRENCY: "4"
+      # "on" fetches upstream's model catalogue from the internet at start and every
+      # three hours; "off" keeps the one compiled into the build.
+      LLMPROXY_MODEL_CATALOG_UPDATES: "on"
+      # The price catalog (oh-my-pi's model catalog; "off": manual prices only) and
+      # how often it is checked (at least 5m).
+      LLMPROXY_PRICES_CATALOG_URL: https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/catalog/src/models.json
+      LLMPROXY_PRICES_CATALOG_INTERVAL: 6h
+      # OIDC sign-in, off while LLMPROXY_OIDC_ISSUER is unset. To turn it on, uncomment
+      # the lines below: the session key, client id, secret and redirect URL are then
+      # required.
+      # CHANGE ME with OIDC: seals the sign-in cookie; at least 32 bytes
+      # (openssl rand -base64 48).
+      # LLMPROXY_SESSION_KEY: change-me-session-key-at-least-32-bytes
+      # The identity provider's issuer URL.
+      # LLMPROXY_OIDC_ISSUER: https://idp.example.com/realms/example
+      # LLMPROXY_OIDC_CLIENT_ID: llm-proxy
+      # CHANGE ME with OIDC: the client secret from the identity provider.
+      # LLMPROXY_OIDC_CLIENT_SECRET: change-me-oidc-client-secret
+      # https://<web interface host>/api/auth/oidc/callback
+      # LLMPROXY_OIDC_REDIRECT_URL: http://localhost:8081/api/auth/oidc/callback
+      # A group every federated user must be in; unset admits anyone.
+      # LLMPROXY_OIDC_REQUIRED_GROUP: /llm-users
+      # "true" creates an account for an unknown user at the first sign-in.
+      # LLMPROXY_OIDC_ALLOW_SIGNUP: "true"
+      # Rules a signed-up user starts with, comma-separated.
+      # LLMPROXY_OIDC_DEFAULT_POLICY: chatgpt:*
+      # group=rule,rule;group=rule - when set, groups own federated users' rules.
+      # LLMPROXY_OIDC_GROUP_POLICY: /llm-users=chatgpt:*;/llm-claude=claude:*,chatgpt:*
+      # The ID token claim that holds the groups.
+      LLMPROXY_OIDC_GROUPS_CLAIM: groups
+      # The sign-in button's label; unset leaves it to the frontend.
+      # LLMPROXY_OIDC_DISPLAY_NAME: Example SSO
     networks:
       web:
         aliases: [backend-web]
@@ -92,9 +107,9 @@ services:
       - grants:/var/lib/llmproxy/auths
       - runtime:/var/lib/llmproxy/runtime
     ports:
-      # Host port of the proxied API, or address:port (127.0.0.1:8080 behind a
-      # reverse proxy on the same host).
-      - "${LLMPROXY_API_PORT:-8080}:8080"
+      # Host port of the proxied API. Behind a reverse proxy on the same host:
+      # - "127.0.0.1:8080:8080"
+      - "8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,17 +123,19 @@ services:
       retries: 5
 
   frontend:
-    image: yoonaowo/llm-proxy-frontend:${LLMPROXY_VERSION:-0.1.0}
+    # The same version as the backend image.
+    image: yoonaowo/llm-proxy-frontend:0.1.0
     environment:
       # The backend's web listener, on the `web` network.
       BACKEND_ORIGIN: http://backend:8081
-      # Addresses/CIDRs of your reverse proxy, trusted for X-Forwarded-For; empty
-      # trusts none.
-      REAL_IP_FROM: ${REAL_IP_FROM:-}
+      # Addresses/CIDRs of your reverse proxy, comma-separated, trusted for
+      # X-Forwarded-For; unset trusts none.
+      # REAL_IP_FROM: 172.16.0.0/12
     networks: [web]
     ports:
-      # Host port of the web interface, or address:port (127.0.0.1:8081).
-      - "${LLMPROXY_UI_PORT:-8081}:8080"
+      # Host port of the web interface. Behind a reverse proxy on the same host:
+      # - "127.0.0.1:8081:8080"
+      - "8081:8080"
     depends_on:
       backend:
         condition: service_healthy

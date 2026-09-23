@@ -1,0 +1,45 @@
+# llm-proxy, minimal version: only what the stack needs to start and to sign in
+# over plain http. docker-compose.yml has every setting, with comments.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: llmproxy
+      # CHANGE ME: the same value as PGPASSWORD below. Postgres takes it only on its
+      # first start, with an empty volume.
+      POSTGRES_PASSWORD: change-me-db-password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "llmproxy"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    # Keep one version for both images.
+    image: yoonaowo/llm-proxy-backend:0.1.0
+    environment:
+      LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
+      # CHANGE ME: the same value as POSTGRES_PASSWORD above.
+      PGPASSWORD: change-me-db-password
+      LLMPROXY_WEB_ADDR: ":8081"
+      LLMPROXY_PUBLIC_API_URL: http://localhost:8080
+      LLMPROXY_COOKIE_SECURE: "false"
+      LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+    volumes:
+      - grants:/var/lib/llmproxy/auths
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    image: yoonaowo/llm-proxy-frontend:0.1.0
+    ports:
+      - "8081:8080"
+
+volumes:
+  pgdata:
+  grants:
