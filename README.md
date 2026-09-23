@@ -319,7 +319,7 @@ Open **http://localhost:8081**, sign in with that email and password, and choose
 
 ### 7. Add a vendor account
 
-__omp_shell("[Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)")
+![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)
 
 1. Go to **Admin → Providers → Add account** and choose `claude` or `chatgpt`.
 2. Open the sign-in link and sign in to the vendor with the subscription account you want to share.
