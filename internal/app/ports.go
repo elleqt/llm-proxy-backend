@@ -70,6 +70,9 @@ type UserRepo interface {
 	// policy is idp-managed is ErrPolicyManagedByIDP and nothing is written — decided
 	// by the same statement that writes. An unknown user is ErrNotFound.
 	UpdateAdminState(ctx context.Context, id uuid.UUID, ch AdminChange) error
+	// Unblock makes id active and records audit, in one transaction: the account is
+	// unblocked with its record or not at all. An unknown user is ErrNotFound.
+	Unblock(ctx context.Context, id uuid.UUID, audit AuditEvent) error
 }
 
 // NewAccount is what UserRepo.CreateAccount commits. At most one of Password and

@@ -97,8 +97,8 @@ func Migrate(ctx context.Context, dsn string) error {
 func Migrated(ctx context.Context, dsn string) (bool, error) {
 	var migrated bool
 	err := withProvider(dsn, func(db *sql.DB, p *goose.Provider) error {
-		// goose reads the applied versions from its table and fails where there is
-		// none yet.
+		// HasPending creates goose's version table where there is none. This check
+		// is what keeps a database no server has started on untouched.
 		var table *string
 		if err := db.QueryRowContext(ctx, `SELECT to_regclass('goose_db_version')::text`).Scan(&table); err != nil {
 			return report("migration status", err)

@@ -46,7 +46,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
-	opts := boot.ResetPasswordOptions{Output: stdout}
+	opts := boot.ResetPasswordOptions{Output: stdout, Warnings: stderr}
 	for _, a := range args[1:] {
 		switch {
 		case a == "--unblock":

@@ -28,11 +28,13 @@ func TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn(t *testing.T
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	p := startProcess(t, "", nil)
+	// env is what the command's environment holds beyond the database's address.
+	var env []string
 	gateway := func(args ...string) (int, string, string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
 		cmd := exec.Command(bin, args...)
-		cmd.Env = []string{"LLMPROXY_DATABASE_URL=" + p.pool.Config().ConnString()}
+		cmd.Env = append([]string{"LLMPROXY_DATABASE_URL=" + p.pool.Config().ConnString()}, env...)
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
 		var exit *exec.ExitError
@@ -78,6 +80,15 @@ func TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn(t *testing.T
 			t.Fatalf("gateway %v = exit %d, stdout %q, stderr %q; want 2 and the usage", args, code, stdout, stderr)
 		}
 	}
+
+	// With local sign-in off the password is still issued, and the operator is told
+	// it cannot be used yet.
+	env = []string{"LLMPROXY_LOCAL_LOGIN=false"}
+	if code, stdout, stderr := gateway("reset-password", p.adminEmail); code != 0 ||
+		bootstrapBanner.FindStringSubmatch(stdout) == nil || !strings.Contains(stderr, "cannot be used until local sign-in is enabled") {
+		t.Fatalf("local login off = exit %d, stdout %q, stderr %q; want the banner and a warning", code, stdout, stderr)
+	}
+	env = nil
 
 	// A build newer than the schema: the server migrates as it starts, the command
 	// does not.

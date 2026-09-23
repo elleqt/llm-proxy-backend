@@ -23,6 +23,9 @@ type ResetPasswordOptions struct {
 	// Output receives the temporary password banner, and nothing else. The command
 	// passes os.Stdout. Required.
 	Output io.Writer
+	// Warnings receives what the operator must know but is no failure: the command
+	// passes os.Stderr. Required.
+	Warnings io.Writer
 }
 
 // ResetPassword is `gateway reset-password`: the way back in when nobody can sign in
@@ -73,6 +76,12 @@ func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 		return err
 	}
 	printResetPassword(opts.Output, out)
+	if !cfg.LocalLogin {
+		// As boot.Run warns for the bootstrap password.
+		_, _ = fmt.Fprintln(opts.Warnings, "warning: the server takes no password sign-in (LLMPROXY_LOCAL_LOGIN is false "+
+			"or LLMPROXY_WEB_ADDR is off): the temporary password cannot be used until local sign-in is enabled — "+
+			"set LLMPROXY_LOCAL_LOGIN=true and restart the server")
+	}
 	return nil
 }
 

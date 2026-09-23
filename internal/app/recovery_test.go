@@ -197,7 +197,9 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 		t.Fatalf("blocked admin beside an active one: err = %v, want blocked and not unblockable", err)
 	}
 
-	// No other active administrator: unblocking is offered, and done only when asked.
+	// No other active administrator — an active ordinary account does not count:
+	// unblocking is offered, and done only when asked.
+	e.account(t, "bystander@example.com", identity.RoleUser, "bystander password")
 	e.block(t, other.ID)
 	hash = e.storedHash(t, admin.ID)
 	if _, err := e.recovery.ResetPassword(ctx, admin.Email, false); !errors.As(err, &blocked) || !blocked.CanUnblock {
@@ -218,6 +220,35 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 	}
 	if d := e.cliAudit(t, admin.ID)["user.update"]; d["via"] != "cli" || d["status"] != string(identity.StatusActive) {
 		t.Fatalf("unblock audit detail = %v, want status active via cli", d)
+	}
+}
+
+// The unblock is audited before anything else is tried: a reset that then fails
+// leaves an active account whose unblock is on record, which a retry — finding the
+// account active — would not record again.
+func TestRecoveryRecordsTheUnblockEvenWhenTheResetFails(t *testing.T) {
+	users := mocks.NewUserRepo(t)
+	admin := humanUser("admin@example.com")
+	admin.Role, admin.Status = identity.RoleAdmin, identity.StatusBlocked
+	users.EXPECT().ByEmail(mock.Anything, admin.Email).Return(admin, nil)
+	users.EXPECT().List(mock.Anything).Return([]app.UserView{{User: admin}}, nil)
+	var unblocked []app.AuditEvent
+	users.EXPECT().Unblock(mock.Anything, admin.ID, mock.Anything).
+		RunAndReturn(func(_ context.Context, _ uuid.UUID, e app.AuditEvent) error {
+			unblocked = append(unblocked, e)
+			return nil
+		})
+	failure := errors.New("database went away")
+	users.EXPECT().SetMustChangePassword(mock.Anything, admin.ID, true).Return(failure)
+	r := app.NewRecovery(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
+		testHasher(), mocks.NewAuditSink(t), systemClock{})
+
+	if _, err := r.ResetPassword(context.Background(), admin.Email, true); !errors.Is(err, failure) {
+		t.Fatalf("err = %v, want the reset's failure", err)
+	}
+	if len(unblocked) != 1 || unblocked[0].Action != "user.update" || unblocked[0].ActorID != uuid.Nil ||
+		unblocked[0].Detail["via"] != "cli" || unblocked[0].Detail["status"] != string(identity.StatusActive) {
+		t.Fatalf("unblock records = %+v, want one actorless user.update to active via cli", unblocked)
 	}
 }
 

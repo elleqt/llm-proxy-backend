@@ -217,17 +217,22 @@ func Load() (Config, error) {
 
 // Database is the part of the configuration a command that only works on the
 // accounts in the database needs (gateway reset-password): where the database is,
-// and how many password derivations may run at once.
+// how many password derivations may run at once, and whether the server accepts a
+// password sign-in at all.
 type Database struct {
 	URL                     string
 	PasswordHashConcurrency int
+	// LocalLogin is false when the web listener is off (LLMPROXY_WEB_ADDR) or
+	// LLMPROXY_LOCAL_LOGIN is false: the server then signs nobody in with a password.
+	// Read leniently: a value the server would refuse to start with counts as on.
+	LocalLogin bool
 }
 
 // LoadDatabase reads LLMPROXY_DATABASE_URL and LLMPROXY_PASSWORD_HASH_CONCURRENCY
-// exactly as Load does, and nothing else: a variable only the listeners, the gateway
-// or OIDC read cannot stop such a command.
+// exactly as Load does, and LocalLogin as Load does but without ever failing on it:
+// a variable only the listeners, the gateway or OIDC read cannot stop such a command.
 func LoadDatabase() (Database, error) {
-	db := Database{URL: os.Getenv("LLMPROXY_DATABASE_URL"), PasswordHashConcurrency: runtime.NumCPU()}
+	db := Database{URL: os.Getenv("LLMPROXY_DATABASE_URL"), PasswordHashConcurrency: runtime.NumCPU(), LocalLogin: true}
 	if db.URL == "" {
 		return Database{}, errors.New("config: LLMPROXY_DATABASE_URL is required")
 	}
@@ -237,6 +242,11 @@ func LoadDatabase() (Database, error) {
 			return Database{}, errors.New("config: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer")
 		}
 		db.PasswordHashConcurrency = n
+	}
+	if envOr("LLMPROXY_WEB_ADDR", defaultWebAddr) == WebAddrOff {
+		db.LocalLogin = false
+	} else if on, err := localLogin(); err == nil {
+		db.LocalLogin = on
 	}
 	return db, nil
 }
@@ -261,7 +271,7 @@ func loadPriceCatalog() (PriceCatalog, error) {
 // loadWeb reads the web listener's variables. Like loadOIDC, its errors name the
 // variable and never quote a value: LLMPROXY_SESSION_KEY is one of them.
 func loadWeb(oidcEnabled bool) (Web, error) {
-	w := Web{Addr: envOr("LLMPROXY_WEB_ADDR", "127.0.0.1:8081"), CookieSecure: true, LocalLogin: true}
+	w := Web{Addr: envOr("LLMPROXY_WEB_ADDR", defaultWebAddr), CookieSecure: true, LocalLogin: true}
 	if w.Addr == WebAddrOff {
 		return Web{}, nil
 	}
@@ -287,12 +297,8 @@ func loadWeb(oidcEnabled bool) (Web, error) {
 		}
 		w.CookieSecure = v
 	}
-	if raw := os.Getenv("LLMPROXY_LOCAL_LOGIN"); raw != "" {
-		v, err := strconv.ParseBool(raw)
-		if err != nil {
-			return Web{}, errors.New("config: LLMPROXY_LOCAL_LOGIN must be true or false")
-		}
-		w.LocalLogin = v
+	if w.LocalLogin, err = localLogin(); err != nil {
+		return Web{}, err
 	}
 
 	key := os.Getenv("LLMPROXY_SESSION_KEY")
@@ -305,6 +311,21 @@ func loadWeb(oidcEnabled bool) (Web, error) {
 		w.SessionKey = Secret(key)
 	}
 	return w, nil
+}
+
+const defaultWebAddr = "127.0.0.1:8081"
+
+// localLogin reads LLMPROXY_LOCAL_LOGIN, on unless false.
+func localLogin() (bool, error) {
+	raw := os.Getenv("LLMPROXY_LOCAL_LOGIN")
+	if raw == "" {
+		return true, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, errors.New("config: LLMPROXY_LOCAL_LOGIN must be true or false")
+	}
+	return v, nil
 }
 
 // loadOIDC reads the LLMPROXY_OIDC_* variables. Errors name the variable and never

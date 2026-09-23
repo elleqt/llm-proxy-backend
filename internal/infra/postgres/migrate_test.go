@@ -206,6 +206,10 @@ func TestMigrations(t *testing.T) {
 			t.Fatal(err)
 		}
 		migrated(false, "never migrated")
+		// Asking wrote nothing: the database is as fresh as it was.
+		if tableExists(t, ctx, pool, "goose_db_version") {
+			t.Fatal("Migrated created goose's version table in a fresh database")
+		}
 		if err := postgres.MigrateTo(ctx, dsn, 1); err != nil {
 			t.Fatal(err)
 		}

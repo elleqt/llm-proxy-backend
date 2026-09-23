@@ -70,7 +70,9 @@ type Recovered struct {
 //     nobody could unblock it on the web interface. Anyone else stays refused: an
 //     active administrator decides.
 //
-// Any failure withholds the password: the caller retries, and a retry issues another.
+// The unblock and its user.update record are one write, made first: whatever fails
+// after it, the unblock is on record, and a retry finds the account active. Any
+// failure withholds the password: the caller retries, and a retry issues another.
 func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool) (Recovered, error) {
 	u, err := r.users.ByEmail(ctx, strings.TrimSpace(email))
 	if err != nil {
@@ -96,17 +98,19 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	}
 
 	now := r.clock.Now().UTC()
-	// The reset lands before the unblock, so the old password never works again.
+	if out.Unblocked {
+		active := identity.StatusActive
+		if err := r.users.Unblock(ctx, u.ID, AuditEvent{At: now, Action: "user.update", Target: u.ID.String(),
+			Detail: map[string]any{"via": "cli", "status": string(active)}}); err != nil {
+			return Recovered{}, fmt.Errorf("app: unblock %s: %w", u.ID, err)
+		}
+		out.User.Status = active
+	}
+	// An old password that signs in between the unblock and the reset gets a session
+	// the reset ends; after the reset it no longer signs in.
 	out.Password, err = resetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, u.ID, now)
 	if err != nil {
 		return Recovered{}, err
-	}
-	if out.Unblocked {
-		active := identity.StatusActive
-		if err := r.users.UpdateAdminState(ctx, u.ID, AdminChange{Status: &active}); err != nil {
-			return Recovered{}, fmt.Errorf("app: password of %s reset but account not unblocked: %w", u.ID, err)
-		}
-		out.User.Status = active
 	}
 	if err := r.attempts.Clear(ctx, u.Email); err != nil {
 		return Recovered{}, fmt.Errorf("app: password of %s reset but sign-in lockout not cleared: %w", u.ID, err)
@@ -116,12 +120,6 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	if err := r.record(ctx, "user.password_reset", u.ID, now,
 		map[string]any{"via": "cli", "expires_at": out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
 		return Recovered{}, err
-	}
-	if out.Unblocked {
-		if err := r.record(ctx, "user.update", u.ID, now,
-			map[string]any{"via": "cli", "status": string(identity.StatusActive)}); err != nil {
-			return Recovered{}, err
-		}
 	}
 	return out, nil
 }

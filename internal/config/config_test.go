@@ -119,6 +119,28 @@ func TestLoadDatabaseReadsOnlyWhatTheDatabaseNeeds(t *testing.T) {
 	}
 }
 
+// reset-password warns when the password it issues cannot be used: the server takes
+// no password sign-in with local login off or the web listener off. A value the
+// server would refuse is not the command's to judge, and fails nothing.
+func TestLoadDatabaseTellsWhetherTheServerTakesPasswords(t *testing.T) {
+	for _, c := range []struct {
+		webAddr, localLogin string
+		want                bool
+	}{
+		{"", "", true},
+		{"", "true", true},
+		{"", "false", false},
+		{WebAddrOff, "true", false},
+		{"", "maybe", true},
+	} {
+		setWebEnv(t, map[string]string{"LLMPROXY_WEB_ADDR": c.webAddr, "LLMPROXY_LOCAL_LOGIN": c.localLogin})
+		db, err := LoadDatabase()
+		if err != nil || db.LocalLogin != c.want {
+			t.Fatalf("web %q, local login %q: LocalLogin = %v, %v; want %v", c.webAddr, c.localLogin, db.LocalLogin, err, c.want)
+		}
+	}
+}
+
 // The catalog is on unless turned off; off ignores the interval, and an interval
 // short enough to hammer the source, or a URL that is not one, stops the start.
 func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {

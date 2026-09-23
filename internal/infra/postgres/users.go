@@ -249,6 +249,21 @@ func (r *UserRepo) UpdateAdminState(ctx context.Context, id uuid.UUID, ch app.Ad
 	return app.ErrNotFound
 }
 
+// Unblock writes the status and the audit record in one transaction, so no unblock
+// ever stands without its record.
+func (r *UserRepo) Unblock(ctx context.Context, id uuid.UUID, audit app.AuditEvent) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `UPDATE users SET status = 'active' WHERE id = $1`, id)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return app.ErrNotFound
+		}
+		return insertAudit(ctx, tx, audit)
+	})
+}
+
 // userViewQuery is the user projection plus what the administration screens show
 // about sign-in, computed in one place so List and View report it identically.
 //
