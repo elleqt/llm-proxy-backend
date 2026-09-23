@@ -65,6 +65,13 @@ func invalid(field, reason string) error {
 // the running value is carried over from the configuration that owns it:
 //
 //   - host, port, tls: the proxied listener, fixed at boot behind the reverse proxy.
+//   - trusted-proxies (upstream v7.3.15): whose forwarded headers that listener
+//     believes for a client's address. Upstream applies it only when it builds
+//     its server (internal/api/server.go NewServer), never on a push, so an edit
+//     would be stored without running; and it uses the address only in its own
+//     logs — the gateway's rate limits and audit key on the web listener's
+//     X-Real-IP. It stays at upstream's default, an empty list, which believes
+//     no forwarded header.
 //   - pprof, discovery: upstream applies both on every reload, starting an
 //     unauthenticated pprof server or mDNS advertising — listeners outside the
 //     deployment's three.
@@ -79,16 +86,8 @@ func invalid(field, reason string) error {
 //     rather than dropped.
 //   - openai-compatibility and every "*-api-key" family: config-derived
 //     credentials PushConfig cannot add, so they are boot-only.
-//
-// trusted-proxies (upstream v7.3.15) is deliberately editable. It names the
-// proxies whose forwarded headers upstream's engine believes for a request's
-// client address, and that address only reaches upstream's own logs: the
-// gateway's rate limits and audit key on the web listener's X-Real-IP, not on
-// the proxied listener. Upstream's default, an empty list, believes no
-// forwarded header. Upstream applies it only when it builds its server, so an
-// edit takes effect on the next start (LoadBootConfig), not on the push.
 var ownedKeys = []string{
-	"host", "port", "tls", "pprof", "discovery", "debug", "auth-dir",
+	"host", "port", "tls", "trusted-proxies", "pprof", "discovery", "debug", "auth-dir",
 	"remote-management", "api-keys", "plugins", "ws-auth", "openai-compatibility",
 }
 

@@ -80,6 +80,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 		"host":                 "host: 0.0.0.0",
 		"port":                 "port: 9999",
 		"tls":                  "tls:\n  enable: true",
+		"trusted-proxies":      "trusted-proxies: [0.0.0.0/0]",
 		"pprof":                "pprof:\n  enable: true\n  addr: 0.0.0.0:6060",
 		"discovery":            "discovery:\n  enabled: true",
 		"debug":                "debug: true",
