@@ -38,6 +38,7 @@ type pricesFixture struct {
 	// storeErr is what the catalog store's writes return; replaces and
 	// setStates count them.
 	storeErr  error
+	onStore   func()
 	replaces  int
 	setStates int
 }
@@ -69,6 +70,9 @@ func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, sta
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			f.replaces++
+			if f.onStore != nil {
+				f.onStore()
+			}
 			if f.storeErr != nil {
 				return f.storeErr
 			}
@@ -556,5 +560,23 @@ func TestACancelledCheckIsNotAFailure(t *testing.T) {
 	<-done
 	if f.failures != 0 || f.setStates != 0 || f.get(t).Catalog.LastError != "" {
 		t.Fatalf("%d failures, %d state writes, status %+v; want none", f.failures, f.setStates, f.get(t).Catalog)
+	}
+}
+
+// A check stopped while its catalog is being stored is not a failed check either.
+func TestACheckCancelledWhileStoringIsNotAFailure(t *testing.T) {
+	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	f.load(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.onStore, f.storeErr = cancel, context.Canceled
+	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).
+		Return(app.CatalogFetch{Prices: []app.ModelPrice{gpt()}, Validators: app.CatalogValidators{ETag: `"v1"`}}, nil).Once()
+
+	done := make(chan struct{})
+	go func() { f.svc.RunCatalog(ctx, time.Hour); close(done) }()
+	<-done
+	if f.replaces != 1 || f.failures != 0 || f.setStates != 0 || f.get(t).Catalog.LastError != "" {
+		t.Fatalf("%d replaces, %d failures, %d state writes, status %+v; want one replace and nothing recorded",
+			f.replaces, f.failures, f.setStates, f.get(t).Catalog)
 	}
 }

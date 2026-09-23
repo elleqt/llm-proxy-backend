@@ -228,3 +228,13 @@ type quiet struct{}
 
 func (quiet) Warnf(string, ...any) {}
 func (quiet) Infof(string, ...any) {}
+
+// The fingerprint tells two URLs apart without holding either: a credential in the
+// URL must not reach the store.
+func TestFingerprintNamesTheURLWithoutHoldingIt(t *testing.T) {
+	a := pricecatalog.New("https://user:s3cret@catalog.example.com/models.json", "").Fingerprint()
+	b := pricecatalog.New("https://catalog.example.com/models.json", "").Fingerprint()
+	if a == b || strings.Contains(a, "s3cret") || strings.Contains(a, "catalog.example.com") {
+		t.Fatalf("fingerprints %q and %q: want distinct and free of the URL", a, b)
+	}
+}

@@ -6,6 +6,8 @@ package pricecatalog
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,8 +65,12 @@ func New(url, version string) *Source {
 	}
 }
 
-// Fingerprint is the parser's version and the URL.
-func (s *Source) Fingerprint() string { return fmt.Sprintf("%d %s", parserVersion, s.url) }
+// Fingerprint is a SHA-256 of the parser's version and the URL: stored, so the URL,
+// which may carry credentials, is not.
+func (s *Source) Fingerprint() string {
+	sum := sha256.Sum256(fmt.Appendf(nil, "%d %s", parserVersion, s.url))
+	return hex.EncodeToString(sum[:])
+}
 
 // Fetch downloads the catalog unless it has not changed since the validators.
 func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.CatalogFetch, error) {

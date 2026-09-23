@@ -342,6 +342,10 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 	}
 	if err != nil {
 		p.mu.Unlock()
+		if ctx.Err() != nil {
+			// Stopped while storing, not failed: nothing was stored.
+			return checkResult{}, ctx.Err()
+		}
 		p.log.Warnf("price catalog: store the check: %v", err)
 		return p.recordFailure(ctx, "the catalog could not be stored")
 	}
