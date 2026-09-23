@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -20,8 +22,11 @@ import (
 // bounds it — and decoding an encoded body is charged a whole maxJSONBody
 // more while it runs, then the decoded body instead of the encoded one. A
 // charge is held until the handler returns. A request that cannot get a step
-// of its charge within bodyWait is answered 503. The body must arrive within
-// bodyReadTimeout (408 otherwise), so a stalled sender releases its charge.
+// of its charge within bodyWait is answered 503. Each user's charges together
+// may hold a quarter of the budget, or one request's own maximum if that is
+// more (newBodyCharge); a charge past it is answered 429 at once. The body
+// must arrive within bodyReadTimeout (408 otherwise), so a stalled sender
+// releases its charge.
 //
 // What is charged is the live buffer: the one a growing buffer is copied
 // out of, and buffers already given back, stay on the heap uncharged until
@@ -37,6 +42,7 @@ const (
 
 var (
 	bodyBudget      = semaphore.NewWeighted(maxBodiesInFlight)
+	bodyBudgetSize  = maxBodiesInFlight
 	bodyWait        = defaultBodyWait
 	bodyReadTimeout = defaultBodyTimeout
 )
@@ -44,30 +50,76 @@ var (
 // errBodyBusy is a body's charge not being granted within bodyWait.
 var errBodyBusy = errors.New("gateway: too many request bodies in flight")
 
-// bodyCharge is the share of bodyBudget one request holds. The gate's
-// goroutine alone uses it; the zero or nil charge holds nothing.
+// errBodyShare is a charge that would take its owner past their share.
+var errBodyShare = errors.New("gateway: the account holds its share of the body budget")
+
+// bodyShares is what each owner's charges hold of bodyBudget together, so
+// that one user — with any number of tokens — holding bodies in long
+// responses cannot take the whole budget from everyone else. An owner
+// holding nothing has no entry.
+var bodyShares = struct {
+	mu   sync.Mutex
+	held map[uuid.UUID]int64
+}{held: map[uuid.UUID]int64{}}
+
+// bodyCharge is the share of bodyBudget one request holds, counted to its
+// owner. The gate's goroutine alone uses it.
 type bodyCharge struct {
-	n int64
+	n     int64
+	owner uuid.UUID
+	// share is the most the owner's charges may hold together while this
+	// one grows.
+	share int64
 }
 
-// grow adds n bytes to the charge, waiting at most bodyWait for them.
+// newBodyCharge is an empty charge for a request of owner that may itself
+// be charged at most most bytes. The owner's share is a quarter of the
+// budget, but never less than most: a request within its route's limits is
+// not refused for its own size, only for what else its owner holds.
+func newBodyCharge(owner uuid.UUID, most int64) *bodyCharge {
+	return &bodyCharge{owner: owner, share: max(bodyBudgetSize/4, most)}
+}
+
+// grow adds n bytes to the charge: refused at once (errBodyShare) when the
+// owner's charges would pass the share, else waiting at most bodyWait for
+// the budget.
 func (b *bodyCharge) grow(ctx context.Context, n int64) error {
+	bodyShares.mu.Lock()
+	if bodyShares.held[b.owner]+n > b.share {
+		bodyShares.mu.Unlock()
+		return errBodyShare
+	}
+	bodyShares.held[b.owner] += n
+	bodyShares.mu.Unlock()
 	waitCtx, cancel := context.WithTimeout(ctx, bodyWait)
 	defer cancel()
 	if err := bodyBudget.Acquire(waitCtx, n); err != nil {
+		b.unshare(n)
 		return errBodyBusy
 	}
 	b.n += n
 	return nil
 }
 
-// shrinkTo gives back all but n bytes of the charge; a charge already at
-// most n is left as it is.
+// unshare takes n bytes off the owner's charges.
+func (b *bodyCharge) unshare(n int64) {
+	bodyShares.mu.Lock()
+	defer bodyShares.mu.Unlock()
+	if left := bodyShares.held[b.owner] - n; left > 0 {
+		bodyShares.held[b.owner] = left
+	} else {
+		delete(bodyShares.held, b.owner)
+	}
+}
+
+// shrinkTo gives back all but n bytes of the charge, to the budget and the
+// owner's share alike; a charge already at most n is left as it is.
 func (b *bodyCharge) shrinkTo(n int64) {
-	if b == nil || b.n <= n {
+	if b.n <= n {
 		return
 	}
 	bodyBudget.Release(b.n - n)
+	b.unshare(b.n - n)
 	b.n = n
 }
 
@@ -88,17 +140,15 @@ func bodyLength(r *http.Request) int64 {
 }
 
 // bufferBody reads a body of length (bodyLength; at most limit) whole from
-// body, a reader bounded at limit, charging bodyBudget for the buffer as it
+// body, a reader bounded at limit, charging held for the buffer as it
 // grows: it doubles from initialBodyBuffer as bytes arrive, straight to the
 // declared length once doubling would reach it, so a body is charged at most
 // its own length and a sender that declares a large body and sends nothing
-// holds only the initial buffer. It returns the body and its charge, which
-// the caller releases once the request is done with the body, also when
-// reading failed (errBodyBusy when a step of the charge was not granted in
-// time).
-func bufferBody(ctx context.Context, body io.ReadCloser, length, limit int64) ([]byte, *bodyCharge, error) {
+// holds only the initial buffer. The caller releases held once the request
+// is done with the body, also when reading failed (errBodyShare or
+// errBodyBusy when a step of the charge was not granted).
+func bufferBody(ctx context.Context, held *bodyCharge, body io.ReadCloser, length, limit int64) ([]byte, error) {
 	defer body.Close()
-	held := &bodyCharge{}
 	// A known length is read exactly, an unknown one up to limit.
 	size := length
 	if length < 0 {
@@ -106,20 +156,20 @@ func bufferBody(ctx context.Context, body io.ReadCloser, length, limit int64) ([
 	}
 	initial := min(initialBodyBuffer, size)
 	if err := held.grow(ctx, initial); err != nil {
-		return nil, held, err
+		return nil, err
 	}
 	buf := make([]byte, 0, initial)
 	for {
 		if len(buf) == cap(buf) {
 			if int64(len(buf)) == size {
 				if length >= 0 {
-					return buf, held, nil
+					return buf, nil
 				}
-				return buf, held, probeEnd(body)
+				return buf, probeEnd(body)
 			}
 			grown := min(2*int64(cap(buf)), size)
 			if err := held.grow(ctx, grown-held.n); err != nil {
-				return buf, held, err
+				return buf, err
 			}
 			next := make([]byte, len(buf), grown)
 			copy(next, buf)
@@ -129,11 +179,11 @@ func bufferBody(ctx context.Context, body io.ReadCloser, length, limit int64) ([
 		buf = buf[:len(buf)+n]
 		switch {
 		case errors.Is(err, io.EOF) && length >= 0 && int64(len(buf)) < length:
-			return buf, held, io.ErrUnexpectedEOF
+			return buf, io.ErrUnexpectedEOF
 		case errors.Is(err, io.EOF):
-			return buf, held, nil
+			return buf, nil
 		case err != nil:
-			return buf, held, err
+			return buf, err
 		}
 	}
 }

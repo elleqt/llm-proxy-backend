@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -15,8 +16,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"golang.org/x/sync/semaphore"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 )
 
@@ -24,20 +28,40 @@ import (
 // replaced.
 func withBodyBudget(t *testing.T, budget int64, wait time.Duration) *semaphore.Weighted {
 	t.Helper()
-	oldBudget, oldWait := bodyBudget, bodyWait
-	bodyBudget, bodyWait = semaphore.NewWeighted(budget), wait
-	t.Cleanup(func() { bodyBudget, bodyWait = oldBudget, oldWait })
+	oldBudget, oldSize, oldWait := bodyBudget, bodyBudgetSize, bodyWait
+	bodyBudget, bodyBudgetSize, bodyWait = semaphore.NewWeighted(budget), budget, wait
+	t.Cleanup(func() { bodyBudget, bodyBudgetSize, bodyWait = oldBudget, oldSize, oldWait })
 	return bodyBudget
 }
 
 const bodiesBusy = `{"error":{"message":"too many request bodies in flight; retry","type":"server_error"}}`
+
+// userKey is a token of user: tokens of one user share its principal's
+// user id, whatever follows the user.
+func userKey(user string, token int) string {
+	return "sk-user-" + user + "-" + strconv.Itoa(token)
+}
+
+// usersResolver admits gateSecret as gatePrincipal and every userKey as its
+// user, all allowed chatgpt's models.
+var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+	rest, ok := strings.CutPrefix(secret, "sk-user-")
+	if !ok {
+		return staticResolver(gateSecret, gatePrincipal, "chatgpt:*")(ctx, secret)
+	}
+	user := rest[:strings.LastIndex(rest, "-")]
+	return app.Principal{
+		UserID:  uuid.NewSHA1(uuid.NameSpaceOID, []byte(user)),
+		TokenID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(secret)),
+	}, mustPolicy("chatgpt:*"), nil
+}
 
 // heldEngine is a gated engine whose handlers signal entered with what they
 // were given — the chat body, or the image edit's model once its form holds
 // an image — then wait for proceed to be closed.
 func heldEngine(entered chan<- []byte, proceed <-chan struct{}) *gin.Engine {
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}, "gpt-image-2": {"chatgpt"}})
-	engine := gateEngine(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"), catalog)
+	engine := gateEngine(usersResolver, catalog)
 	engine.POST("/v1/chat/completions", func(c *gin.Context) {
 		raw, _ := io.ReadAll(c.Request.Body)
 		entered <- raw
@@ -55,12 +79,71 @@ func heldEngine(entered chan<- []byte, proceed <-chan struct{}) *gin.Engine {
 }
 
 func sendBody(engine *gin.Engine, path, contentType string, body io.Reader) *httptest.ResponseRecorder {
+	return sendBodyAs(engine, gateSecret, path, contentType, body)
+}
+
+func sendBodyAs(engine *gin.Engine, key, path, contentType string, body io.Reader) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, path, body)
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Authorization", "Bearer "+gateSecret)
+	req.Header.Set("Authorization", "Bearer "+key)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 	return rec
+}
+
+// TestOneUserHoldsAtMostItsShare: bodies held in long responses count
+// against their user's quarter of the budget across all of the user's
+// tokens, so a user holding it is answered 429 for the next body while
+// another user is still served; once the user's requests finish they are
+// admitted again, and no user is left on the books.
+func TestOneUserHoldsAtMostItsShare(t *testing.T) {
+	const size = 40 << 20
+	// A quarter of it is maxJSONBody, so one body at the JSON limit fits.
+	const budget = 4 * maxJSONBody
+	withBodyBudget(t, budget, 50*time.Millisecond)
+	chat, err := io.ReadAll(jsonBodyOf("gpt-5.6", size))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, proceed := make(chan []byte, 4), make(chan struct{})
+	engine := heldEngine(entered, proceed)
+
+	var wg sync.WaitGroup
+	hold := func(key string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if rec := sendBodyAs(engine, key, "/v1/chat/completions", "application/json", bytes.NewReader(chat)); rec.Code != http.StatusOK {
+				t.Errorf("held request of %s = %d %s, want 200", key, rec.Code, rec.Body)
+			}
+		}()
+		<-entered
+	}
+	hold(userKey("a", 1))
+
+	const share = `{"error":{"message":"too many large requests in flight for this account; retry","type":"rate_limit_error"}}`
+	rec := sendBodyAs(engine, userKey("a", 2), "/v1/chat/completions", "application/json", bytes.NewReader(chat))
+	if rec.Code != http.StatusTooManyRequests || rec.Body.String() != share || rec.Header().Get("Retry-After") != "1" {
+		t.Errorf("a second body of a user holding its share, on another token = %d %s (Retry-After %q), want 429 %s after 1",
+			rec.Code, rec.Body, rec.Header().Get("Retry-After"), share)
+	}
+	hold(userKey("b", 1))
+
+	close(proceed)
+	wg.Wait()
+	if rec := sendBodyAs(engine, userKey("a", 2), "/v1/chat/completions", "application/json", bytes.NewReader(chat)); rec.Code != http.StatusOK {
+		t.Errorf("once its requests finished, the user's next body = %d %s, want 200", rec.Code, rec.Body)
+	}
+	bodyShares.mu.Lock()
+	left := len(bodyShares.held)
+	bodyShares.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d users are still on the books with nothing held", left)
+	}
+	if !bodyBudget.TryAcquire(budget) {
+		t.Fatal("after every request finished the budget is not whole again")
+	}
+	bodyBudget.Release(budget)
 }
 
 // TestUnencodedBodiesHoldTheBudgetUntilServed: identity-encoded bodies, JSON

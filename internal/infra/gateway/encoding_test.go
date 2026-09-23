@@ -181,10 +181,15 @@ func TestEncodedBodiesNeverReachUpstreamsDecoders(t *testing.T) {
 
 // zstdChat sends a zstd-encoded chat request through engine.
 func zstdChat(engine *gin.Engine, frame []byte) *httptest.ResponseRecorder {
+	return zstdChatAs(engine, gateSecret, frame)
+}
+
+// zstdChatAs is zstdChat with key.
+func zstdChatAs(engine *gin.Engine, key string, frame []byte) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(frame))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Content-Encoding", "zstd")
-	req.Header.Set("Authorization", "Bearer "+gateSecret)
+	req.Header.Set("Authorization", "Bearer "+key)
 	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 	return rec
@@ -213,15 +218,15 @@ func TestDecodingWaitsForItsShareOfTheBudget(t *testing.T) {
 	}
 }
 
-// TestParallelBombsStayWithinTheDecodeBudget: sixteen requests decoding past
-// the limit at once are decoded a budget's worth at a time, so the heap peaks
-// near what that budget allows, not sixteen times one decode; each is
-// answered 413.
+// TestParallelBombsStayWithinTheDecodeBudget: sixteen requests of sixteen
+// users decoding past the limit at once are decoded a budget's worth at a
+// time, so the heap peaks near what that budget allows, not sixteen times one
+// decode; each is answered 413.
 func TestParallelBombsStayWithinTheDecodeBudget(t *testing.T) {
 	const parallel = 16
 	withBodyBudget(t, 2*maxJSONBody, time.Minute)
 	defer debug.SetGCPercent(debug.SetGCPercent(10))
-	engine, _ := gated(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"), fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}))
+	engine, _ := gated(usersResolver, fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}))
 	bomb := chatDecodingTo("gpt-5.6", 1<<30)
 
 	runtime.GC()
@@ -252,7 +257,7 @@ func TestParallelBombsStayWithinTheDecodeBudget(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			codes[i] = zstdChat(engine, bomb).Code
+			codes[i] = zstdChatAs(engine, userKey(strconv.Itoa(i), 1), bomb).Code
 		}()
 	}
 	wg.Wait()
@@ -273,13 +278,14 @@ func TestParallelBombsStayWithinTheDecodeBudget(t *testing.T) {
 }
 
 // TestDecodedBodiesHoldTheBudgetUntilServed: a decoded body keeps its length
-// of the body budget until its handler returns, so bodies waiting in slow
-// handlers cannot pile up past the budget: once they hold it, the next encoded
-// request is answered 503, and when they finish the whole budget is free again.
+// of the body budget until its handler returns, so bodies of different users
+// waiting in slow handlers cannot pile up past the budget: once they hold it,
+// the next encoded request is answered 503, and when they finish the whole
+// budget is free again.
 func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 	const budget, bodySize = 2 * maxJSONBody, 32 << 20
 	withBodyBudget(t, budget, 50*time.Millisecond)
-	engine := gateEngine(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"), fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}))
+	engine := gateEngine(usersResolver, fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}))
 	proceed, entered := make(chan struct{}), make(chan struct{}, 8)
 	engine.POST("/v1/chat/completions", func(c *gin.Context) {
 		entered <- struct{}{}
@@ -294,11 +300,11 @@ func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 	// body leaves room for one more decode until two are held.
 	const held = 2
 	var wg sync.WaitGroup
-	for range held {
+	for i := range held {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if rec := zstdChat(engine, frame); rec.Code != http.StatusOK {
+			if rec := zstdChatAs(engine, userKey(strconv.Itoa(i), 1), frame); rec.Code != http.StatusOK {
 				t.Errorf("held request = %d %s, want 200", rec.Code, rec.Body)
 			}
 		}()
@@ -313,7 +319,7 @@ func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 
 	const busy = `{"error":{"message":"too many request bodies in flight; retry","type":"server_error"}}`
 	next := make(chan *httptest.ResponseRecorder, 1)
-	go func() { next <- zstdChat(engine, frame) }()
+	go func() { next <- zstdChatAs(engine, userKey("next", 1), frame) }()
 	select {
 	case <-entered:
 		close(proceed)

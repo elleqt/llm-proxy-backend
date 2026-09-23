@@ -38,11 +38,12 @@ type providerCatalog interface {
 //   - A model route needs a body within its limit (413 otherwise) and
 //     received within bodyReadTimeout (408 otherwise), which the gate holds
 //     in memory under the process-wide body budget until the handler returns
-//     (503 when its share is not granted in time, see body_budget.go); the
-//     one model the request names (400 without one, or when a JSON body
-//     names "model" twice); and the owner's policy covering the model on
-//     every provider serving it (403 otherwise, including a model no
-//     provider serves). The 403 names the requested model and nothing else.
+//     (429 when its owner already holds their share, 503 when the budget is
+//     not granted in time, see body_budget.go); the one model the request
+//     names (400 without one, or when a JSON body names "model" twice); and
+//     the owner's policy covering the model on every provider serving it
+//     (403 otherwise, including a model no provider serves). The 403 names
+//     the requested model and nothing else.
 //   - A listing route lists only the models the same rule (allows) admits.
 //
 // observe is told of every 401 and every policy or route refusal; nil observes
@@ -115,14 +116,24 @@ func policyGate(resolver Resolver, catalog providerCatalog, observe GateObserver
 					return
 				}
 			}
-			raw, held, err := bufferBody(ctx, body, length, limit)
+			// Decoding is charged a whole maxJSONBody on top of the body.
+			most := limit
+			if encoded {
+				most += maxJSONBody
+			}
+			held := newBodyCharge(principal.UserID, most)
 			// Held until the handler is done with the body, even if it
 			// panics.
 			defer held.release()
+			raw, err := bufferBody(ctx, held, body, length, limit)
 			if err == nil && encoded {
 				raw, err = decodeRequestBody(ctx, raw, encoding, held)
 			}
 			switch {
+			case errors.Is(err, errBodyShare):
+				c.Header("Retry-After", "1")
+				abortWithError(c, http.StatusTooManyRequests, "rate_limit_error", "too many large requests in flight for this account; retry")
+				return
 			case errors.Is(err, errBodyBusy):
 				abortWithError(c, http.StatusServiceUnavailable, "server_error", "too many request bodies in flight; retry")
 				return
