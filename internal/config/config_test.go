@@ -96,6 +96,51 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 	}
 }
 
+// gateway reset-password is how an operator gets back in when something is wrong,
+// so a setting only the server reads — here an incomplete OIDC configuration and a
+// malformed listener — must not stop it, while the two it uses are read as Load
+// reads them.
+func TestLoadDatabaseReadsOnlyWhatTheDatabaseNeeds(t *testing.T) {
+	setOIDCEnv(t, map[string]string{"LLMPROXY_OIDC_CLIENT_SECRET": "", "LLMPROXY_LISTEN_ADDR": "8080"})
+	if _, err := Load(); err == nil {
+		t.Fatal("Load accepted the broken server settings this test relies on")
+	}
+	t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", "3")
+	db, err := LoadDatabase()
+	if err != nil {
+		t.Fatalf("LoadDatabase: %v", err)
+	}
+	if db.URL != "postgres://u:p@localhost:5432/db" || db.PasswordHashConcurrency != 3 {
+		t.Fatalf("LoadDatabase = %+v", db)
+	}
+	t.Setenv("LLMPROXY_DATABASE_URL", "")
+	if _, err := LoadDatabase(); err == nil {
+		t.Fatal("LoadDatabase accepted no LLMPROXY_DATABASE_URL")
+	}
+}
+
+// reset-password warns when the password it issues cannot be used: the server takes
+// no password sign-in with local login off or the web listener off. A value the
+// server would refuse is not the command's to judge, and fails nothing.
+func TestLoadDatabaseTellsWhetherTheServerTakesPasswords(t *testing.T) {
+	for _, c := range []struct {
+		webAddr, localLogin string
+		want                bool
+	}{
+		{"", "", true},
+		{"", "true", true},
+		{"", "false", false},
+		{WebAddrOff, "true", false},
+		{"", "maybe", true},
+	} {
+		setWebEnv(t, map[string]string{"LLMPROXY_WEB_ADDR": c.webAddr, "LLMPROXY_LOCAL_LOGIN": c.localLogin})
+		db, err := LoadDatabase()
+		if err != nil || db.LocalLogin != c.want {
+			t.Fatalf("web %q, local login %q: LocalLogin = %v, %v; want %v", c.webAddr, c.localLogin, db.LocalLogin, err, c.want)
+		}
+	}
+}
+
 // The catalog is on unless turned off; off ignores the interval, and an interval
 // short enough to hammer the source, or a URL that is not one, stops the start.
 func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {

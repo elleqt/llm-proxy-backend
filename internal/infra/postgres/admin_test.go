@@ -179,6 +179,48 @@ func TestAdminRepos(t *testing.T) {
 		}
 	})
 
+	// The shell's unblock: the status and its audit row land together or not at all.
+	t.Run("Unblock", func(t *testing.T) {
+		u := human(t, "locked@example.com", "Locked")
+		blocked := identity.StatusBlocked
+		if err := users.UpdateAdminState(ctx, u.ID, app.AdminChange{Status: &blocked}); err != nil {
+			t.Fatal(err)
+		}
+		status := func() identity.Status {
+			t.Helper()
+			got, err := users.ByID(ctx, u.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return got.Status
+		}
+		event := func(actor uuid.UUID) app.AuditEvent {
+			return app.AuditEvent{At: time.Now(), ActorID: actor, Action: "user.update", Target: u.ID.String(),
+				Detail: map[string]any{"via": "cli", "status": "active"}}
+		}
+		// The audit row fails (its actor does not exist): the account stays blocked.
+		if err := users.Unblock(ctx, u.ID, event(uuid.New())); err == nil {
+			t.Fatal("Unblock succeeded with an audit row that cannot be written")
+		}
+		if s := status(); s != identity.StatusBlocked {
+			t.Fatalf("status after a failed unblock = %s, want blocked", s)
+		}
+		if err := users.Unblock(ctx, u.ID, event(uuid.Nil)); err != nil {
+			t.Fatalf("Unblock: %v", err)
+		}
+		if s := status(); s != identity.StatusActive {
+			t.Fatalf("status = %s, want active", s)
+		}
+		var n int
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE target = $1 AND action = 'user.update'
+		   AND actor_user_id IS NULL AND detail->>'via' = 'cli'`, u.ID.String()).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("unblock audit rows = %d, %v; want 1", n, err)
+		}
+		if err := users.Unblock(ctx, uuid.New(), event(uuid.Nil)); !errors.Is(err, app.ErrNotFound) {
+			t.Fatalf("unknown user: err = %v, want ErrNotFound", err)
+		}
+	})
+
 	t.Run("CreateAccount", func(t *testing.T) {
 		actor := human(t, "creator@example.com", "Creator")
 		expiry := time.Now().UTC().Add(time.Hour).Truncate(time.Microsecond)

@@ -1,6 +1,7 @@
 // Package boot is the composition root: it turns the environment, the database and
 // every service into one process serving three listeners, and stops it in order.
-// cmd/gateway calls Run and nothing else, and the end-to-end test calls the same Run.
+// cmd/gateway calls Run to serve, and the end-to-end test calls the same Run; its
+// reset-password subcommand calls ResetPassword, which builds only what it needs.
 package boot
 
 import (
