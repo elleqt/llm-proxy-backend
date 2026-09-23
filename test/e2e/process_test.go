@@ -21,7 +21,7 @@ import (
 
 // upstreamShutdownWindow is the deadline upstream gives its own shutdown,
 // counted from when its Run started (sdk/cliproxy/service_lifecycle.go Run,
-// v7.3.12), not from the stop. It is a constant in upstream's code and cannot be
+// v7.3.15), not from the stop. It is a constant in upstream's code and cannot be
 // shortened for a test: a process stopped by cancelling upstream's Run after
 // that long drains nothing, so the drain test waits it out. That wait is most of
 // this package's run time; -short skips the drain leg for a quick local loop, and
@@ -230,7 +230,7 @@ func TestLocalLoginOffLeavesOnlyFederatedSignIn(t *testing.T) {
 }
 
 // catalogueHost is where upstream's model catalogue updaters fetch from first
-// (internal/registry model_updater.go modelsURLs, v7.3.12), as a CONNECT asks
+// (internal/registry model_updater.go modelsURLs, v7.3.15), as a CONNECT asks
 // for it.
 const catalogueHost = "raw.githubusercontent.com:443"
 

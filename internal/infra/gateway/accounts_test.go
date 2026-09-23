@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,10 +17,12 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 )
 
 // These tests pin upstream behaviour the account methods depend on, measured
-// against v7.3.12: an upgrade that changes it must fail here.
+// against v7.3.15: an upgrade that changes it must fail here.
 
 // claudeGrant is a Claude OAuth account. Claude models come from upstream's
 // static catalogue, so registering one needs no network; the token is valid
@@ -655,7 +659,7 @@ func TestAccountsListsUnderPolicyNames(t *testing.T) {
 // TestNewRefusesAManagementEnvironment: MANAGEMENT_PASSWORD enables every
 // /v0/management route whatever the configuration says.
 func TestNewRefusesAManagementEnvironment(t *testing.T) {
-	// Every variable found in upstream v7.3.12 that enables management; listed
+	// Every variable found in upstream v7.3.15 that enables management; listed
 	// here rather than read from managementEnv, so dropping one from the guard
 	// fails the test.
 	for _, name := range []string{"MANAGEMENT_PASSWORD"} {
@@ -696,5 +700,83 @@ func TestRunRefusesAManagementEnvironment(t *testing.T) {
 	}
 	if err := g.WaitReload(ctx); !errors.Is(err, ErrManagementEnv) {
 		t.Fatalf("WaitReload after the refused Run = %v, want ErrManagementEnv", err)
+	}
+}
+
+// claudeBaselineUserAgent is the Claude CLI identity upstream v7.3.15 presents
+// for a Claude OAuth account when the client is not Claude Code itself
+// (internal/runtime/executor/helps/claude_device_profile.go
+// defaultClaudeFingerprintUserAgent). Before v7.3.15 the baseline was older
+// than the vendor accepts, and only a claude-header-defaults user-agent in the
+// configuration kept Claude accounts usable.
+const claudeBaselineUserAgent = "claude-cli/2.1.280 (external, cli)"
+
+// TestClaudeRequestCarriesTheCLIBaseline: with no claude-header-defaults in
+// the configuration, a request a non-Claude-Code client sends through a Claude
+// OAuth account reaches the vendor under upstream's CLI baseline User-Agent,
+// not the client's own.
+func TestClaudeRequestCarriesTheCLIBaseline(t *testing.T) {
+	vendor := &faketest.Vendor{Payload: []byte(`{"id":"msg_1","type":"message","role":"assistant","model":"m",` +
+		`"content":[{"type":"text","text":"hello from claude"}],"stop_reason":"end_turn",` +
+		`"usage":{"input_tokens":1,"output_tokens":2}}`)}
+	srv := faketest.Start(t, vendor)
+	// productionParams: a configuration with no claude-header-defaults.
+	p := productionParams(t)
+	r := startBooted(t, p)
+	// A file-backed account loses its attributes on the store round trip and
+	// would go to the vendor's real host; a runtime-only one is registered as
+	// given, so base_url sends it to the fake. Upstream takes an account for a
+	// Claude subscription, and gives it the CLI identity, by its token's shape;
+	// the account id spares the profile lookup, which goes to the real host.
+	const oauthToken = "sk-ant-oat01-fake"
+	grant := claudeGrant(t)
+	grant.Metadata["access_token"] = oauthToken
+	grant.Metadata["account_uuid"] = "5f0c6a2e-1b7d-4e3a-9c84-0d2b3a4c5e6f"
+	grant.Attributes = map[string]string{"base_url": srv.URL, coreauth.AttributeRuntimeOnly: "true"}
+	if _, err := r.gateway.AddAccount(context.Background(), grant); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	// Nothing else may serve the request: startBooted's account has no base_url.
+	for _, a := range p.CoreAuth.List() {
+		if a.ID != grant.ID {
+			if err := r.gateway.SetAccountDisabled(context.Background(), a.ID, true); err != nil {
+				t.Fatalf("disable %s: %v", a.ID, err)
+			}
+		}
+	}
+	models := cliproxy.GlobalModelRegistry().GetModelsForClient(grant.ID)
+	if len(models) == 0 {
+		t.Fatal("the Claude account registered no models")
+	}
+
+	req, err := http.NewRequest(http.MethodPost, r.baseURL+"/v1/messages", strings.NewReader(
+		`{"model":"`+models[0].ID+`","max_tokens":64,"messages":[{"role":"user","content":"say hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+wireSecret)
+	req.Header.Set("User-Agent", "some-client/1.0")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /v1/messages: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "hello from claude") {
+		t.Fatalf("POST /v1/messages = %d (%s), want the vendor's answer", resp.StatusCode, body)
+	}
+
+	reqs := vendor.Requests()
+	if len(reqs) != 1 {
+		t.Fatalf("vendor received %d requests, want 1", len(reqs))
+	}
+	// The account's token, so the request went through upstream's Claude
+	// executor for this account and not some other route to the vendor.
+	if auth := reqs[0].Header.Get("Authorization"); auth != "Bearer "+oauthToken {
+		t.Fatalf("vendor Authorization = %q, want the Claude account's token", auth)
+	}
+	if ua := reqs[0].Header.Get("User-Agent"); ua != claudeBaselineUserAgent {
+		t.Fatalf("vendor User-Agent = %q, want upstream's baseline %q", ua, claudeBaselineUserAgent)
 	}
 }

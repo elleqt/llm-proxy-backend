@@ -400,7 +400,7 @@ func (s *UsageSink) ForgetAccount(account string) {
 // observeQuota reads the vendor's quota headers off r, whose response arrived
 // at observedAt, into the metrics and the quota store, under the policy-facing
 // provider name. The headers are chosen by r's upstream provider key. A header
-// that does not parse is ignored. Names and formats as upstream v7.3.12 reads
+// that does not parse is ignored. Names and formats as upstream v7.3.15 reads
 // them:
 //
 //   - claude: Anthropic-Ratelimit-Unified-{5h,7d}-Utilization, a ratio, and

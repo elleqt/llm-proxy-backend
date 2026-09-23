@@ -79,6 +79,14 @@ func invalid(field, reason string) error {
 //     rather than dropped.
 //   - openai-compatibility and every "*-api-key" family: config-derived
 //     credentials PushConfig cannot add, so they are boot-only.
+//
+// trusted-proxies (upstream v7.3.15) is deliberately editable. It names the
+// proxies whose forwarded headers upstream's engine believes for a request's
+// client address, and that address only reaches upstream's own logs: the
+// gateway's rate limits and audit key on the web listener's X-Real-IP, not on
+// the proxied listener. Upstream's default, an empty list, believes no
+// forwarded header. Upstream applies it only when it builds its server, so an
+// edit takes effect on the next start (LoadBootConfig), not on the push.
 var ownedKeys = []string{
 	"host", "port", "tls", "pprof", "discovery", "debug", "auth-dir",
 	"remote-management", "api-keys", "plugins", "ws-auth", "openai-compatibility",

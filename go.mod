@@ -16,7 +16,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.71.0
-	github.com/router-for-me/CLIProxyAPI/v7 v7.3.12
+	github.com/router-for-me/CLIProxyAPI/v7 v7.3.15
 	github.com/sirupsen/logrus v1.9.4
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
