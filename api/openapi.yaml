@@ -758,7 +758,7 @@ components:
           type: object
           required: [requests, tokensTotal]
           properties:
-            requests: { type: integer, description: "Served requests. An attempt the gateway retried on another account is not counted twice; failed attempts are not counted." }
+            requests: { type: integer, description: "Served model calls. Failed attempts, including ones the gateway retried on another account, are not counted. A request that also made a side call to another model (for example an image model behind a chat request) counts once per model served." }
             tokensTotal: { type: integer, description: "Every token spent, including tokens of failed or retried attempts." }
         points:
           type: array
