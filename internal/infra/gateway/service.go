@@ -808,7 +808,7 @@ func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
 		Label:           auth.Label,
 		Status:          string(auth.Status),
 		Disabled:        auth.Disabled,
-		LastRefreshedAt: auth.LastRefreshedAt,
+		LastRefreshedAt: lastRefreshed(auth),
 	}
 	if email, ok := auth.Metadata["email"].(string); ok {
 		a.Email = email
@@ -817,6 +817,28 @@ func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
 		a.LastError = auth.LastError.Message
 	}
 	return a
+}
+
+// lastRefreshed is when the account's credential was last refreshed. The
+// manager sets LastRefreshedAt only when it refreshes the credential in this
+// process (sdk/cliproxy/auth/conductor_refresh.go), so an account loaded from
+// its file at boot shows zero until its next refresh, while the file records
+// the last refresh as metadata "last_refresh" — the key upstream itself reads
+// first (conductor_refresh.go authLastRefreshTimestamp). A value that is not
+// an RFC 3339 time is treated as absent.
+func lastRefreshed(auth *coreauth.Auth) time.Time {
+	if !auth.LastRefreshedAt.IsZero() {
+		return auth.LastRefreshedAt
+	}
+	raw, ok := auth.Metadata["last_refresh"].(string)
+	if !ok {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // credentialPath is the absolute path of auth's credential, resolved the way
