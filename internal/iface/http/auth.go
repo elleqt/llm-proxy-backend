@@ -145,9 +145,9 @@ func (rt *router) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	if err == nil && q.Get("error") == "access_denied" && ch.Answers(q.Get("state")) {
 		// The identity provider refused the sign-in: the person or the
 		// provider's policy denied access. Named, unlike other IdP errors,
-		// so the login page can say "no access" instead of "failed". The
-		// state must be this login's, or any cross-site link could make the
-		// page say so.
+		// so the login page can say "no access" instead of "failed". Like a
+		// code, the refusal is this login's answer only when it carries the
+		// state this login sent (RFC 6749 §10.12).
 		http.Redirect(w, r, oidcForbidden, http.StatusFound)
 		return
 	}
