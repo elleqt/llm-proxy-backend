@@ -365,6 +365,10 @@ func TestOIDCCallbackFailuresRedirectToTheLoginPage(t *testing.T) {
 			c, q := startOIDC(t, e)
 			return "error=access_denied&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcForbidden},
+		{"IdP denial for another login", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			c, _ := startOIDC(t, e)
+			return "error=access_denied&state=someone-elses", c
+		}, oidcFailed},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

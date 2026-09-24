@@ -121,8 +121,15 @@ paths:
         `rate_limited`.
       security: []
       parameters:
-        - { name: code, in: query, required: true, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string }, description: Absent when the identity provider answers with `error`. }
         - { name: state, in: query, required: true, schema: { type: string } }
+        - name: error
+          in: query
+          schema: { type: string }
+          description: >
+            The identity provider's refusal (RFC 6749 §4.1.2.1), sent instead of `code`.
+            `access_denied` carrying this login's `state` redirects with `oidc_forbidden`;
+            any other value with `oidc_failed`.
       responses:
         "302": { description: Redirect back into the application. }
 
