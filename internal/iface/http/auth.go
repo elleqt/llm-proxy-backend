@@ -142,6 +142,13 @@ func (rt *router) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ch, err := rt.sealer.open(cookie.Value)
 	q := r.URL.Query()
+	if err == nil && q.Get("error") == "access_denied" {
+		// The identity provider refused the sign-in: the person or the
+		// provider's policy denied access. Named, unlike other IdP errors,
+		// so the login page can say "no access" instead of "failed".
+		http.Redirect(w, r, oidcForbidden, http.StatusFound)
+		return
+	}
 	if err != nil || q.Get("code") == "" {
 		http.Redirect(w, r, oidcFailed, http.StatusFound)
 		return

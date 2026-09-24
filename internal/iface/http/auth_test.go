@@ -361,6 +361,10 @@ func TestOIDCCallbackFailuresRedirectToTheLoginPage(t *testing.T) {
 			e.idp.EXPECT().Exchange(mock.Anything, "c", mock.Anything).Return(app.Claims{}, errors.New("dial tcp: timeout"))
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcFailed},
+		{"IdP denied access", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			c, q := startOIDC(t, e)
+			return "error=access_denied&state=" + url.QueryEscape(q.Get("state")), c
+		}, oidcForbidden},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
