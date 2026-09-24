@@ -641,8 +641,12 @@ type GetUserActivityParams struct {
 
 // OidcCallbackParams defines parameters for OidcCallback.
 type OidcCallbackParams struct {
-	Code  string `form:"code" json:"code"`
-	State string `form:"state" json:"state"`
+	// Code Absent when the identity provider answers with `error`.
+	Code  *string `form:"code,omitempty" json:"code,omitempty"`
+	State string  `form:"state" json:"state"`
+
+	// Error The identity provider's refusal (RFC 6749 §4.1.2.1), sent instead of `code`. `access_denied` carrying this login's `state` redirects with `oidc_forbidden`; any other value with `oidc_failed`.
+	Error *string `form:"error,omitempty" json:"error,omitempty"`
 }
 
 // GetMyUsageParams defines parameters for GetMyUsage.

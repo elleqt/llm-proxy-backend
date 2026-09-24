@@ -132,7 +132,7 @@ func (s *OIDCService) Begin() (authURL string, ch Challenge, err error) {
 // verified invitation, sign-up policy), CanSignIn — and only a user through all of
 // them has anything written on their behalf.
 func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Challenge, meta SessionMeta) (Session, error) {
-	if !stateMatches(state, ch.State) {
+	if !ch.Answers(state) {
 		return Session{}, ErrInvalidCredentials
 	}
 	claims, err := s.idp.Exchange(ctx, code, ch)
@@ -170,14 +170,15 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 	return s.open(ctx, user, "auth.signin.oidc", meta)
 }
 
-// stateMatches compares in constant time. An empty value on either side is a
-// mismatch: two empty strings are equal, and a transport that lost its cookie must
-// not thereby accept a callback that carries no state either.
-func stateMatches(got, want string) bool {
-	if got == "" || want == "" {
+// Answers reports whether a callback carrying state answers this challenge, in
+// constant time. An empty value on either side is a mismatch: two empty strings are
+// equal, and a transport that lost its cookie must not thereby accept a callback
+// that carries no state either.
+func (ch Challenge) Answers(state string) bool {
+	if state == "" || ch.State == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+	return subtle.ConstantTimeCompare([]byte(state), []byte(ch.State)) == 1
 }
 
 // resolve finds or creates the account behind the claims and returns it only if it

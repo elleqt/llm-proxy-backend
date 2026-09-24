@@ -481,7 +481,7 @@ These steps work with any OpenID Connect provider (Keycloak, Authentik, Zitadel,
 
 Rules are checked at startup. A malformed rule stops the backend with an error that names the variable.
 
-- A user who fails the group check or is not allowed to sign up goes back to the login page with *"Your identity-provider account is not allowed to use this service."*
+- A user the identity provider refuses (`access_denied`), who fails the group check, or who is not allowed to sign up goes back to the login page with *"You do not have access to this service. Ask an administrator to grant it."*
 - **Group changes apply at the user's next sign-in.** Their API keys keep the policy from their last sign-in until then. To cut someone off at once, **block them in the admin panel**.
 - `LLMPROXY_LOCAL_LOGIN=false` hides the password form, so OIDC is the only way in. If the identity provider goes down, set it back to `"true"` in `docker-compose.yml` and restart to let local administrators in.
 
