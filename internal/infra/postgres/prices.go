@@ -101,12 +101,12 @@ func (r *PriceCatalogRepo) SetState(ctx context.Context, state app.CatalogState)
 	return setCatalogState(ctx, r.pool, state)
 }
 
-func setCatalogState(ctx context.Context, db execer, s app.CatalogState) error {
+func setCatalogState(ctx context.Context, db Execer, s app.CatalogState) error {
 	if _, err := db.Exec(ctx,
 		`UPDATE catalog_state
 		    SET etag = $1, last_modified = $2, fingerprint = $3, checked_at = $4, changed_at = $5, last_error = $6`,
 		s.Validators.ETag, s.Validators.LastModified, s.Fingerprint, nullTime(s.CheckedAt), nullTime(s.ChangedAt),
-		nullString(s.LastError)); err != nil {
+		NullString(s.LastError)); err != nil {
 		return fmt.Errorf("postgres: set catalog state: %w", err)
 	}
 

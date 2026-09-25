@@ -34,7 +34,7 @@ func (r *SessionRepo) Create(ctx context.Context, session app.Session) error {
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		session.IDHash, session.UserID, session.IP, session.UserAgent, session.CreatedAt, session.ExpiresAt)
 
-	return asConflict(err)
+	return AsConflict(err)
 }
 
 // ByHash resolves a live session.

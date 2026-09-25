@@ -24,10 +24,10 @@ func NewPasswordRepo(pool *pgxpool.Pool) *PasswordRepo { return &PasswordRepo{po
 //
 // expiresAt is nil for a permanent password and non-nil for a temporary one.
 func (r *PasswordRepo) Set(ctx context.Context, userID uuid.UUID, hash string, expiresAt *time.Time) error {
-	return setPassword(ctx, r.pool, userID, hash, expiresAt)
+	return SetPassword(ctx, r.pool, userID, hash, expiresAt)
 }
 
-func setPassword(ctx context.Context, q execer, userID uuid.UUID, hash string, expiresAt *time.Time) error {
+func SetPassword(ctx context.Context, q Execer, userID uuid.UUID, hash string, expiresAt *time.Time) error {
 	if _, err := q.Exec(ctx,
 		`INSERT INTO user_passwords (user_id, hash, expires_at, updated_at)
 		 VALUES ($1, $2, $3, now())

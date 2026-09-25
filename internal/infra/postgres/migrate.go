@@ -72,14 +72,14 @@ func report(op string, err error) error {
 // uniqueViolation is SQLSTATE 23505.
 const uniqueViolation = "23505"
 
-// asConflict maps a unique-constraint violation onto app.ErrConflict, the same way
+// AsConflict maps a unique-constraint violation onto app.ErrConflict, the same way
 // pgx.ErrNoRows is mapped onto app.ErrNotFound: the application layer must be able to
 // tell "that row already exists" from "the database is unreachable" without importing
 // a driver package. Everything else is returned unchanged.
 //
 // The original error is wrapped, not discarded, so the constraint name survives for
 // the operator while errors.Is still answers the caller's question.
-func asConflict(err error) error {
+func AsConflict(err error) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return fmt.Errorf("%w: %s", app.ErrConflict, pgErr.ConstraintName)

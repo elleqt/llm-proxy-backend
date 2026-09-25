@@ -12,7 +12,6 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,13 +32,7 @@ func (r *UserRepo) Create(ctx context.Context, u identity.User) error {
 	return insertUser(ctx, r.pool, u)
 }
 
-// execer is what a single statement needs: the pool, or a transaction when the
-// statement is one of several that must commit together.
-type execer interface {
-	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-}
-
-func insertUser(ctx context.Context, db execer, user identity.User) error {
+func insertUser(ctx context.Context, db Execer, user identity.User) error {
 	policy, err := encodePolicy(user.Policy)
 	if err != nil {
 		return err
@@ -58,13 +51,13 @@ func insertUser(ctx context.Context, db execer, user identity.User) error {
 		`INSERT INTO users (id, kind, email, display_name, role, status, policy,
 		                    policy_managed_by, must_change_password, last_seen_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()))`,
-		user.ID, string(user.Kind), nullString(user.Email), user.DisplayName, string(user.Role),
+		user.ID, string(user.Kind), NullString(user.Email), user.DisplayName, string(user.Role),
 		string(user.Status), policy, string(user.PolicySource), user.MustChangePassword,
 		user.LastSeenAt, createdAt)
 	// A duplicate email — including one differing only in case, which the
 	// users_email_lower_key index catches — is a conflict the caller must be able to
 	// recognise, not an opaque driver failure.
-	return asConflict(err)
+	return AsConflict(err)
 }
 
 // CreateAccount commits the user, its first credential and the audit record of its
@@ -78,18 +71,18 @@ func (r *UserRepo) CreateAccount(ctx context.Context, account app.NewAccount) er
 		}
 
 		if account.Password != nil {
-			if err := setPassword(ctx, tx, account.User.ID, account.Password.Hash, account.Password.ExpiresAt); err != nil {
+			if err := SetPassword(ctx, tx, account.User.ID, account.Password.Hash, account.Password.ExpiresAt); err != nil {
 				return err
 			}
 		}
 
 		if account.Invitation != nil {
-			if err := invite(ctx, tx, account.User.ID, *account.Invitation); err != nil {
+			if err := WriteInvitation(ctx, tx, account.User.ID, *account.Invitation); err != nil {
 				return err
 			}
 		}
 
-		return insertAudit(ctx, tx, account.Audit)
+		return InsertAudit(ctx, tx, account.Audit)
 	}); err != nil {
 		return fmt.Errorf("postgres: create account: %w", err)
 	}
@@ -219,12 +212,12 @@ func (r *UserRepo) SaveIdentityState(ctx context.Context, user identity.User) er
 		`UPDATE users
 		 SET policy = $2, policy_managed_by = $3, email = $4
 		 WHERE id = $1`,
-		user.ID, policy, string(user.PolicySource), nullString(user.Email))
+		user.ID, policy, string(user.PolicySource), NullString(user.Email))
 	// The fourth 23505-capable boundary, and the one on the hot login path: an IdP
 	// that reasserts an address a local account already holds is a conflict the
 	// federated-login flow has to recognise, not an opaque driver error.
 	if err != nil {
-		return asConflict(err)
+		return AsConflict(err)
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -297,7 +290,7 @@ func (r *UserRepo) Unblock(ctx context.Context, id uuid.UUID, audit app.AuditEve
 			return app.ErrNotFound
 		}
 
-		return insertAudit(ctx, tx, audit)
+		return InsertAudit(ctx, tx, audit)
 	}); err != nil {
 		return fmt.Errorf("postgres: unblock user: %w", err)
 	}
@@ -456,21 +449,6 @@ func scanUser(row pgx.Row) (identity.User, error) {
 	}
 
 	return scanned.user()
-}
-
-// nullString binds an empty string as SQL NULL.
-//
-// users.email is nullable and uniqueness is enforced by users_email_lower_key, a
-// unique index over lower(email); identity.NewService leaves Email empty. Postgres
-// allows any number of NULLs in a unique index but only one empty string, so
-// persisting the zero value would let exactly one service account exist and fail
-// every one after it on a column the caller never set.
-func nullString(s string) *string {
-	if s == "" {
-		return nil
-	}
-
-	return &s
 }
 
 // encodePolicy renders a policy as the JSON array of rule strings the column holds.

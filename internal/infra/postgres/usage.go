@@ -42,7 +42,7 @@ func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) er
 	batch := &pgx.Batch{}
 	for _, event := range events {
 		batch.Queue(appendUsage,
-			event.At.UTC(), nullUUID(event.UserID), nullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
+			event.At.UTC(), NullUUID(event.UserID), NullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
 			event.Stream, event.ServiceTier, event.TokensInput, event.TokensOutput, event.TokensReasoning,
 			event.TokensCacheRead, event.TokensCacheWrite, event.TokensTotal, event.BreakdownQuality,
 			event.LatencyMS, event.TTFTMS, event.StatusCode, event.Failed, event.VendorAccountID,

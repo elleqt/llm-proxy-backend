@@ -50,7 +50,7 @@ func (r *IdentityRepo) Link(ctx context.Context, userID uuid.UUID, issuer, subje
 		`INSERT INTO user_identities (user_id, issuer, subject) VALUES ($1, $2, $3)`,
 		userID, issuer, subject)
 
-	return asConflict(err)
+	return AsConflict(err)
 }
 
 // PendingByEmail finds the account an administrator pre-provisioned for an address
@@ -87,16 +87,16 @@ func (r *IdentityRepo) ConsumePending(ctx context.Context, userID uuid.UUID) err
 	return nil
 }
 
-// Invite writes an invitation in its own transaction; see invite.
+// Invite writes an invitation in its own transaction; see WriteInvitation.
 func (r *IdentityRepo) Invite(ctx context.Context, userID uuid.UUID, inv app.Invitation) error {
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return invite(ctx, tx, userID, inv) }); err != nil {
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return WriteInvitation(ctx, tx, userID, inv) }); err != nil {
 		return fmt.Errorf("postgres: invite: %w", err)
 	}
 
 	return nil
 }
 
-// invite writes an invitation, replacing whatever stood in its way:
+// WriteInvitation writes an invitation, replacing whatever stood in its way:
 //
 //   - any invitation for the same address at the same issuer, expired or not and
 //     whoever it was for. pending_identities_issuer_email_lower_key allows one per
@@ -113,7 +113,7 @@ func (r *IdentityRepo) Invite(ctx context.Context, userID uuid.UUID, inv app.Inv
 // a normalised copy — a trailing slash added or dropped — would be an invitation no
 // sign-in can ever redeem. Two invitations for one address racing each other: the
 // loser's insert violates the unique index and comes back as app.ErrConflict.
-func invite(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.Invitation) error {
+func WriteInvitation(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.Invitation) error {
 	if _, err := tx.Exec(ctx,
 		`DELETE FROM pending_identities
 		 WHERE user_id = $1 OR (issuer = $2 AND lower(expected_email) = lower($3))`,
@@ -127,7 +127,7 @@ func invite(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.Invitation
 		 WHERE NOT EXISTS (SELECT 1 FROM user_identities WHERE user_id = $1)`,
 		userID, inv.Issuer, inv.Email, inv.ExpiresAt.UTC())
 	if err != nil {
-		return asConflict(err)
+		return AsConflict(err)
 	}
 
 	if tag.RowsAffected() == 0 {

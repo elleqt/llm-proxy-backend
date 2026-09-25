@@ -44,7 +44,7 @@ func (r *SettingsRepo) SetUpstreamDocument(ctx context.Context, doc string, by u
 		 VALUES ($1, to_jsonb($2::text), $3, $4)
 		 ON CONFLICT (key) DO UPDATE
 		   SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
-		upstreamSettingsKey, doc, at.UTC(), nullUUID(by)); err != nil {
+		upstreamSettingsKey, doc, at.UTC(), NullUUID(by)); err != nil {
 		return fmt.Errorf("postgres: set upstream document: %w", err)
 	}
 
