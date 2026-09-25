@@ -12,13 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
 )
 
 // testClock only moves when a test moves it.
@@ -30,12 +29,14 @@ type testClock struct {
 func (c *testClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.now
 }
 
 func (c *testClock) advance(d time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	c.now = c.now.Add(d)
 }
 
@@ -52,15 +53,18 @@ func (l *testLog) Warn(msg string, attrs ...slog.Attr) {
 	l.t.Log("router log: " + line)
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	l.lines = append(l.lines, line)
 }
 
 func (l *testLog) Info(msg string, attrs ...slog.Attr) {
 	l.t.Log("router log: " + fmt.Sprint(msg, attrs))
 }
+
 func (l *testLog) text() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return strings.Join(l.lines, "\n")
 }
 
@@ -72,6 +76,7 @@ func cheapHasher() *app.PasswordHasher {
 			if plain == "" {
 				return "", identity.ErrEmptyPassword
 			}
+
 			return "plain:" + plain, nil
 		},
 		func(hash, plain string) bool { return hash == "plain:"+plain })
@@ -123,14 +128,15 @@ type testEnv struct {
 type envOption func(*testEnv)
 
 // withOIDC turns federated sign-in on, with the identity provider a mock.
-func withOIDC(e *testEnv) {
-	svc, err := app.NewOIDCService(e.users, e.idents, e.sessions, e.idp, e.audit, e.clock, app.OIDCConfig{AllowSignUp: false})
+func withOIDC(env *testEnv) {
+	svc, err := app.NewOIDCService(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, app.OIDCConfig{AllowSignUp: false})
 	if err != nil {
-		e.t.Fatalf("NewOIDCService: %v", err)
+		env.t.Fatalf("NewOIDCService: %v", err)
 	}
-	e.deps.OIDC = svc
-	e.deps.OIDCDisplayName = "Example SSO"
-	e.deps.SessionKey = []byte(testKey)
+
+	env.deps.OIDC = svc
+	env.deps.OIDCDisplayName = "Example SSO"
+	env.deps.SessionKey = []byte(testKey)
 }
 
 func withRate(r RateLimit) envOption { return func(e *testEnv) { e.deps.SignInRate = r } }
@@ -149,6 +155,7 @@ func auditInto(events *[]app.AuditEvent) envOption {
 	return func(e *testEnv) {
 		e.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, ev app.AuditEvent) error {
 			*events = append(*events, ev)
+
 			return nil
 		})
 	}
@@ -156,7 +163,7 @@ func auditInto(events *[]app.AuditEvent) envOption {
 
 func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	t.Helper()
-	e := &testEnv{
+	env := &testEnv{
 		t:        t,
 		clock:    &testClock{now: time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)},
 		log:      &testLog{t: t},
@@ -183,37 +190,44 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		quota:    mocks.NewVendorQuota(t),
 		acctMet:  mocks.NewAccountMetrics(t),
 	}
-	e.deps = Deps{
-		Auth: app.NewAuthService(e.users, e.pwds, app.NewThrottle(e.attempts, testMaxFailures, testLockFor, e.clock),
-			cheapHasher(), e.sessions, e.audit, e.clock),
-		Tokens:       app.NewTokenService(e.users, e.tokens, e.audit, e.clock, e.log),
-		Usage:        app.NewUsageService(e.usage),
-		Models:       app.NewModelsService(e.catalog),
+
+	env.deps = Deps{
+		Auth: app.NewAuthService(env.users, env.pwds, app.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
+			cheapHasher(), env.sessions, env.audit, env.clock),
+		Tokens:       app.NewTokenService(env.users, env.tokens, env.audit, env.clock, env.log),
+		Usage:        app.NewUsageService(env.usage),
+		Models:       app.NewModelsService(env.catalog),
 		LocalLogin:   true,
-		Clock:        e.clock,
-		Log:          e.log,
+		Clock:        env.clock,
+		Log:          env.log,
 		PublicAPIURL: testAPIURL,
 		CookieSecure: true,
 	}
 	for _, o := range opts {
-		o(e)
+		o(env)
 	}
-	e.deps.AdminUsers = app.NewAdminUsers(e.users, e.pwds, e.idents, e.sessions, e.activity, e.deps.Tokens,
-		cheapHasher(), e.audit, e.clock, e.catalog, e.adminCfg)
-	e.deps.Settings = app.NewSettings(e.settings, e.gateway, e.audit, e.clock)
-	var priceSrc app.PriceCatalogSource = e.priceSrc
-	if e.noPriceCatalog {
+
+	env.deps.AdminUsers = app.NewAdminUsers(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
+		cheapHasher(), env.audit, env.clock, env.catalog, env.adminCfg)
+	env.deps.Settings = app.NewSettings(env.settings, env.gateway, env.audit, env.clock)
+
+	var priceSrc app.PriceCatalogSource = env.priceSrc
+	if env.noPriceCatalog {
 		priceSrc = nil
 	}
-	e.deps.Prices = app.NewPrices(e.prices, e.priceCat, priceSrc, e.priceSet, e.priceMet, e.audit, e.clock, e.log)
-	e.deps.Providers = app.NewProviders(e.accounts, e.logins, e.quota, e.acctMet, e.audit, e.clock, e.log)
-	e.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
-	h, err := NewRouter(e.deps)
+
+	env.deps.Prices = app.NewPrices(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
+	env.deps.Providers = app.NewProviders(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
+	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	h, err := NewRouter(env.deps)
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
-	e.handler = h
-	return e
+
+	env.handler = h
+
+	return env
 }
 
 func person(email string) identity.User {
@@ -232,6 +246,7 @@ func person(email string) identity.User {
 func admin() identity.User {
 	u := person("admin@example.com")
 	u.Role = identity.RoleAdmin
+
 	return u
 }
 
@@ -241,6 +256,7 @@ func (e *testEnv) signedIn(u identity.User) *http.Cookie {
 	e.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
 		Return(app.Session{IDHash: app.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil).Maybe()
 	e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil).Maybe()
+
 	return &http.Cookie{Name: sessionCookieName, Value: id}
 }
 
@@ -248,17 +264,22 @@ func (e *testEnv) signedIn(u identity.User) *http.Cookie {
 // the frontend's client does, unless a modifier changes it; nothing else declares one.
 func (e *testEnv) do(method, path, body string, mods ...func(*http.Request)) *httptest.ResponseRecorder {
 	e.t.Helper()
-	req := httptest.NewRequest(method, path, strings.NewReader(body))
+
+	req := httptest.NewRequestWithContext(e.t.Context(), method, path, strings.NewReader(body))
 	req.RemoteAddr = testClientAddr
+
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	for _, m := range mods {
 		m(req)
 	}
+
 	rec := httptest.NewRecorder()
 	e.handler.ServeHTTP(rec, req)
+
 	return rec
 }
 
@@ -273,41 +294,51 @@ func fromIP(ip string) func(*http.Request) {
 // apiError asserts rec is a JSON Error with status and code, and returns it.
 func apiError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) api.Error {
 	t.Helper()
+
 	if rec.Code != status {
 		t.Fatalf("status = %d, want %d; body %s", rec.Code, status, rec.Body)
 	}
+
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json; body %q", ct, rec.Body)
 	}
-	var e api.Error
-	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+
+	var apiErr api.Error
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
 		t.Fatalf("body is not a JSON Error: %v; body %q", err, rec.Body)
 	}
-	if e.Code != code || e.Message == "" {
-		t.Fatalf("error = %+v, want code %q and a message", e, code)
+
+	if apiErr.Code != code || apiErr.Message == "" {
+		t.Fatalf("error = %+v, want code %q and a message", apiErr, code)
 	}
-	return e
+
+	return apiErr
 }
 
-// decodeBody asserts rec is a JSON status response and decodes it into v.
-func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, status int, v any) {
+// decodeBody asserts rec is a JSON status response and decodes it into dst.
+func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, status int, dst any) {
 	t.Helper()
+
 	if rec.Code != status {
 		t.Fatalf("status = %d, want %d; body %s", rec.Code, status, rec.Body)
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
-		t.Fatalf("decode %T: %v; body %q", v, err, rec.Body)
+
+	if err := json.Unmarshal(rec.Body.Bytes(), dst); err != nil {
+		t.Fatalf("decode %T: %v; body %q", dst, err, rec.Body)
 	}
 }
 
 // cookieNamed returns the Set-Cookie for name, failing if there is none.
 func cookieNamed(t *testing.T, rec *httptest.ResponseRecorder, name string) *http.Cookie {
 	t.Helper()
+
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == name {
 			return c
 		}
 	}
+
 	t.Fatalf("no %s cookie was set; headers %v", name, rec.Header())
+
 	return nil
 }

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -73,31 +74,38 @@ type bodyCharge struct {
 }
 
 // newBodyCharge is an empty charge for a request of owner that may itself
-// be charged at most most bytes. The owner's share is a quarter of the
+// be charged up to most bytes. The owner's share is a quarter of the
 // budget, but never less than most: a request within its route's limits is
 // not refused for its own size, only for what else its owner holds.
 func newBodyCharge(owner uuid.UUID, most int64) *bodyCharge {
 	return &bodyCharge{owner: owner, share: max(bodyBudgetSize/4, most)}
 }
 
-// grow adds n bytes to the charge: refused at once (errBodyShare) when the
-// owner's charges would pass the share, else waiting at most bodyWait for
+// grow adds amount bytes to the charge: refused at once (errBodyShare) when
+// the owner's charges would pass the share, else waiting at most bodyWait for
 // the budget.
-func (b *bodyCharge) grow(ctx context.Context, n int64) error {
+func (b *bodyCharge) grow(ctx context.Context, amount int64) error {
 	bodyShares.mu.Lock()
-	if bodyShares.held[b.owner]+n > b.share {
+	if bodyShares.held[b.owner]+amount > b.share {
 		bodyShares.mu.Unlock()
+
 		return errBodyShare
 	}
-	bodyShares.held[b.owner] += n
+
+	bodyShares.held[b.owner] += amount
 	bodyShares.mu.Unlock()
+
 	waitCtx, cancel := context.WithTimeout(ctx, bodyWait)
 	defer cancel()
-	if err := bodyBudget.Acquire(waitCtx, n); err != nil {
-		b.unshare(n)
+
+	if err := bodyBudget.Acquire(waitCtx, amount); err != nil {
+		b.unshare(amount)
+
 		return errBodyBusy
 	}
-	b.n += n
+
+	b.n += amount
+
 	return nil
 }
 
@@ -105,6 +113,7 @@ func (b *bodyCharge) grow(ctx context.Context, n int64) error {
 func (b *bodyCharge) unshare(n int64) {
 	bodyShares.mu.Lock()
 	defer bodyShares.mu.Unlock()
+
 	if left := bodyShares.held[b.owner] - n; left > 0 {
 		bodyShares.held[b.owner] = left
 	} else {
@@ -112,15 +121,16 @@ func (b *bodyCharge) unshare(n int64) {
 	}
 }
 
-// shrinkTo gives back all but n bytes of the charge, to the budget and the
-// owner's share alike; a charge already at most n is left as it is.
-func (b *bodyCharge) shrinkTo(n int64) {
-	if b.n <= n {
+// shrinkTo gives back all but keep bytes of the charge, to the budget and the
+// owner's share alike; a charge already at most keep is left as it is.
+func (b *bodyCharge) shrinkTo(keep int64) {
+	if b.n <= keep {
 		return
 	}
-	bodyBudget.Release(b.n - n)
-	b.unshare(b.n - n)
-	b.n = n
+
+	bodyBudget.Release(b.n - keep)
+	b.unshare(b.n - keep)
+	b.n = keep
 }
 
 // release gives back the whole charge.
@@ -154,10 +164,12 @@ func bufferBody(ctx context.Context, held *bodyCharge, body io.ReadCloser, lengt
 	if length < 0 {
 		size = limit
 	}
+
 	initial := min(initialBodyBuffer, size)
 	if err := held.grow(ctx, initial); err != nil {
 		return nil, err
 	}
+
 	buf := make([]byte, 0, initial)
 	for {
 		if len(buf) == cap(buf) {
@@ -165,17 +177,22 @@ func bufferBody(ctx context.Context, held *bodyCharge, body io.ReadCloser, lengt
 				if length >= 0 {
 					return buf, nil
 				}
+
 				return buf, probeEnd(body)
 			}
+
 			grown := min(2*int64(cap(buf)), size)
 			if err := held.grow(ctx, grown-held.n); err != nil {
 				return buf, err
 			}
+
 			next := make([]byte, len(buf), grown)
 			copy(next, buf)
 			buf = next
 		}
+
 		n, err := body.Read(buf[len(buf):cap(buf)])
+
 		buf = buf[:len(buf)+n]
 		switch {
 		case errors.Is(err, io.EOF) && length >= 0 && int64(len(buf)) < length:
@@ -183,7 +200,7 @@ func bufferBody(ctx context.Context, held *bodyCharge, body io.ReadCloser, lengt
 		case errors.Is(err, io.EOF):
 			return buf, nil
 		case err != nil:
-			return buf, err
+			return buf, fmt.Errorf("gateway: read the request body: %w", err)
 		}
 	}
 }
@@ -201,7 +218,7 @@ func probeEnd(body io.Reader) error {
 		case errors.Is(err, io.EOF):
 			return nil
 		case err != nil:
-			return err
+			return fmt.Errorf("gateway: read past the request body's limit: %w", err)
 		}
 	}
 }
@@ -255,29 +272,35 @@ func setBodyReadDeadline(c *gin.Context) (*bodyDeadline, error) {
 	if !ok {
 		return nil, errNoReadDeadline
 	}
+
 	deadline := time.Now().Add(bodyReadTimeout)
 	if err := rc.SetReadDeadline(deadline); err != nil {
-		return nil, errors.Join(errNoReadDeadline, err)
+		return nil, fmt.Errorf("%w: %w", errNoReadDeadline, err)
 	}
-	d := &bodyDeadline{fired: make(chan struct{})}
-	d.timer = time.AfterFunc(time.Until(deadline), func() {
-		defer close(d.fired)
+
+	watch := &bodyDeadline{fired: make(chan struct{})}
+	watch.timer = time.AfterFunc(time.Until(deadline), func() {
+		defer close(watch.fired)
+
 		_ = rc.SetReadDeadline(deadline)
 	})
-	return d, nil
+
+	return watch, nil
 }
 
 // stop ends the deadline's watch and reports whether the timer had already
-// fired. A body read by then counts as late whatever the read returned: once
-// the deadline was set again, the server's background read on a finished body
-// may have failed on it and cancelled the request. stop waits for a running
-// timer, so the connection is not touched after the gate moves on. A nil
-// deadline (a request without a body) never fires.
-func (d *bodyDeadline) stop() (late bool) {
+// fired, making the body late. A body read by then counts as late whatever
+// the read returned: once the deadline was set again, the server's background
+// read on a finished body may have failed on it and cancelled the request.
+// stop waits for a running timer, so the connection is not touched after the
+// gate moves on. A nil deadline (a request without a body) never fires.
+func (d *bodyDeadline) stop() bool {
 	if d == nil || d.timer.Stop() {
 		return false
 	}
+
 	<-d.fired
+
 	return true
 }
 

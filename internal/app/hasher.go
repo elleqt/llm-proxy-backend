@@ -31,6 +31,7 @@ func NewPasswordHasher(capacity int, hash func(plain string) (string, error), ve
 	if capacity < 1 {
 		panic(fmt.Sprintf("app: password hasher needs a positive capacity, got %d", capacity))
 	}
+
 	return &PasswordHasher{slots: make(chan struct{}, capacity), hash: hash, verify: verify}
 }
 
@@ -41,6 +42,7 @@ func (h *PasswordHasher) Hash(ctx context.Context, plain string) (string, error)
 		return "", err
 	}
 	defer h.release()
+
 	return h.hash(plain)
 }
 
@@ -51,6 +53,7 @@ func (h *PasswordHasher) Verify(ctx context.Context, hash, plain string) (bool, 
 		return false, err
 	}
 	defer h.release()
+
 	return h.verify(hash, plain), nil
 }
 
@@ -58,13 +61,14 @@ func (h *PasswordHasher) acquire(ctx context.Context) error {
 	// A caller that has already gone must not take a slot it will never use, even
 	// when one is free: select picks at random between ready cases.
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("app: wait for a hashing slot: %w", err)
 	}
+
 	select {
 	case h.slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("app: wait for a hashing slot: %w", ctx.Err())
 	}
 }
 

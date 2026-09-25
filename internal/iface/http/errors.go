@@ -19,7 +19,7 @@ import (
 const (
 	codeUnauthenticated        = "unauthenticated"
 	codePasswordChangeRequired = "password_change_required"
-	codeInvalidCredentials     = "invalid_credentials"
+	codeInvalidCredentials     = "invalid_credentials" //nolint:gosec // error code, not a credential
 	codeLockedOut              = "locked_out"
 	codeRateLimited            = "rate_limited"
 	codeUnsupportedMediaType   = "unsupported_media_type"
@@ -74,8 +74,10 @@ var appRefusals = []struct {
 	{app.ErrNotInvitable, http.StatusConflict, codeNotInvitable, "", "the account cannot be invited"},
 	{app.ErrInvalidRule, http.StatusUnprocessableEntity, codeInvalidRule, "", "a policy rule does not parse"},
 	{app.ErrInvalidInput, http.StatusUnprocessableEntity, codeInvalidInput, "", "a field is missing or not acceptable"},
-	{credentials.ErrInvalidLabel, http.StatusUnprocessableEntity, codeInvalidInput, "label",
-		"the label must be 1 to 64 characters with no control characters"},
+	{
+		credentials.ErrInvalidLabel, http.StatusUnprocessableEntity, codeInvalidInput, "label",
+		"the label must be 1 to 64 characters with no control characters",
+	},
 	{app.ErrForbiddenSetting, http.StatusUnprocessableEntity, codeForbiddenSetting, "", "the setting is owned by the gateway"},
 	{app.ErrInvalidSettings, http.StatusUnprocessableEntity, codeInvalidSettings, "", "the settings are not valid"},
 	{app.ErrLoginsBusy, http.StatusConflict, codeLoginBusy, "", "too many vendor logins are pending"},
@@ -90,51 +92,57 @@ var appRefusals = []struct {
 var tokenLimitMessage = fmt.Sprintf("the account already holds %d live tokens; revoke one first", app.MaxLiveTokensPerOwner)
 
 // writeAppError answers err by appRefusals, or as an internal failure.
-func writeAppError(w http.ResponseWriter, r *http.Request, log app.Logger, err error) {
+func writeAppError(rw http.ResponseWriter, req *http.Request, log app.Logger, err error) {
 	for _, ref := range appRefusals {
 		if !errors.Is(err, ref.err) {
 			continue
 		}
+
 		field := ref.field
 		if field == "" {
 			field = fieldOf(err)
 		}
+
 		if field == "" {
-			writeError(w, ref.status, ref.code, ref.message)
+			writeError(rw, ref.status, ref.code, ref.message)
 		} else {
-			writeFieldError(w, ref.status, ref.code, field, ref.message)
+			writeFieldError(rw, ref.status, ref.code, field, ref.message)
 		}
+
 		return
 	}
-	internalError(w, r, log, err)
+
+	internalError(rw, req, log, err)
 }
 
 // fieldOf is the request field err names, if it names one.
 func fieldOf(err error) string {
-	var input *app.InvalidInputError
-	if errors.As(err, &input) {
+	if input, ok := errors.AsType[*app.InvalidInputError](err); ok {
 		return input.Field
 	}
-	var rule *app.InvalidRuleError
-	if errors.As(err, &rule) {
+
+	if rule, ok := errors.AsType[*app.InvalidRuleError](err); ok {
 		return rule.Rule
 	}
-	var setting *app.SettingError
-	if errors.As(err, &setting) {
+
+	if setting, ok := errors.AsType[*app.SettingError](err); ok {
 		return setting.Field
 	}
+
 	return ""
 }
 
 // writeJSON is the one way a body leaves this API. no-store because several bodies
 // carry a secret shown once, and none of them is worth a cache holding.
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	h := w.Header()
+func writeJSON(rw http.ResponseWriter, status int, payload any) {
+	h := rw.Header()
 	h.Set("Content-Type", "application/json")
 	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	rw.WriteHeader(status)
+	// The status line is already written: a failed encode (a client gone mid-body)
+	// leaves nothing to answer with, so its error is deliberately dropped.
+	_ = json.NewEncoder(rw).Encode(payload) //nolint:errchkjson // nothing can be answered once the header is written
 }
 
 // writeError writes the contract's Error. message is a fixed English diagnostic chosen
@@ -151,10 +159,8 @@ func writeFieldError(w http.ResponseWriter, status int, code, field, message str
 // writeRetryAfter is writeError for a refusal that lapses: Retry-After carries the
 // wait in whole seconds, rounded up so a client that honours it is not refused again.
 func writeRetryAfter(w http.ResponseWriter, wait time.Duration, code, message string) {
-	secs := int(math.Ceil(wait.Seconds()))
-	if secs < 1 {
-		secs = 1
-	}
+	secs := max(int(math.Ceil(wait.Seconds())), 1)
+
 	w.Header().Set("Retry-After", strconv.Itoa(secs))
 	writeError(w, http.StatusTooManyRequests, code, message)
 }
@@ -162,15 +168,19 @@ func writeRetryAfter(w http.ResponseWriter, wait time.Duration, code, message st
 // decodeJSON reads the request body into dst. It answers the request itself and
 // returns false when the body is too large (413) or is not the JSON dst describes
 // (422); the caller only returns.
-func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
-	err := json.NewDecoder(r.Body).Decode(dst)
+func decodeJSON(rw http.ResponseWriter, req *http.Request, dst any) bool {
+	err := json.NewDecoder(req.Body).Decode(dst)
 	if err == nil {
 		return true
 	}
+
 	if tooLarge := new(http.MaxBytesError); errors.As(err, &tooLarge) {
-		writeError(w, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "request body too large")
+		writeError(rw, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "request body too large")
+
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, codeInvalidInput, "request body is not the expected JSON")
+
+	writeError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "request body is not the expected JSON")
+
 	return false
 }

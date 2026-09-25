@@ -15,6 +15,7 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 	if err != nil {
 		return nil, report("pool", err)
 	}
+
 	if err := pool.Ping(ctx); err != nil {
 		// pgxpool.New always yields a live pool with a background goroutine and
 		// possibly an open connection; returning without Close leaks both.
@@ -25,5 +26,6 @@ func NewPool(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 		// there is one classification in this package rather than two.
 		return nil, report("ping", err)
 	}
+
 	return pool, nil
 }

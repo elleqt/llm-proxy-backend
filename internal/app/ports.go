@@ -10,12 +10,11 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/google/uuid"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 var (
@@ -35,6 +34,7 @@ var (
 	ErrTokenLimit = errors.New("app: token limit reached")
 )
 
+//nolint:interfacebloat // One aggregate port per table: every users-table access goes through this interface.
 type UserRepo interface {
 	Create(ctx context.Context, u identity.User) error
 	ByID(ctx context.Context, id uuid.UUID) (identity.User, error)
@@ -67,7 +67,7 @@ type UserRepo interface {
 	CreateAccount(ctx context.Context, a NewAccount) error
 	// UpdateAdminState writes the fields of ch that are set and nothing else, so two
 	// edits of different fields cannot undo each other. Setting Policy also makes the
-	// policy local. With RefuseIdPPolicy, a Policy change to an account whose stored
+	// policy local. With RefuseIDPPolicy, a Policy change to an account whose stored
 	// policy is idp-managed is ErrPolicyManagedByIDP and nothing is written — decided
 	// by the same statement that writes. An unknown user is ErrNotFound.
 	UpdateAdminState(ctx context.Context, id uuid.UUID, ch AdminChange) error
@@ -106,7 +106,7 @@ type AdminChange struct {
 	Role            *identity.Role
 	Status          *identity.Status
 	Policy          *access.Policy
-	RefuseIdPPolicy bool
+	RefuseIDPPolicy bool
 }
 
 // SignInMethod is one way an account can sign in to the web interface.
@@ -263,6 +263,7 @@ func UsageBucketFor(from, to time.Time) UsageBucket {
 	if to.Sub(from) <= 48*time.Hour {
 		return UsageBucketHour
 	}
+
 	return UsageBucketDay
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -44,35 +45,47 @@ const maxListingBody = 16 << 20
 //     Claude name, with "first_id" and "last_id" following the filtered list
 //     (claude/models BuildResponse);
 //   - everyone else: "data", by "id" (openai OpenAIModels).
-func v1Models(c *gin.Context, status int, body []byte, admitted func(string) bool) (int, []byte, error) {
+func v1Models(ginCtx *gin.Context, status int, body []byte, admitted func(string) bool) (int, []byte, error) {
 	if status != http.StatusOK {
 		return status, body, nil
 	}
-	userAgent := c.GetHeader("User-Agent")
+
+	userAgent := ginCtx.GetHeader("User-Agent")
 	switch {
 	case strings.Contains(strings.ToLower(userAgent), "grok-shell"):
 		out, _, err := filterArray(body, "data", admitted, func(entry []byte) []string {
 			return []string{gjson.GetBytes(entry, "id").String(), gjson.GetBytes(entry, "model").String()}
 		})
+
 		return status, out, err
-	case hasQuery(c, "client_version"):
+	case hasQuery(ginCtx, "client_version"):
 		out, _, err := filterArray(body, "models", admitted, field("slug", nil))
+
 		return status, out, err
-	case c.GetHeader("Anthropic-Version") != "" || strings.HasPrefix(userAgent, "claude-cli"):
+	case ginCtx.GetHeader("Anthropic-Version") != "" || strings.HasPrefix(userAgent, "claude-cli"):
 		out, kept, err := filterArray(body, "data", admitted, field("id", decodeClaudeModelID))
 		if err != nil {
 			return status, nil, err
 		}
+
 		first, last := "", ""
 		if len(kept) > 0 {
 			first, last = kept[0].Get("id").String(), kept[len(kept)-1].Get("id").String()
 		}
-		if out, err = sjson.SetBytes(out, "first_id", first); err == nil {
+
+		out, err = sjson.SetBytes(out, "first_id", first)
+		if err == nil {
 			out, err = sjson.SetBytes(out, "last_id", last)
 		}
-		return status, out, err
+
+		if err != nil {
+			return status, nil, fmt.Errorf("gateway: set the model list's first and last ids: %w", err)
+		}
+
+		return status, out, nil
 	default:
 		out, _, err := filterArray(body, "data", admitted, field("id", nil))
+
 		return status, out, err
 	}
 }
@@ -84,7 +97,9 @@ func geminiModels(_ *gin.Context, status int, body []byte, admitted func(string)
 	if status != http.StatusOK {
 		return status, body, nil
 	}
+
 	out, _, err := filterArray(body, "models", admitted, field("name", geminiModelName))
+
 	return status, out, err
 }
 
@@ -95,13 +110,16 @@ func geminiModel(_ *gin.Context, status int, body []byte, admitted func(string) 
 	if status != http.StatusOK {
 		return status, body, nil
 	}
+
 	name := gjson.GetBytes(body, "name")
 	if !gjson.ValidBytes(body) || name.Type != gjson.String {
 		return status, nil, errListingShape
 	}
+
 	if admitted(geminiModelName(name.String())) {
 		return status, body, nil
 	}
+
 	return http.StatusNotFound, geminiNotFound, nil
 }
 
@@ -112,6 +130,7 @@ var geminiNotFound = func() []byte {
 	if err != nil {
 		panic(err)
 	}
+
 	return b
 }()
 
@@ -127,6 +146,7 @@ func field(key string, decode func(string) string) func([]byte) []string {
 		if decode != nil {
 			v = decode(v)
 		}
+
 		return []string{v}
 	}
 }
@@ -139,37 +159,51 @@ func filterArray(body []byte, key string, admitted func(string) bool, names func
 	if !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
 		return nil, nil, errListingShape
 	}
+
 	list := gjson.GetBytes(body, key)
 	if list.Type == gjson.Null && list.Exists() {
 		return body, nil, nil
 	}
+
 	if !list.IsArray() {
 		return nil, nil, errListingShape
 	}
+
 	var kept bytes.Buffer
 	kept.WriteByte('[')
+
 	var entries []gjson.Result
+
 	list.ForEach(func(_, entry gjson.Result) bool {
 		for _, n := range names([]byte(entry.Raw)) {
 			if n == "" || !admitted(n) {
 				return true
 			}
 		}
+
 		if len(entries) > 0 {
 			kept.WriteByte(',')
 		}
+
 		kept.WriteString(entry.Raw)
 		entries = append(entries, entry)
+
 		return true
 	})
 	kept.WriteByte(']')
+
 	out, err := sjson.SetRawBytes(body, key, kept.Bytes())
-	return out, entries, err
+	if err != nil {
+		return nil, nil, fmt.Errorf("gateway: replace the model list: %w", err)
+	}
+
+	return out, entries, nil
 }
 
 // hasQuery reports whether the request's query names key, with any value.
 func hasQuery(c *gin.Context, key string) bool {
 	_, ok := c.Request.URL.Query()[key]
+
 	return ok
 }
 
@@ -178,6 +212,7 @@ func hasQuery(c *gin.Context, key string) bool {
 // more than limit bytes.
 type bufferedWriter struct {
 	gin.ResponseWriter
+
 	status   int
 	wrote    bool
 	body     bytes.Buffer
@@ -195,16 +230,24 @@ func (w *bufferedWriter) WriteHeader(code int) {
 
 func (w *bufferedWriter) WriteHeaderNow() { w.wrote = true }
 
-func (w *bufferedWriter) Write(b []byte) (int, error) {
+func (w *bufferedWriter) Write(data []byte) (int, error) {
 	w.wrote = true
-	if w.body.Len()+len(b) > w.limit {
+	if w.body.Len()+len(data) > w.limit {
 		w.overflow = true
+
 		return 0, errListingTooLarge
 	}
-	return w.body.Write(b)
+
+	// bytes.Buffer.Write always returns len(data) and a nil error.
+	_, _ = w.body.Write(data)
+
+	return len(data), nil
 }
 
-func (w *bufferedWriter) WriteString(s string) (int, error) { return w.Write([]byte(s)) }
+// WriteString must not call w.WriteString: that is this method, and would recurse.
+func (w *bufferedWriter) WriteString(s string) (int, error) {
+	return w.Write([]byte(s)) //nolint:gocritic // preferStringWriter would recurse
+}
 
 func (w *bufferedWriter) Status() int { return w.status }
 
@@ -212,6 +255,7 @@ func (w *bufferedWriter) Size() int {
 	if !w.wrote {
 		return -1
 	}
+
 	return w.body.Len()
 }
 

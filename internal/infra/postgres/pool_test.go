@@ -20,11 +20,13 @@ func TestNewPoolDoesNotLeakPasswordFromMalformedDSN(t *testing.T) {
 		dsn      = "host=h port=notaport user=u password=hun ter2 dbname=d"
 		leftover = "ter2"
 	)
+
 	pool, err := postgres.NewPool(context.Background(), dsn)
 	if err == nil {
 		pool.Close()
 		t.Fatal("NewPool with a malformed DSN returned nil error")
 	}
+
 	if strings.Contains(err.Error(), leftover) {
 		t.Fatalf("error leaks part of the password: %v", err)
 	}

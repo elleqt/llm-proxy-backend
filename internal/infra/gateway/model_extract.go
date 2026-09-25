@@ -35,6 +35,7 @@ func claudeModel(c *gin.Context, raw []byte) (string, bool) {
 	if !ok {
 		return "", false
 	}
+
 	return decodeClaudeModelID(model), true
 }
 
@@ -46,14 +47,17 @@ func interactionsModel(_ *gin.Context, raw []byte) (string, bool) {
 	if !gjson.ValidBytes(raw) || repeatsModelKey(raw) {
 		return "", false
 	}
+
 	root := gjson.ParseBytes(raw)
 	if strings.TrimSpace(root.Get("agent").String()) != "" {
 		return "", false
 	}
+
 	model := strings.TrimSpace(root.Get("model").String())
 	if rest, found := strings.CutPrefix(model, "models/"); found && rest != "" {
 		model = rest
 	}
+
 	return model, model != ""
 }
 
@@ -67,9 +71,11 @@ func geminiActionModel(c *gin.Context, raw []byte) (string, bool) {
 	if len(action) != 2 || action[0] == "" {
 		return "", false
 	}
+
 	if gjson.ValidBytes(raw) && repeatsModelKey(raw) {
 		return "", false
 	}
+
 	return action[0], true
 }
 
@@ -80,6 +86,7 @@ func imageGenerationModel(_ *gin.Context, raw []byte) (string, bool) {
 	if !gjson.ValidBytes(raw) || repeatsModelKey(raw) {
 		return "", false
 	}
+
 	return imageRouteModel(gjson.GetBytes(raw, "model").String()), true
 }
 
@@ -87,26 +94,30 @@ func imageGenerationModel(_ *gin.Context, raw []byte) (string, bool) {
 // a JSON body is read like a generation; a multipart form, which the handler
 // also assumes when there is no Content-Type, gives its "model" field. Gin
 // keeps the parsed form on the request, so the handler reads the same one.
-func imageEditModel(c *gin.Context, raw []byte) (string, bool) {
-	contentType := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
+func imageEditModel(ginCtx *gin.Context, raw []byte) (string, bool) {
+	contentType := strings.ToLower(strings.TrimSpace(ginCtx.GetHeader("Content-Type")))
 	switch {
 	case strings.HasPrefix(contentType, "application/json"):
-		return imageGenerationModel(c, raw)
+		return imageGenerationModel(ginCtx, raw)
 	case contentType == "" || strings.HasPrefix(contentType, "multipart/form-data"):
-		form, err := c.MultipartForm()
+		form, err := ginCtx.MultipartForm()
 		if err != nil {
 			return "", false
 		}
+
 		fields := 0
+
 		for key, values := range form.Value {
 			if strings.EqualFold(key, "model") {
 				fields += len(values)
 			}
 		}
+
 		if fields > 1 {
 			return "", false
 		}
-		return imageRouteModel(c.PostForm("model")), true
+
+		return imageRouteModel(ginCtx.PostForm("model")), true
 	default:
 		return "", false
 	}
@@ -131,15 +142,18 @@ func imageRouteModel(model string) string {
 	if model == "" {
 		return defaultImageModel
 	}
+
 	prefix, base := "", model
 	if i := strings.LastIndex(model, "/"); i >= 0 && i < len(model)-1 {
 		prefix, base = strings.TrimSpace(model[:i]), strings.TrimSpace(model[i+1:])
 	}
+
 	switch strings.ToLower(prefix) {
-	case "", "xai", "x-ai", "grok":
+	case "", xaiProviderKey, "x-ai", "grok":
 	default:
 		return model
 	}
+
 	switch strings.ToLower(base) {
 	case xaiImageQualityModel:
 		return xaiImageQualityModel
@@ -158,7 +172,9 @@ func jsonModel(raw []byte) (string, bool) {
 	if !gjson.ValidBytes(raw) || repeatsModelKey(raw) {
 		return "", false
 	}
+
 	model := gjson.GetBytes(raw, "model").String()
+
 	return model, strings.TrimSpace(model) != ""
 }
 
@@ -169,14 +185,17 @@ func jsonModel(raw []byte) (string, bool) {
 // duplicate, or matches keys regardless of case, would serve another model on
 // the credential the first one was admitted for.
 func repeatsModelKey(raw []byte) bool {
-	n := 0
+	modelKeys := 0
+
 	gjson.ParseBytes(raw).ForEach(func(key, _ gjson.Result) bool {
 		if strings.EqualFold(key.String(), "model") {
-			n++
+			modelKeys++
 		}
-		return n < 2
+
+		return modelKeys < 2
 	})
-	return n > 1
+
+	return modelKeys > 1
 }
 
 // claudeDDModelPrefix marks a model ID upstream cloaked for Anthropic clients
@@ -191,16 +210,20 @@ func decodeClaudeModelID(id string) string {
 	if open := strings.LastIndex(id, "("); open != -1 && strings.HasSuffix(id, ")") {
 		base, suffix, hasSuffix = id[:open], id[open+1:len(id)-1], true
 	}
+
 	encoded, found := strings.CutPrefix(base, claudeDDModelPrefix)
 	if !found || encoded == "" {
 		return id
 	}
+
 	runes := []rune(encoded)
 	for i, j := 0, len(runes)-1; i < j; i, j = i+1, j-1 {
 		runes[i], runes[j] = runes[j], runes[i]
 	}
+
 	if hasSuffix {
 		return string(runes) + "(" + suffix + ")"
 	}
+
 	return string(runes)
 }

@@ -57,14 +57,14 @@ type User struct {
 // values but only one empty string, so persisting the zero value would make the
 // second service account collide on a column nobody set. Enforced at the repository
 // boundary, not here.
-func NewService(id uuid.UUID, name string, p access.Policy) User {
+func NewService(id uuid.UUID, name string, policy access.Policy) User {
 	return User{
 		ID:           id,
 		Kind:         KindService,
 		DisplayName:  name,
 		Role:         RoleUser,
 		Status:       StatusActive,
-		Policy:       p,
+		Policy:       policy,
 		PolicySource: PolicyLocal,
 		CreatedAt:    time.Now().UTC(),
 	}
@@ -87,6 +87,7 @@ func (u User) Label() string {
 	if u.Email != "" {
 		return u.Email
 	}
+
 	return u.DisplayName
 }
 

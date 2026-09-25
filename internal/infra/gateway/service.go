@@ -39,6 +39,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -48,8 +49,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 // Params configures a Gateway.
@@ -176,6 +175,16 @@ var ErrHomeMode = errors.New("gateway: home mode is refused")
 // could grant.
 var ErrCompatName = errors.New("gateway: openai-compatibility name is reserved for a built-in provider")
 
+// errNilConfig reports a nil configuration handed to New or PushConfig.
+var errNilConfig = errors.New("gateway: nil configuration")
+
+// errNilAccount reports a nil account handed to AddAccount.
+var errNilAccount = errors.New("gateway: nil account")
+
+// errCredentialNotLoaded reports a saved credential the token store's List
+// does not read back. AddAccount wraps it with the account it was adding.
+var errCredentialNotLoaded = errors.New("the token store does not load the saved credential")
+
 // managementEnv lists every environment variable the embedded upstream code
 // reads to enable /v0/management. Upstream v7.3.15 reads exactly one:
 // MANAGEMENT_PASSWORD, in internal/api/server.go NewServer (route registration
@@ -191,6 +200,7 @@ func checkManagementEnv() error {
 			return fmt.Errorf("%w: %s is set; unset it", ErrManagementEnv, name)
 		}
 	}
+
 	return nil
 }
 
@@ -225,73 +235,44 @@ func checkManagementEnv() error {
 // configuration writes nothing upstream is reading.
 func admit(cfg *cliproxyconfig.Config) error {
 	if cfg == nil {
-		return errors.New("gateway: nil configuration")
+		return errNilConfig
 	}
+
 	if cfg.RemoteManagement.SecretKey != "" {
 		return ErrManagementSecret
 	}
+
 	if len(cfg.APIKeys) > 0 {
 		return ErrConfigAPIKeys
 	}
+
 	if cfg.Plugins.Enabled {
 		return ErrPlugins
 	}
+
 	if cfg.Home.Enabled {
 		return ErrHomeMode
 	}
+
 	for _, compat := range cfg.OpenAICompatibility {
 		if compatNameRefused(compat.Name) {
 			return fmt.Errorf("%w: %q", ErrCompatName, compat.Name)
 		}
 	}
+
 	if err := cfg.ValidateCredentialWeights(); err != nil {
 		return fmt.Errorf("gateway: invalid configuration: %w", err)
 	}
+
 	if !cfg.RemoteManagement.DisableControlPanel {
 		cfg.RemoteManagement.DisableControlPanel = true
 	}
+
 	if !cfg.WebsocketAuth {
 		cfg.WebsocketAuth = true
 	}
+
 	return nil
-}
-
-// claimAccess makes g's provider the only one g's access manager holds.
-//
-// Upstream's access manager admits every request when it holds no provider
-// (sdk/access/manager.go Authenticate), and whenever upstream refreshes it —
-// in Build, in Run, and on every configuration application — it copies
-// upstream's process-global registry (sdkaccess.RegisteredProviders). Each of
-// those refreshes first calls the plugin host's RegisterFrontendAuthProviders
-// (internal/pluginhost/adapters_auth.go), which clears the registry's
-// exclusive provider unless a plugin claims it, so a SetExclusiveProvider made
-// once does not last. claimAccess therefore re-registers g's provider, makes
-// it exclusive and reloads g's manager from the registry, and g calls it
-// before Build, after Build, just before Run starts the server (OnBeforeStart),
-// when Run hands over the reload callback, and before and after every
-// configuration it applies. Anything else registered —
-// a plugin's provider, upstream's config-api-key provider — is then never in
-// the manager g's server authenticates with outside those upstream steps.
-//
-// The registry is process-global. Registering under a fixed key replaces the
-// previous instance, so the gateway built last owns the registry until
-// another gateway claims it again; each gateway only reloads its own manager,
-// and claims before and after each upstream step that reads the registry for
-// it, so repeated New calls in one process each authenticate with their own
-// resolver. The caller holds accessMu.
-func (g *Gateway) claimAccess() {
-	sdkaccess.RegisterProvider(accessProviderType, g.provider)
-	sdkaccess.SetExclusiveProvider(accessProviderType)
-	g.access.SetProviders(sdkaccess.RegisteredProviders())
-}
-
-// apply runs reload(cfg) with g's access claimed on both sides of it.
-func (g *Gateway) apply(reload func(*cliproxyconfig.Config), cfg *cliproxyconfig.Config) {
-	accessMu.Lock()
-	defer accessMu.Unlock()
-	g.claimAccess()
-	reload(cfg)
-	g.claimAccess()
 }
 
 // New builds the embedded service. It does not start it; call Run. It refuses
@@ -303,56 +284,62 @@ func (g *Gateway) apply(reload func(*cliproxyconfig.Config), cfg *cliproxyconfig
 // claimed for the built gateway's provider (see claimAccess) — again just
 // before the server starts serving — and the provider is registered here,
 // never in init.
-func New(p Params) (*Gateway, error) {
+func New(params Params) (*Gateway, error) {
 	if err := checkManagementEnv(); err != nil {
 		return nil, err
 	}
-	if err := admit(p.Config); err != nil {
+
+	if err := admit(params.Config); err != nil {
 		return nil, err
 	}
-	if p.Resolver == nil {
+
+	if params.Resolver == nil {
 		return nil, ErrNoResolver
 	}
+
 	catalog, err := newCatalog(cliproxy.GlobalModelRegistry())
 	if err != nil {
 		return nil, err
 	}
-	g := &Gateway{
-		current:  p.Config,
-		coreAuth: p.CoreAuth,
-		store:    p.Store,
+
+	gw := &Gateway{
+		current:  params.Config,
+		coreAuth: params.CoreAuth,
+		store:    params.Store,
 		access:   sdkaccess.NewManager(),
-		provider: NewAccessProvider(p.Resolver),
+		provider: NewAccessProvider(params.Resolver),
 		catalog:  catalog,
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-	if dir := strings.TrimSpace(p.Config.AuthDir); dir != "" {
+	if dir := strings.TrimSpace(params.Config.AuthDir); dir != "" {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: resolve auth directory: %w", err)
 		}
-		g.authDir = abs
+
+		gw.authDir = abs
 	}
 
 	builder := cliproxy.NewBuilder().
-		WithConfig(p.Config).
-		WithConfigPath(p.ConfigPath).
-		WithRequestAccessManager(g.access).
+		WithConfig(params.Config).
+		WithConfigPath(params.ConfigPath).
+		WithRequestAccessManager(gw.access).
 		WithWatcherFactory(func(_, _ string, reload func(*cliproxyconfig.Config)) (*cliproxy.WatcherWrapper, error) {
 			// OnBeforeStart already took the access manager back from Run's
 			// refresh (service_plugins.go syncPluginRuntimeConfig); claim again
 			// as the reload callback is handed over, before any push.
 			accessMu.Lock()
-			g.claimAccess()
+			gw.claimAccess()
 			accessMu.Unlock()
-			g.mu.Lock()
-			g.reload = reload
-			g.mu.Unlock()
-			g.readyOnce.Do(func() { close(g.ready) })
+			gw.mu.Lock()
+			gw.reload = reload
+			gw.mu.Unlock()
+			gw.readyOnce.Do(func() { close(gw.ready) })
 			// Hollow watcher: no file, no fsnotify. Every upstream call site
 			// guards against a nil wrapper, and every WatcherWrapper method
 			// returns early on a nil receiver.
+			//nolint:nilnil // The hollow watcher is deliberately a nil wrapper: every upstream call site guards against it.
 			return nil, nil
 		}).
 		WithHooks(cliproxy.Hooks{
@@ -361,54 +348,45 @@ func New(p Params) (*Gateway, error) {
 			// and serves before it creates the watcher; take it back first.
 			OnBeforeStart: func(*cliproxyconfig.Config) {
 				accessMu.Lock()
-				g.claimAccess()
+				gw.claimAccess()
 				accessMu.Unlock()
 			},
 		}).
 		WithServerOptions(
-			sdkapi.WithEngineConfigurator(g.configureEngine),
-			sdkapi.WithMiddleware(policyGate(p.Resolver, catalog, p.Observer, p.Log)),
+			sdkapi.WithEngineConfigurator(gw.configureEngine),
+			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, params.Observer, params.Log)),
 		)
-	if len(p.Middleware) > 0 {
-		builder = builder.WithServerOptions(sdkapi.WithMiddleware(p.Middleware...))
+	if len(params.Middleware) > 0 {
+		builder = builder.WithServerOptions(sdkapi.WithMiddleware(params.Middleware...))
 	}
-	if p.CoreAuth != nil {
-		builder = builder.WithCoreAuthManager(p.CoreAuth)
-		if p.Cooldown != nil {
-			builder = builder.WithCooldownStateStore(p.Cooldown)
+
+	if params.CoreAuth != nil {
+		builder = builder.WithCoreAuthManager(params.CoreAuth)
+		if params.Cooldown != nil {
+			builder = builder.WithCooldownStateStore(params.Cooldown)
 		}
 	}
 
 	accessMu.Lock()
-	g.claimAccess()
+	gw.claimAccess()
+
 	svc, err := builder.Build()
 	if err == nil {
-		g.claimAccess()
+		gw.claimAccess()
 	}
 	accessMu.Unlock()
-	if err != nil {
-		return nil, err
-	}
-	if p.UsagePlugin != nil {
-		svc.RegisterUsagePlugin(p.UsagePlugin)
-	}
-	g.svc = svc
-	return g, nil
-}
 
-// configureEngine is applied to the embedded server's gin engine before
-// upstream adds its middleware and routes. It turns off gin's trailing-slash
-// and fixed-path redirects, which answer a path that is a slash or a letter
-// case away from a registered route with a redirect to it before any
-// middleware runs: every route would be told apart from an unrouted path, the
-// ones the policy gate refuses included. Unmatched, such a path now reaches
-// the gate and gets its 404. And it installs readDeadlineControl ahead of
-// upstream's middleware, which wraps the response writer.
-func (g *Gateway) configureEngine(e *gin.Engine) {
-	e.RedirectTrailingSlash = false
-	e.RedirectFixedPath = false
-	e.Use(readDeadlineControl())
-	g.engine.Store(e)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: build the service: %w", err)
+	}
+
+	if params.UsagePlugin != nil {
+		svc.RegisterUsagePlugin(params.UsagePlugin)
+	}
+
+	gw.svc = svc
+
+	return gw, nil
 }
 
 // NewCoreAuthManager builds the core auth manager for the boot configuration cfg
@@ -428,10 +406,12 @@ func NewCoreAuthManager(cfg *cliproxyconfig.Config) (*coreauth.Manager, coreauth
 	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
 		setter.SetBaseDir(cfg.AuthDir)
 	}
+
 	var cooldown coreauth.CooldownStateStore
 	if provider, ok := store.(coreauth.CooldownStateStoreProvider); ok {
 		cooldown = provider.CooldownStateStore()
 	}
+
 	return coreauth.NewManager(store, routingSelector(cfg), nil), store, cooldown
 }
 
@@ -441,9 +421,11 @@ func NewCoreAuthManager(cfg *cliproxyconfig.Config) (*coreauth.Manager, coreauth
 // spellings, round-robin otherwise, wrapped in session affinity when that is on.
 // Upstream replaces it with its own on the first configuration it applies.
 func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
-	r := cfg.Routing
+	routing := cfg.Routing
+
 	var selector coreauth.Selector
-	switch strings.ToLower(strings.TrimSpace(r.Strategy)) {
+
+	switch strings.ToLower(strings.TrimSpace(routing.Strategy)) {
 	case "weighted-round-robin", "weightedroundrobin", "wrr":
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first", "fillfirst", "ff":
@@ -451,19 +433,24 @@ func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
-	if !r.SessionAffinity {
+
+	if !routing.SessionAffinity {
 		return selector
 	}
+
 	ttl := time.Hour
-	if raw := strings.TrimSpace(r.SessionAffinityTTL); raw != "" {
+
+	if raw := strings.TrimSpace(routing.SessionAffinityTTL); raw != "" {
 		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
 			ttl = max(parsed, time.Second)
 		}
 	}
+
 	subagents := true
-	if r.SessionAffinitySubagents != nil {
-		subagents = *r.SessionAffinitySubagents
+	if routing.SessionAffinitySubagents != nil {
+		subagents = *routing.SessionAffinitySubagents
 	}
+
 	return coreauth.NewSessionAffinitySelectorWithConfig(coreauth.SessionAffinityConfig{
 		Fallback:         selector,
 		TTL:              ttl,
@@ -480,10 +467,14 @@ func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
 func (g *Gateway) Run(ctx context.Context) error {
 	err := checkManagementEnv()
 	if err == nil {
-		err = g.svc.Run(ctx)
+		if err = g.svc.Run(ctx); err != nil {
+			err = fmt.Errorf("gateway: run the service: %w", err)
+		}
 	}
+
 	g.runErr = err
 	close(g.done)
+
 	return err
 }
 
@@ -508,7 +499,12 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 			return err
 		}
 	}
-	return g.svc.Shutdown(ctx)
+
+	if err := g.svc.Shutdown(ctx); err != nil {
+		return fmt.Errorf("gateway: shut the service down: %w", err)
+	}
+
+	return nil
 }
 
 // PushConfig applies a configuration built from the database. It returns
@@ -521,63 +517,21 @@ func (g *Gateway) PushConfig(cfg *cliproxyconfig.Config) error {
 	if err := admit(cfg); err != nil {
 		return err
 	}
+
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
+
 	reload, err := g.reloadLocked()
 	if err != nil {
 		return err
 	}
+
 	g.apply(reload, cfg)
 	g.mu.Lock()
 	g.current = cfg
 	g.mu.Unlock()
+
 	return nil
-}
-
-// reloadLocked returns upstream's reload callback, or ErrNotRunning unless Run
-// has installed the watcher and not yet returned. The caller holds pushMu.
-func (g *Gateway) reloadLocked() (func(*cliproxyconfig.Config), error) {
-	select {
-	case <-g.done:
-		return nil, ErrNotRunning
-	default:
-	}
-	g.mu.RLock()
-	reload := g.reload
-	g.mu.RUnlock()
-	if reload == nil {
-		return nil, ErrNotRunning
-	}
-	return reload, nil
-}
-
-// accountLocked checks what every account change needs: a manager, a running
-// service, and — for an existing account — that the manager holds id. The
-// caller holds pushMu. Checking before mutating keeps a refused change from
-// leaving the manager and the model registry out of step.
-func (g *Gateway) accountLocked(id string) (func(*cliproxyconfig.Config), *coreauth.Auth, error) {
-	if g.coreAuth == nil {
-		return nil, nil, ErrNoCoreAuth
-	}
-	reload, err := g.reloadLocked()
-	if err != nil {
-		return nil, nil, err
-	}
-	auth, ok := g.coreAuth.GetByID(id)
-	if !ok {
-		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
-	}
-	return reload, auth, nil
-}
-
-// reapplyLocked re-applies the current configuration. Upstream's config
-// application re-registers executors and models for every account the manager
-// holds (sdk/cliproxy/service_config.go applyConfigRuntime →
-// service_plugins.go syncPluginModelRuntime) and unregisters the models of a
-// disabled one; nothing else does so under the hollow watcher, which drops the
-// account update queue upstream would otherwise use. The caller holds pushMu.
-func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
-	g.apply(reload, g.CurrentConfig())
 }
 
 // AddAccount saves auth through the token store, loads it back from what was
@@ -616,84 +570,72 @@ func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
 // error says so.
 func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	if auth == nil {
-		return nil, errors.New("gateway: nil account")
+		return nil, errNilAccount
 	}
+
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
+
 	if g.coreAuth == nil {
 		return nil, ErrNoCoreAuth
 	}
+
 	if g.store == nil {
 		return nil, ErrNoTokenStore
 	}
+
 	path, err := g.credentialPath(auth)
 	if err != nil {
 		return nil, err
 	}
+
 	reload, err := g.reloadLocked()
 	if err != nil {
 		return nil, err
 	}
+
 	if auth.Storage != nil && auth.Metadata == nil {
 		auth.Metadata = make(map[string]any) // as Save does
 	}
+
 	if !storeHolds(auth) {
 		stored, err := g.coreAuth.Register(ctx, auth)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: register account: %w", err)
 		}
+
 		g.reapplyLocked(reload)
+
 		return stored, nil
 	}
+
 	if path == "" {
 		auth.ID = uuid.NewString()
 		path = filepath.Join(g.authDir, auth.ID)
 	}
+
 	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
 		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
 	}
+
 	stored, err := g.loadLocked(ctx, path)
 	if err == nil {
 		stored, err = g.coreAuth.Register(ctx, stored)
 	}
+
 	if err != nil {
 		if errWithdraw := g.withdrawLocked(ctx, reload, path); errWithdraw != nil {
-			return nil, fmt.Errorf("gateway: account %q was saved but not added, and its credential %q could not be withdrawn (retry RemoveAccount): %w", auth.ID, path, errors.Join(err, errWithdraw))
+			return nil, fmt.Errorf("gateway: account %q was saved but not added, "+
+				"and its credential %q could not be withdrawn (retry RemoveAccount): %w",
+				auth.ID, path, errors.Join(err, errWithdraw))
 		}
+
 		return nil, fmt.Errorf("gateway: account %q was saved but not added, so its credential was withdrawn: %w", auth.ID, err)
 	}
+
 	g.reapplyLocked(reload)
+
 	return stored, nil
-}
-
-// loadLocked returns the account the token store loads from the credential at
-// path (as credentialPath resolves it), as boot loads it: the first one List
-// reads from that file, as upstream's readAuthFile takes the first. The
-// caller holds pushMu.
-func (g *Gateway) loadLocked(ctx context.Context, path string) (*coreauth.Auth, error) {
-	listed, err := g.store.List(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list the token store: %w", err)
-	}
-	for _, auth := range listed {
-		if p, err := g.credentialPath(auth); err == nil && p == path {
-			return auth, nil
-		}
-	}
-	return nil, fmt.Errorf("the token store does not load the saved credential %q", path)
-}
-
-// withdrawLocked undoes a save AddAccount could not complete: an account the
-// manager holds for the credential at path is removed with RemoveAccount's
-// steps, since the save overwrote its file; otherwise the file is deleted. The
-// caller holds pushMu.
-func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfig.Config), path string) error {
-	for _, held := range g.coreAuth.List() {
-		if p, err := g.credentialPath(held); err == nil && p == path {
-			return g.removeLocked(ctx, reload, held)
-		}
-	}
-	return g.store.Delete(ctx, path)
 }
 
 // SetAccountDisabled disables or re-enables account id and re-applies the
@@ -713,21 +655,28 @@ func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfi
 func (g *Gateway) SetAccountDisabled(ctx context.Context, id string, disabled bool) error {
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
+
 	if g.coreAuth != nil && g.store == nil {
 		return ErrNoTokenStore
 	}
+
 	reload, auth, err := g.accountLocked(id)
 	if err != nil {
 		return err
 	}
+
 	updated, err := g.setDisabledLocked(ctx, auth, disabled)
 	if err != nil {
 		return err
 	}
+
 	g.reapplyLocked(reload)
+
 	if err := g.saveLocked(ctx, updated); err != nil {
-		return fmt.Errorf("gateway: account %q is disabled=%t in memory, but its credential was not saved, so a restart would restore the previous state (retry SetAccountDisabled): %w", id, disabled, err)
+		return fmt.Errorf("gateway: account %q is disabled=%t in memory, but its credential was not saved, "+
+			"so a restart would restore the previous state (retry SetAccountDisabled): %w", id, disabled, err)
 	}
+
 	return nil
 }
 
@@ -751,37 +700,17 @@ func (g *Gateway) SetAccountDisabled(ctx context.Context, id string, disabled bo
 func (g *Gateway) RemoveAccount(ctx context.Context, id string) error {
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
+
 	if g.coreAuth != nil && g.store == nil {
 		return ErrNoTokenStore
 	}
+
 	reload, auth, err := g.accountLocked(id)
 	if err != nil {
 		return err
 	}
-	return g.removeLocked(ctx, reload, auth)
-}
 
-// removeLocked is RemoveAccount on an account the manager holds. The caller
-// holds pushMu.
-func (g *Gateway) removeLocked(ctx context.Context, reload func(*cliproxyconfig.Config), auth *coreauth.Auth) error {
-	id := auth.ID
-	path, err := g.credentialPath(auth)
-	if err != nil {
-		return err
-	}
-	updated, err := g.setDisabledLocked(ctx, auth, true)
-	if err != nil {
-		return err
-	}
-	g.reapplyLocked(reload)
-	if err := g.store.Delete(ctx, path); err != nil {
-		if errSave := g.saveLocked(ctx, updated); errSave != nil {
-			return fmt.Errorf("gateway: account %q is disabled but still held, its credential %q was not deleted and may not be marked disabled on disk (retry RemoveAccount): %w", id, path, errors.Join(err, errSave))
-		}
-		return fmt.Errorf("gateway: account %q is disabled but still held, and its credential %q was not deleted (retry RemoveAccount): %w", id, path, err)
-	}
-	g.coreAuth.Remove(ctx, id)
-	return nil
+	return g.removeLocked(ctx, reload, auth)
 }
 
 // Accounts lists the accounts the core auth manager holds, ordered by
@@ -791,21 +720,25 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 	if g.coreAuth == nil {
 		return nil
 	}
+
 	held := g.coreAuth.List()
+
 	out := make([]app.VendorAccount, 0, len(held))
 	for _, auth := range held {
 		out = append(out, vendorAccount(auth))
 	}
+
 	slices.SortFunc(out, func(a, b app.VendorAccount) int {
 		return cmp.Or(cmp.Compare(a.Provider, b.Provider), cmp.Compare(a.ID, b.ID))
 	})
+
 	return out
 }
 
 // vendorAccount is auth as the admin API shows it. Email is the one metadata
 // field read; tokens, attributes and storage never leave the gateway.
 func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
-	a := app.VendorAccount{
+	account := app.VendorAccount{
 		ID:              auth.ID,
 		Provider:        policyProvider(auth.Provider),
 		Label:           auth.Label,
@@ -814,12 +747,14 @@ func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
 		LastRefreshedAt: lastRefreshed(auth),
 	}
 	if email, ok := auth.Metadata["email"].(string); ok {
-		a.Email = email
+		account.Email = email
 	}
+
 	if auth.LastError != nil {
-		a.LastError = auth.LastError.Message
+		account.LastError = auth.LastError.Message
 	}
-	return a
+
+	return account
 }
 
 // lastRefreshed is when the account's credential was last refreshed. The
@@ -833,100 +768,18 @@ func lastRefreshed(auth *coreauth.Auth) time.Time {
 	if !auth.LastRefreshedAt.IsZero() {
 		return auth.LastRefreshedAt
 	}
+
 	raw, ok := auth.Metadata["last_refresh"].(string)
 	if !ok {
 		return time.Time{}
 	}
+
 	t, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(raw))
 	if err != nil {
 		return time.Time{}
 	}
+
 	return t
-}
-
-// credentialPath is the absolute path of auth's credential, resolved the way
-// upstream's file store resolves it on Save (sdk/auth/filestore.go
-// resolveAuthPath): the first non-empty of the path attribute (as written, so
-// a relative one is relative to the working directory), the file name and the
-// id, the latter two joined to the auth directory unless absolute. Delete
-// must get an absolute path: it resolves a relative key containing a
-// separator against the working directory, not the auth directory
-// (resolveDeletePath), and reports the missing file as success — and upstream
-// puts the unsanitised account email into Claude file names
-// (internal/auth/claude/filename.go). Upstream's management delete makes the
-// path absolute the same way (auth_files_crud.go deleteAuthFileByName).
-//
-// Every one of those fields that is set must lie inside the auth directory,
-// not only the one Save picks now: the path attribute is Save's own record of
-// where it wrote, and a later save without it falls back to the others.
-// Otherwise the account is refused (ErrCredentialPath): the store would not
-// load it on start, and the gateway neither writes nor deletes a file it does
-// not own. The check is lexical; symlinks are not resolved.
-//
-// The path is empty only for an account with none of the fields set;
-// AddAccount gives it a UUID id, which Save joins to the auth directory.
-func (g *Gateway) credentialPath(auth *coreauth.Auth) (string, error) {
-	if g.authDir == "" {
-		return "", fmt.Errorf("%w: no auth directory is configured", ErrCredentialPath)
-	}
-	var saved string
-	for _, field := range []struct {
-		value string
-		// fromCWD: Save uses a relative path attribute relative to the working
-		// directory, as written.
-		fromCWD bool
-	}{
-		{strings.TrimSpace(auth.Attributes[coreauth.AttributePath]), true},
-		{strings.TrimSpace(auth.FileName), false},
-		{auth.ID, false},
-	} {
-		if field.value == "" {
-			continue
-		}
-		path, err := g.inAuthDir(field.value, field.fromCWD)
-		if err != nil {
-			return "", err
-		}
-		if saved == "" {
-			saved = path
-		}
-	}
-	return saved, nil
-}
-
-// inAuthDir makes path absolute — against the working directory if fromCWD,
-// else against the auth directory — and cleans it. It must then lie strictly
-// inside the auth directory, or ErrCredentialPath is returned.
-func (g *Gateway) inAuthDir(path string, fromCWD bool) (string, error) {
-	switch {
-	case fromCWD:
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return "", fmt.Errorf("%w: %q: %w", ErrCredentialPath, path, err)
-		}
-		path = abs
-	case !filepath.IsAbs(path):
-		path = filepath.Join(g.authDir, path)
-	}
-	path = filepath.Clean(path)
-	rel, err := filepath.Rel(g.authDir, path)
-	if err != nil || rel == "." || !filepath.IsLocal(rel) {
-		return "", fmt.Errorf("%w: %q (auth directory %q)", ErrCredentialPath, path, g.authDir)
-	}
-	return path, nil
-}
-
-// saveLocked writes auth through the token store and returns the error the
-// manager's own save discards. It skips accounts the store never holds
-// (storeHolds). The caller holds pushMu.
-func (g *Gateway) saveLocked(ctx context.Context, auth *coreauth.Auth) error {
-	if !storeHolds(auth) {
-		return nil
-	}
-	if _, err := g.store.Save(ctx, auth); err != nil {
-		return fmt.Errorf("gateway: save account %q: %w", auth.ID, err)
-	}
-	return nil
 }
 
 // storeHolds reports whether the token store holds auth: upstream's
@@ -934,35 +787,6 @@ func (g *Gateway) saveLocked(ctx context.Context, auth *coreauth.Auth) error {
 func storeHolds(auth *coreauth.Auth) bool {
 	return !coreauth.IsConfigAPIKeyAuth(auth) && !coreauth.IsPluginVirtualAuth(auth) && auth.Metadata != nil &&
 		!strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
-}
-
-// setDisabledLocked mirrors upstream's management applyAuthDisabledState
-// (internal/api/handlers/management/auth_files_fields.go) and returns what the
-// manager stored. The caller holds pushMu.
-func (g *Gateway) setDisabledLocked(ctx context.Context, auth *coreauth.Auth, disabled bool) (*coreauth.Auth, error) {
-	auth.Disabled = disabled
-	if disabled {
-		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "disabled via gateway"
-	} else {
-		auth.Status = coreauth.StatusActive
-		auth.StatusMessage = ""
-	}
-	if auth.Metadata == nil {
-		auth.Metadata = make(map[string]any)
-	}
-	auth.Metadata["disabled"] = disabled
-	updated, err := g.coreAuth.Update(ctx, auth)
-	if err != nil {
-		return nil, fmt.Errorf("gateway: update account %q: %w", auth.ID, err)
-	}
-	if updated == nil {
-		// Update reports an id it does not hold with (nil, nil); pushMu keeps
-		// the gateway's own changes out, so only a direct manager caller can
-		// have removed it since accountLocked.
-		return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, auth.ID)
-	}
-	return updated, nil
 }
 
 // Catalog is the model catalogue the policy gate decides by, for the admin
@@ -973,6 +797,7 @@ func (g *Gateway) Catalog() *Catalog { return g.catalog }
 func (g *Gateway) CurrentConfig() *cliproxyconfig.Config {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
+
 	return g.current
 }
 
@@ -1000,11 +825,318 @@ func (g *Gateway) WaitReload(ctx context.Context) error {
 			return nil
 		default:
 		}
+
 		if g.runErr != nil {
 			return fmt.Errorf("gateway: stopped before the watcher was installed: %w", g.runErr)
 		}
+
 		return fmt.Errorf("gateway: stopped before the watcher was installed: %w", ErrNotRunning)
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("gateway: wait for the watcher: %w", ctx.Err())
 	}
+}
+
+// claimAccess makes g's provider the only one g's access manager holds.
+//
+// Upstream's access manager admits every request when it holds no provider
+// (sdk/access/manager.go Authenticate), and whenever upstream refreshes it —
+// in Build, in Run, and on every configuration application — it copies
+// upstream's process-global registry (sdkaccess.RegisteredProviders). Each of
+// those refreshes first calls the plugin host's RegisterFrontendAuthProviders
+// (internal/pluginhost/adapters_auth.go), which clears the registry's
+// exclusive provider unless a plugin claims it, so a SetExclusiveProvider made
+// once does not last. claimAccess therefore re-registers g's provider, makes
+// it exclusive and reloads g's manager from the registry, and g calls it
+// before Build, after Build, just before Run starts the server (OnBeforeStart),
+// when Run hands over the reload callback, and before and after every
+// configuration it applies. Anything else registered —
+// a plugin's provider, upstream's config-api-key provider — is then never in
+// the manager g's server authenticates with outside those upstream steps.
+//
+// The registry is process-global. Registering under a fixed key replaces the
+// previous instance, so the gateway built last owns the registry until
+// another gateway claims it again; each gateway only reloads its own manager,
+// and claims before and after each upstream step that reads the registry for
+// it, so repeated New calls in one process each authenticate with their own
+// resolver. The caller holds accessMu.
+func (g *Gateway) claimAccess() {
+	sdkaccess.RegisterProvider(accessProviderType, g.provider)
+	sdkaccess.SetExclusiveProvider(accessProviderType)
+	g.access.SetProviders(sdkaccess.RegisteredProviders())
+}
+
+// apply runs reload(cfg) with g's access claimed on both sides of it.
+func (g *Gateway) apply(reload func(*cliproxyconfig.Config), cfg *cliproxyconfig.Config) {
+	accessMu.Lock()
+	defer accessMu.Unlock()
+
+	g.claimAccess()
+	reload(cfg)
+	g.claimAccess()
+}
+
+// configureEngine is applied to the embedded server's gin engine before
+// upstream adds its middleware and routes. It turns off gin's trailing-slash
+// and fixed-path redirects, which answer a path that is a slash or a letter
+// case away from a registered route with a redirect to it before any
+// middleware runs: every route would be told apart from an unrouted path, the
+// ones the policy gate refuses included. Unmatched, such a path now reaches
+// the gate and gets its 404. And it installs readDeadlineControl ahead of
+// upstream's middleware, which wraps the response writer.
+func (g *Gateway) configureEngine(e *gin.Engine) {
+	e.RedirectTrailingSlash = false
+	e.RedirectFixedPath = false
+	e.Use(readDeadlineControl())
+	g.engine.Store(e)
+}
+
+// reloadLocked returns upstream's reload callback, or ErrNotRunning unless Run
+// has installed the watcher and not yet returned. The caller holds pushMu.
+func (g *Gateway) reloadLocked() (func(*cliproxyconfig.Config), error) {
+	select {
+	case <-g.done:
+		return nil, ErrNotRunning
+	default:
+	}
+
+	g.mu.RLock()
+	reload := g.reload
+	g.mu.RUnlock()
+
+	if reload == nil {
+		return nil, ErrNotRunning
+	}
+
+	return reload, nil
+}
+
+// accountLocked checks what every account change needs: a manager, a running
+// service, and — for an existing account — that the manager holds id. The
+// caller holds pushMu. Checking before mutating keeps a refused change from
+// leaving the manager and the model registry out of step.
+func (g *Gateway) accountLocked(id string) (func(*cliproxyconfig.Config), *coreauth.Auth, error) {
+	if g.coreAuth == nil {
+		return nil, nil, ErrNoCoreAuth
+	}
+
+	reload, err := g.reloadLocked()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	auth, ok := g.coreAuth.GetByID(id)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %q", ErrUnknownAccount, id)
+	}
+
+	return reload, auth, nil
+}
+
+// reapplyLocked re-applies the current configuration. Upstream's config
+// application re-registers executors and models for every account the manager
+// holds (sdk/cliproxy/service_config.go applyConfigRuntime →
+// service_plugins.go syncPluginModelRuntime) and unregisters the models of a
+// disabled one; nothing else does so under the hollow watcher, which drops the
+// account update queue upstream would otherwise use. The caller holds pushMu.
+func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
+	g.apply(reload, g.CurrentConfig())
+}
+
+// loadLocked returns the account the token store loads from the credential at
+// path (as credentialPath resolves it), as boot loads it: the first one List
+// reads from that file, as upstream's readAuthFile takes the first. The
+// caller holds pushMu.
+func (g *Gateway) loadLocked(ctx context.Context, path string) (*coreauth.Auth, error) {
+	listed, err := g.store.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list the token store: %w", err)
+	}
+
+	for _, auth := range listed {
+		if p, err := g.credentialPath(auth); err == nil && p == path {
+			return auth, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w %q", errCredentialNotLoaded, path)
+}
+
+// withdrawLocked undoes a save AddAccount could not complete: an account the
+// manager holds for the credential at path is removed with RemoveAccount's
+// steps, since the save overwrote its file; otherwise the file is deleted. The
+// caller holds pushMu.
+func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfig.Config), path string) error {
+	for _, held := range g.coreAuth.List() {
+		if p, err := g.credentialPath(held); err == nil && p == path {
+			return g.removeLocked(ctx, reload, held)
+		}
+	}
+
+	if err := g.store.Delete(ctx, path); err != nil {
+		return fmt.Errorf("gateway: delete credential %q: %w", path, err)
+	}
+
+	return nil
+}
+
+// removeLocked is RemoveAccount on an account the manager holds. The caller
+// holds pushMu.
+func (g *Gateway) removeLocked(ctx context.Context, reload func(*cliproxyconfig.Config), auth *coreauth.Auth) error {
+	id := auth.ID
+
+	path, err := g.credentialPath(auth)
+	if err != nil {
+		return err
+	}
+
+	updated, err := g.setDisabledLocked(ctx, auth, true)
+	if err != nil {
+		return err
+	}
+
+	g.reapplyLocked(reload)
+
+	if err := g.store.Delete(ctx, path); err != nil {
+		if errSave := g.saveLocked(ctx, updated); errSave != nil {
+			return fmt.Errorf("gateway: account %q is disabled but still held, its credential %q was not deleted "+
+				"and may not be marked disabled on disk (retry RemoveAccount): %w", id, path, errors.Join(err, errSave))
+		}
+
+		return fmt.Errorf("gateway: account %q is disabled but still held, "+
+			"and its credential %q was not deleted (retry RemoveAccount): %w", id, path, err)
+	}
+
+	g.coreAuth.Remove(ctx, id)
+
+	return nil
+}
+
+// credentialPath is the absolute path of auth's credential, resolved the way
+// upstream's file store resolves it on Save (sdk/auth/filestore.go
+// resolveAuthPath): the first non-empty of the path attribute (as written, so
+// a relative one is relative to the working directory), the file name and the
+// id, the latter two joined to the auth directory unless absolute. Delete
+// must get an absolute path: it resolves a relative key containing a
+// separator against the working directory, not the auth directory
+// (resolveDeletePath), and reports the missing file as success — and upstream
+// puts the unsanitised account email into Claude file names
+// (internal/auth/claude/filename.go). Upstream's management delete makes the
+// path absolute the same way (auth_files_crud.go deleteAuthFileByName).
+//
+// Every one of those fields that is set must lie inside the auth directory,
+// not only the one Save picks now: the path attribute is Save's own record of
+// where it wrote, and a later save without it falls back to the others.
+// Otherwise the account is refused (ErrCredentialPath): the store would not
+// load it on start, and the gateway neither writes nor deletes a file it does
+// not own. The check is lexical; symlinks are not resolved.
+//
+// The path is empty only for an account with none of the fields set;
+// AddAccount gives it a UUID id, which Save joins to the auth directory.
+func (g *Gateway) credentialPath(auth *coreauth.Auth) (string, error) {
+	if g.authDir == "" {
+		return "", fmt.Errorf("%w: no auth directory is configured", ErrCredentialPath)
+	}
+
+	var saved string
+
+	for _, field := range []struct {
+		value string
+		// fromCWD: Save uses a relative path attribute relative to the working
+		// directory, as written.
+		fromCWD bool
+	}{
+		{strings.TrimSpace(auth.Attributes[coreauth.AttributePath]), true},
+		{strings.TrimSpace(auth.FileName), false},
+		{auth.ID, false},
+	} {
+		if field.value == "" {
+			continue
+		}
+
+		path, err := g.inAuthDir(field.value, field.fromCWD)
+		if err != nil {
+			return "", err
+		}
+
+		if saved == "" {
+			saved = path
+		}
+	}
+
+	return saved, nil
+}
+
+// inAuthDir makes path absolute — against the working directory if fromCWD,
+// else against the auth directory — and cleans it. It must then lie strictly
+// inside the auth directory, or ErrCredentialPath is returned.
+func (g *Gateway) inAuthDir(path string, fromCWD bool) (string, error) {
+	switch {
+	case fromCWD:
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", fmt.Errorf("%w: %q: %w", ErrCredentialPath, path, err)
+		}
+
+		path = abs
+	case !filepath.IsAbs(path):
+		path = filepath.Join(g.authDir, path)
+	}
+
+	path = filepath.Clean(path)
+
+	rel, err := filepath.Rel(g.authDir, path)
+	if err != nil || rel == "." || !filepath.IsLocal(rel) {
+		return "", fmt.Errorf("%w: %q (auth directory %q)", ErrCredentialPath, path, g.authDir)
+	}
+
+	return path, nil
+}
+
+// saveLocked writes auth through the token store and returns the error the
+// manager's own save discards. It skips accounts the store never holds
+// (storeHolds). The caller holds pushMu.
+func (g *Gateway) saveLocked(ctx context.Context, auth *coreauth.Auth) error {
+	if !storeHolds(auth) {
+		return nil
+	}
+
+	if _, err := g.store.Save(ctx, auth); err != nil {
+		return fmt.Errorf("gateway: save account %q: %w", auth.ID, err)
+	}
+
+	return nil
+}
+
+// setDisabledLocked mirrors upstream's management applyAuthDisabledState
+// (internal/api/handlers/management/auth_files_fields.go) and returns what the
+// manager stored. The caller holds pushMu.
+func (g *Gateway) setDisabledLocked(ctx context.Context, auth *coreauth.Auth, disabled bool) (*coreauth.Auth, error) {
+	auth.Disabled = disabled
+	if disabled {
+		auth.Status = coreauth.StatusDisabled
+		auth.StatusMessage = "disabled via gateway"
+	} else {
+		auth.Status = coreauth.StatusActive
+		auth.StatusMessage = ""
+	}
+
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+
+	auth.Metadata["disabled"] = disabled
+
+	updated, err := g.coreAuth.Update(ctx, auth)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: update account %q: %w", auth.ID, err)
+	}
+
+	if updated == nil {
+		// Update reports an id it does not hold with (nil, nil); pushMu keeps
+		// the gateway's own changes out, so only a direct manager caller can
+		// have removed it since accountLocked.
+		return nil, fmt.Errorf("%w: %q", ErrUnknownAccount, auth.ID)
+	}
+
+	return updated, nil
 }

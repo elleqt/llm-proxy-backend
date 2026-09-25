@@ -60,7 +60,8 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 make build                              # go build ./...
 make test                               # go test ./... -race (needs a Docker daemon)
 make generate                           # pinned mockery + oapi-codegen via go run
-go vet ./...                            # the only lint CI runs
+go vet ./...                            # CI gate
+make lint                               # pinned golangci-lint in ./bin, full repo; `make lint fix=1` autofixes
 go test ./internal/app/... -race -run TestName -v
 go test ./test/e2e/... -race -short     # -short skips the slow drain check
 make generate && git diff --exit-code   # CI codegen drift gate
@@ -83,7 +84,7 @@ The full variable reference is in `internal/config/config.go` and the README.
 - **Sentinel errors** live in `internal/app/ports.go`. Typed errors such as `*app.InvalidInputError` carry the field name.
 - **HTTP error mapping** happens only in the `appRefusals` table in `internal/iface/http/errors.go`, matched with `errors.Is`. Unmatched errors become a 500.
 - **Web error body:** every web error is JSON `api.Error{code,message,field?}` written by `writeError`. Clients key on `code`, so treat codes as contract.
-- **SQL:** raw SQL in documented string constants; no ORM or sqlc. Multi-row writes use `pgx.Batch`.
+- **SQL:** raw SQL in documented string constants; no ORM or sqlc. Multi-row writes use `pgx.Batch`. Multi-row reads scan into a postgres-local row struct tagged `db:"<column>"` with `pgx.RowToStructByName` and convert to the app/domain type (which stay tag-free); hand-written `pgx.CollectableRow` scan closures are rejected by lint (`forbidigo`).
 - **Unique violations** become `app.ErrConflict` through `asConflict()`, so callers never import pgx.
 - **Time** always goes through `app.Clock`. The app layer logs through `app.Logger`, which takes `slog.Attr` values only (`slog.Any("err", err)`), never loose key/value pairs. Boot bridges upstream's logrus into the same slog handler (`internal/boot/logging.go`); logrus is there only for upstream.
 - **Config** is env-only with the `LLMPROXY_` prefix and fails fast in `config.Load()`. Errors name the variable and never echo its value. Secrets use the self-redacting `config.Secret`.
@@ -121,7 +122,8 @@ The full variable reference is in `internal/config/config.go` and the README.
 
 ## Runtime/Tooling Preferences
 
-- Go version comes from `go.mod`. There is no `go.work`, Nix shell or golangci-lint.
+- Go version comes from `go.mod`. There is no `go.work` or Nix shell.
+- Lint is golangci-lint, version pinned in the `Makefile` and installed into the git-ignored `./bin` by `make lint`; config in `.golangci.yaml` (generated code excluded). The whole tree is clean: keep it so. A `//nolint` is always linter-scoped with a reason (`//nolint:<linter> // <why>`). CI lints only what a change introduces (`--new-from-rev`), so a config or version bump never blocks on old code.
 - Code generators run through `go run pkg@version`, with versions pinned in the `Makefile`. Don't install them globally.
 - A Docker daemon is required for tests.
 - The image is a static `CGO_ENABLED=0` build; the version is injected with `-X main.version=...`.
@@ -140,4 +142,4 @@ The full variable reference is in `internal/config/config.go` and the README.
 - **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process.
 - **Timestamps:** use a frozen `mocks.NewClock(t)` for exact timestamps.
 - **Coverage expectations:** every behaviour needs an automated test; checking by hand with curl isn't acceptance. There is no coverage threshold.
-- **CI** runs `go vet`, `go test -race`, the codegen drift check, the README/compose sync check, `docker compose config -q` for every compose combination, and a multi-arch image build with a smoke test.
+- **CI** runs `go vet`, `go test -race`, the codegen drift check, the README/compose sync check, `docker compose config -q` for every compose combination, and a multi-arch image build with a smoke test. The `lint` job runs golangci-lint on new issues only (pull requests and pushes to `main`).

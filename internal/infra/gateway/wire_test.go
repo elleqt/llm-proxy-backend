@@ -11,9 +11,8 @@ import (
 	"testing"
 	"time"
 
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 const vendorKey = "vendor-upstream-key"
@@ -24,6 +23,7 @@ var wireSeq atomic.Int64
 // onTheWire is a running gateway whose only vendor is v, reachable under alias.
 type onTheWire struct {
 	*running
+
 	vendor *faketest.Vendor
 	alias  string
 	model  string
@@ -46,29 +46,31 @@ type onTheWire struct {
 //     so a push straight after WaitReload is a data race inside upstream.
 func startOnTheWire(t *testing.T, v *faketest.Vendor) *onTheWire {
 	t.Helper()
+
 	return startOnTheWireWith(t, v, Params{Config: &cliproxyconfig.Config{}})
 }
 
 // startOnTheWireWith is startOnTheWire over caller-built Params, whose Config
 // gains the vendor entry.
-func startOnTheWireWith(t *testing.T, v *faketest.Vendor, p Params) *onTheWire {
+func startOnTheWireWith(t *testing.T, vendor *faketest.Vendor, params Params) *onTheWire {
 	t.Helper()
-	srv := faketest.Start(t, v)
+	srv := faketest.Start(t, vendor)
 	// Per-gateway names keep the process-global model registry from routing a
 	// test to a vendor an earlier gateway declared.
 	name := strings.ToLower(t.Name()) + "-" + strconv.FormatInt(wireSeq.Add(1), 10)
 	alias := "alias-" + name
 	model := "upstream-" + name
 
-	p.Config.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{
+	params.Config.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{
 		faketest.Compatibility("fakevendor", srv.URL, vendorKey, model, alias),
 	}
-	w := &onTheWire{running: startWith(t, p), vendor: v, alias: alias, model: model}
+	wire := &onTheWire{running: startWith(t, params), vendor: vendor, alias: alias, model: model}
 	// Upstream registers configured models after it starts serving
 	// (service_lifecycle.go syncPluginModelRuntime); until then the gate
 	// rightly refuses the model as served by no provider.
-	awaitProviders(t, w.gateway.catalog, alias, []string{"fakevendor"})
-	return w
+	awaitProviders(t, wire.gateway.catalog, alias, []string{"fakevendor"})
+
+	return wire
 }
 
 // productionParams builds Params the way the production entry point does: the
@@ -76,6 +78,7 @@ func startOnTheWireWith(t *testing.T, v *faketest.Vendor, p Params) *onTheWire {
 // NewCoreAuthManager over the same auth directory the configuration names.
 func productionParams(t *testing.T) Params {
 	t.Helper()
+
 	return productionParamsIn(t.TempDir())
 }
 
@@ -84,6 +87,7 @@ func productionParams(t *testing.T) Params {
 func productionParamsIn(authDir string) Params {
 	cfg := &cliproxyconfig.Config{AuthDir: authDir}
 	manager, store, cooldown := NewCoreAuthManager(cfg)
+
 	return Params{
 		Config:   cfg,
 		CoreAuth: manager,
@@ -93,21 +97,26 @@ func productionParamsIn(authDir string) Params {
 }
 
 // postMessages sends an Anthropic Messages request, so that reaching an
-// OpenAI-compatible vendor requires upstream to translate both ways.
-func (w *onTheWire) postMessages(t *testing.T, key string, stream bool) (*http.Response, []byte) {
+// OpenAI-compatible vendor requires upstream to translate both ways. It
+// returns the response status, headers and body, the body read and closed.
+func (w *onTheWire) postMessages(t *testing.T, key string, stream bool) (int, http.Header, []byte) {
 	t.Helper()
+
 	resp := w.sendMessages(t, key, stream)
 	defer func() { _ = resp.Body.Close() }()
+
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read response: %v", err)
 	}
-	return resp, out
+
+	return resp.StatusCode, resp.Header, out
 }
 
 // sendMessages is postMessages leaving the body unread; the caller closes it.
 func (w *onTheWire) sendMessages(t *testing.T, key string, stream bool) *http.Response {
 	t.Helper()
+
 	body, err := json.Marshal(map[string]any{
 		"model":      w.alias,
 		"max_tokens": 64,
@@ -117,18 +126,23 @@ func (w *onTheWire) sendMessages(t *testing.T, key string, stream bool) *http.Re
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodPost, w.baseURL+"/v1/messages", strings.NewReader(string(body)))
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, w.baseURL+"/v1/messages", strings.NewReader(string(body)))
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
+
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST /v1/messages: %v", err)
 	}
+
 	return resp
 }
 
@@ -137,17 +151,21 @@ func (w *onTheWire) sendMessages(t *testing.T, key string, stream bool) *http.Re
 // rather than the client's.
 func (w *onTheWire) assertTranslatedUpstreamRequest(t *testing.T, stream bool) {
 	t.Helper()
+
 	reqs := w.vendor.Requests()
 	if len(reqs) != 1 {
 		t.Fatalf("vendor received %d requests, want 1", len(reqs))
 	}
+
 	got := reqs[0]
 	if got.Method != http.MethodPost || got.Path != "/chat/completions" {
 		t.Fatalf("vendor received %s %s, want POST /chat/completions", got.Method, got.Path)
 	}
+
 	if auth := got.Header.Get("Authorization"); auth != "Bearer "+vendorKey {
 		t.Fatalf("vendor Authorization = %q, want the configured vendor key", auth)
 	}
+
 	var body struct {
 		Model    string `json:"model"`
 		Stream   bool   `json:"stream"`
@@ -159,12 +177,15 @@ func (w *onTheWire) assertTranslatedUpstreamRequest(t *testing.T, stream bool) {
 	if err := json.Unmarshal(got.Body, &body); err != nil {
 		t.Fatalf("vendor body %s is not JSON: %v", got.Body, err)
 	}
+
 	if body.Model != w.model {
 		t.Fatalf("vendor model = %q, want the upstream name %q for alias %q", body.Model, w.model, w.alias)
 	}
+
 	if body.Stream != stream {
 		t.Fatalf("vendor stream = %t, want %t", body.Stream, stream)
 	}
+
 	if len(body.Messages) != 1 || body.Messages[0].Role != "user" || !strings.Contains(string(got.Body), "say hello") {
 		t.Fatalf("vendor messages = %s, want the one user message", got.Body)
 	}
@@ -172,7 +193,8 @@ func (w *onTheWire) assertTranslatedUpstreamRequest(t *testing.T, stream bool) {
 
 func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 	const latency = 50 * time.Millisecond
-	w := startOnTheWire(t, &faketest.Vendor{
+
+	wire := startOnTheWire(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hello from the vendor"},"finish_reason":"stop"}],` +
 			`"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`),
@@ -180,23 +202,27 @@ func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 	})
 
 	// Access control is on the path: without a token nothing reaches the vendor.
-	if resp, body := w.postMessages(t, "", false); resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated POST /v1/messages = %d (%s), want %d", resp.StatusCode, body, http.StatusUnauthorized)
+	if status, _, body := wire.postMessages(t, "", false); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated POST /v1/messages = %d (%s), want %d", status, body, http.StatusUnauthorized)
 	}
-	if n := len(w.vendor.Requests()); n != 0 {
+
+	if n := len(wire.vendor.Requests()); n != 0 {
 		t.Fatalf("vendor received %d requests from an unauthenticated client", n)
 	}
 
 	began := time.Now()
-	resp, body := w.postMessages(t, wireSecret, false)
+	status, _, body := wire.postMessages(t, wireSecret, false)
 	elapsed := time.Since(began)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", resp.StatusCode, body)
+
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
 	}
+
 	if elapsed < latency {
 		t.Fatalf("response took %s, want at least the vendor latency %s", elapsed, latency)
 	}
-	w.assertTranslatedUpstreamRequest(t, false)
+
+	wire.assertTranslatedUpstreamRequest(t, false)
 
 	var msg struct {
 		Type    string `json:"type"`
@@ -214,10 +240,12 @@ func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 	if err := json.Unmarshal(body, &msg); err != nil {
 		t.Fatalf("response %s is not JSON: %v", body, err)
 	}
+
 	if msg.Type != "message" || msg.Role != "assistant" || len(msg.Content) != 1 ||
 		msg.Content[0].Type != "text" || msg.Content[0].Text != "hello from the vendor" {
 		t.Fatalf("response = %s, want an Anthropic message carrying the vendor's text", body)
 	}
+
 	if msg.StopReason != "end_turn" || msg.Usage.InputTokens != 3 || msg.Usage.OutputTokens != 4 {
 		t.Fatalf("response = %s, want stop_reason end_turn and the vendor's usage translated", body)
 	}
@@ -230,29 +258,33 @@ func streamChunk(delta, finish string) []byte {
 	if finish != "" {
 		finishJSON = `"` + finish + `"`
 	}
+
 	return []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m",` +
 		`"choices":[{"index":0,"delta":{"content":"` + delta + `"},"finish_reason":` + finishJSON + `}]}`)
 }
 
 func TestStreamingRequestReachesVendorAndReturnsTranslated(t *testing.T) {
-	w := startOnTheWire(t, &faketest.Vendor{
+	wire := startOnTheWire(t, &faketest.Vendor{
 		Chunks:  [][]byte{streamChunk("first ", ""), streamChunk("second ", ""), streamChunk("third", ""), streamChunk("", "stop")},
 		Latency: time.Millisecond,
 	})
 
-	resp, body := w.postMessages(t, wireSecret, true)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/messages stream = %d (%s), want 200", resp.StatusCode, body)
+	status, header, body := wire.postMessages(t, wireSecret, true)
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/messages stream = %d (%s), want 200", status, body)
 	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+
+	if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
 		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
 	}
-	w.assertTranslatedUpstreamRequest(t, true)
+
+	wire.assertTranslatedUpstreamRequest(t, true)
 
 	events, texts := anthropicEvents(t, body)
 	if want := []string{"first ", "second ", "third"}; strings.Join(texts, "|") != strings.Join(want, "|") {
 		t.Fatalf("text deltas = %q, want %q in order; events %q", texts, want, events)
 	}
+
 	if len(events) == 0 || events[0] != "message_start" || events[len(events)-1] != "message_stop" {
 		t.Fatalf("events = %q, want an Anthropic stream from message_start to message_stop", events)
 	}
@@ -264,27 +296,30 @@ func TestVendorFailureReachesTheClient(t *testing.T) {
 		FailBody:   []byte(`{"error":{"message":"vendor refused the prompt","type":"invalid_request_error"}}`),
 	})
 
-	resp, body := w.postMessages(t, wireSecret, false)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST /v1/messages = %d (%s), want the vendor's %d", resp.StatusCode, body, http.StatusBadRequest)
+	status, _, body := w.postMessages(t, wireSecret, false)
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/messages = %d (%s), want the vendor's %d", status, body, http.StatusBadRequest)
 	}
+
 	if !strings.Contains(string(body), "vendor refused the prompt") {
 		t.Fatalf("response %s does not carry the vendor's error", body)
 	}
 }
 
 func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
-	w := startOnTheWire(t, &faketest.Vendor{
+	wire := startOnTheWire(t, &faketest.Vendor{
 		Chunks: [][]byte{[]byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m",` +
 			`"choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":null}]}`)},
 		DieMidStream: true,
 	})
 
-	_, body := w.postMessages(t, wireSecret, true)
+	_, _, body := wire.postMessages(t, wireSecret, true)
+
 	events, texts := anthropicEvents(t, body)
 	if len(texts) != 1 || texts[0] != "partial" {
 		t.Fatalf("text deltas = %q, want the one chunk sent before the vendor died; events %q", texts, events)
 	}
+
 	for _, e := range events {
 		if e == "message_stop" {
 			t.Fatalf("events = %q: the stream completed normally although the vendor died", events)
@@ -297,36 +332,42 @@ func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
 // configured auth directory, passed with its cooldown store — so the manager on
 // the request path is the one production hands in, not upstream's default.
 func TestRequestThroughProductionWiringReachesVendor(t *testing.T) {
-	p := productionParams(t)
-	w := startOnTheWireWith(t, &faketest.Vendor{
+	params := productionParams(t)
+	wire := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hello through production wiring"},"finish_reason":"stop"}],` +
 			`"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`),
-	}, p)
+	}, params)
 
-	resp, body := w.postMessages(t, wireSecret, false)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", resp.StatusCode, body)
+	status, _, body := wire.postMessages(t, wireSecret, false)
+	if status != http.StatusOK {
+		t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
 	}
+
 	if !strings.Contains(string(body), "hello through production wiring") {
 		t.Fatalf("response %s does not carry the vendor's text", body)
 	}
-	w.assertTranslatedUpstreamRequest(t, false)
+
+	wire.assertTranslatedUpstreamRequest(t, false)
 
 	// The request was served by a credential of the supplied manager: upstream
 	// records the result on the auth it selected.
 	deadline := time.Now().Add(5 * time.Second)
+
 	for {
 		var served int64
-		for _, a := range p.CoreAuth.List() {
+		for _, a := range params.CoreAuth.List() {
 			served += a.Success
 		}
+
 		if served == 1 {
 			break
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("the supplied manager recorded %d successful requests, want 1: another manager served it", served)
 		}
+
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -337,12 +378,15 @@ func TestRequestThroughProductionWiringReachesVendor(t *testing.T) {
 // the client before the vendor has begun its last chunk.
 func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 	const gap = 300 * time.Millisecond
+
 	chunks := [][]byte{streamChunk("first ", ""), streamChunk("second ", ""), streamChunk("third", ""), streamChunk("", "stop")}
-	w := startOnTheWire(t, &faketest.Vendor{Chunks: chunks, Latency: gap})
+	wire := startOnTheWire(t, &faketest.Vendor{Chunks: chunks, Latency: gap})
 
 	began := time.Now()
-	resp := w.sendMessages(t, wireSecret, true)
+
+	resp := wire.sendMessages(t, wireSecret, true)
 	defer func() { _ = resp.Body.Close() }()
+
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /v1/messages stream = %d, want 200", resp.StatusCode)
 	}
@@ -353,14 +397,18 @@ func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stream ended before any text delta: %v", err)
 		}
+
 		if !strings.Contains(line, `"text_delta"`) {
 			continue
 		}
-		started := w.vendor.ChunksStarted()
+
+		started := wire.vendor.ChunksStarted()
 		if started >= len(chunks) {
 			t.Fatalf("first text delta arrived after %s, once the vendor had begun all %d chunks: the stream is buffered, not flushed", time.Since(began), started)
 		}
+
 		t.Logf("first text delta after %s, with %d of %d vendor chunks begun", time.Since(began), started, len(chunks))
+
 		break
 	}
 	// Drain, so the stream is shown to complete as well.
@@ -368,6 +416,7 @@ func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rest of stream: %v", err)
 	}
+
 	if !strings.Contains(string(rest), "message_stop") {
 		t.Fatalf("stream did not complete: %s", rest)
 	}
@@ -375,19 +424,25 @@ func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 
 // anthropicEvents returns the event names of an Anthropic SSE stream and the
 // text of its text_delta events, both in order.
-func anthropicEvents(t *testing.T, body []byte) (events, texts []string) {
+func anthropicEvents(t *testing.T, body []byte) ([]string, []string) {
 	t.Helper()
+
+	var events, texts []string
+
 	scanner := bufio.NewScanner(strings.NewReader(string(body)))
 	for scanner.Scan() {
 		line := scanner.Text()
 		if name, ok := strings.CutPrefix(line, "event: "); ok {
 			events = append(events, name)
+
 			continue
 		}
+
 		data, ok := strings.CutPrefix(line, "data: ")
 		if !ok {
 			continue
 		}
+
 		var ev struct {
 			Type  string `json:"type"`
 			Delta struct {
@@ -399,9 +454,11 @@ func anthropicEvents(t *testing.T, body []byte) (events, texts []string) {
 			texts = append(texts, ev.Delta.Text)
 		}
 	}
+
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan stream: %v", err)
 	}
+
 	return events, texts
 }
 
@@ -412,41 +469,43 @@ func anthropicEvents(t *testing.T, body []byte) (events, texts []string) {
 // fill-first sends every request with the same key; round-robin, the default,
 // uses both.
 func TestBootRoutingStrategyPicksTheCredential(t *testing.T) {
-	for _, c := range []struct {
+	for _, tc := range []struct {
 		strategy string
 		keys     int
 	}{
 		{"fill-first", 1},
 		{"", 2},
 	} {
-		t.Run("strategy="+c.strategy, func(t *testing.T) {
-			v := &faketest.Vendor{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
+		t.Run("strategy="+tc.strategy, func(t *testing.T) {
+			vendor := &faketest.Vendor{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 				`"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],` +
 				`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)}
-			srv := faketest.Start(t, v)
+			srv := faketest.Start(t, vendor)
 			name := "routing-" + strconv.FormatInt(wireSeq.Add(1), 10)
 			entry := faketest.Compatibility("fakevendor", srv.URL, "vendor-key-1", "upstream-"+name, "alias-"+name)
 			entry.APIKeyEntries = append(entry.APIKeyEntries, cliproxyconfig.OpenAICompatibilityAPIKey{APIKey: "vendor-key-2"})
 			cfg := &cliproxyconfig.Config{AuthDir: t.TempDir(), OpenAICompatibility: []cliproxyconfig.OpenAICompatibility{entry}}
-			cfg.Routing.Strategy = c.strategy
+			cfg.Routing.Strategy = tc.strategy
 			manager, store, cooldown := NewCoreAuthManager(cfg)
-			w := &onTheWire{
+			wire := &onTheWire{
 				running: startWith(t, Params{Config: cfg, CoreAuth: manager, Store: store, Cooldown: cooldown}),
-				vendor:  v, alias: "alias-" + name, model: "upstream-" + name,
+				vendor:  vendor, alias: "alias-" + name, model: "upstream-" + name,
 			}
-			awaitProviders(t, w.gateway.catalog, w.alias, []string{"fakevendor"})
+			awaitProviders(t, wire.gateway.catalog, wire.alias, []string{"fakevendor"})
 
 			for range 4 {
-				if resp, body := w.postMessages(t, wireSecret, false); resp.StatusCode != http.StatusOK {
-					t.Fatalf("POST /v1/messages = %d (%s), want 200", resp.StatusCode, body)
+				if status, _, body := wire.postMessages(t, wireSecret, false); status != http.StatusOK {
+					t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
 				}
 			}
+
 			keys := map[string]bool{}
-			for _, r := range v.Requests() {
+			for _, r := range vendor.Requests() {
 				keys[r.Header.Get("Authorization")] = true
 			}
-			if len(keys) != c.keys {
-				t.Fatalf("4 requests reached the vendor with keys %v, want %d distinct", keys, c.keys)
+
+			if len(keys) != tc.keys {
+				t.Fatalf("4 requests reached the vendor with keys %v, want %d distinct", keys, tc.keys)
 			}
 		})
 	}

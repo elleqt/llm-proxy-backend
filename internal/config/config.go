@@ -154,6 +154,7 @@ func (c Config) ListenHostPort() (string, int) {
 	if strings.Contains(host, ":") {
 		host = "[" + host + "]"
 	}
+
 	return host, port
 }
 
@@ -164,20 +165,39 @@ func splitAddr(addr string) (string, int, bool) {
 	if err != nil {
 		return "", 0, false
 	}
+
 	port, err := strconv.Atoi(raw)
 	if err != nil || port < 1 || port > 65535 {
 		return "", 0, false
 	}
+
 	return host, port, true
 }
+
+// errConfig prefixes every error Load and LoadDatabase return, so each message
+// reads "config: <variable> …". The messages name the variable and never quote
+// its value.
+var errConfig = errors.New("config")
 
 // checkAddr refuses a listen address splitAddr cannot split — an IPv6 host must
 // be in brackets — naming the variable.
 func checkAddr(name, addr string) error {
 	if _, _, ok := splitAddr(addr); !ok {
-		return fmt.Errorf("config: %s must be host:port with a port from 1 to 65535", name)
+		return fmt.Errorf("%w: %s must be host:port with a port from 1 to 65535", errConfig, name)
 	}
+
 	return nil
+}
+
+// parseHTTPURL parses raw as an absolute http(s) URL with a host; ok is false
+// for anything else.
+func parseHTTPURL(raw string) (*url.URL, bool) {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return nil, false
+	}
+
+	return parsed, true
 }
 
 func Load() (Config, error) {
@@ -185,6 +205,7 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+
 	cfg := Config{
 		ListenAddr:              envOr("LLMPROXY_LISTEN_ADDR", ":8080"),
 		MetricsAddr:             envOr("LLMPROXY_METRICS_ADDR", "127.0.0.1:9090"),
@@ -197,39 +218,49 @@ func Load() (Config, error) {
 	if err := checkAddr("LLMPROXY_LISTEN_ADDR", cfg.ListenAddr); err != nil {
 		return Config{}, err
 	}
+
 	if err := checkAddr("LLMPROXY_METRICS_ADDR", cfg.MetricsAddr); err != nil {
 		return Config{}, err
 	}
+
 	switch os.Getenv("LLMPROXY_MODEL_CATALOG_UPDATES") {
 	case "", ModelCatalogUpdatesOn:
 		cfg.ModelCatalogUpdates = true
 	case ModelCatalogUpdatesOff:
 	default:
-		return Config{}, errors.New("config: LLMPROXY_MODEL_CATALOG_UPDATES must be on or off")
+		return Config{}, fmt.Errorf("%w: LLMPROXY_MODEL_CATALOG_UPDATES must be on or off", errConfig)
 	}
+
 	switch os.Getenv("LLMPROXY_LOG_FORMAT") {
 	case "", LogFormatText:
 		cfg.LogFormat = LogFormatText
 	case LogFormatJSON:
 		cfg.LogFormat = LogFormatJSON
 	default:
-		return Config{}, errors.New("config: LLMPROXY_LOG_FORMAT must be text or json")
+		return Config{}, fmt.Errorf("%w: LLMPROXY_LOG_FORMAT must be text or json", errConfig)
 	}
+
 	oidc, err := loadOIDC()
 	if err != nil {
 		return Config{}, err
 	}
+
 	cfg.OIDC = oidc
+
 	web, err := loadWeb(oidc.Enabled())
 	if err != nil {
 		return Config{}, err
 	}
+
 	cfg.Web = web
+
 	catalog, err := loadPriceCatalog()
 	if err != nil {
 		return Config{}, err
 	}
+
 	cfg.PriceCatalog = catalog
+
 	return cfg, nil
 }
 
@@ -252,20 +283,24 @@ type Database struct {
 func LoadDatabase() (Database, error) {
 	db := Database{URL: os.Getenv("LLMPROXY_DATABASE_URL"), PasswordHashConcurrency: runtime.NumCPU(), LocalLogin: true}
 	if db.URL == "" {
-		return Database{}, errors.New("config: LLMPROXY_DATABASE_URL is required")
+		return Database{}, fmt.Errorf("%w: LLMPROXY_DATABASE_URL is required", errConfig)
 	}
+
 	if raw := os.Getenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil || n < 1 {
-			return Database{}, errors.New("config: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer")
+			return Database{}, fmt.Errorf("%w: LLMPROXY_PASSWORD_HASH_CONCURRENCY must be a positive integer", errConfig)
 		}
+
 		db.PasswordHashConcurrency = n
 	}
+
 	if envOr("LLMPROXY_WEB_ADDR", defaultWebAddr) == WebAddrOff {
 		db.LocalLogin = false
 	} else if on, err := localLogin(); err == nil {
 		db.LocalLogin = on
 	}
+
 	return db, nil
 }
 
@@ -275,60 +310,69 @@ func loadPriceCatalog() (PriceCatalog, error) {
 	if raw == PriceCatalogOff {
 		return PriceCatalog{}, nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return PriceCatalog{}, errors.New("config: LLMPROXY_PRICES_CATALOG_URL must be an absolute http(s) URL or off")
+
+	if _, ok := parseHTTPURL(raw); !ok {
+		return PriceCatalog{}, fmt.Errorf("%w: LLMPROXY_PRICES_CATALOG_URL must be an absolute http(s) URL or off", errConfig)
 	}
+
 	interval, err := time.ParseDuration(envOr("LLMPROXY_PRICES_CATALOG_INTERVAL", "6h"))
 	if err != nil || interval < MinPriceCatalogInterval {
-		return PriceCatalog{}, fmt.Errorf("config: LLMPROXY_PRICES_CATALOG_INTERVAL must be a duration of at least %s", MinPriceCatalogInterval)
+		return PriceCatalog{}, fmt.Errorf("%w: LLMPROXY_PRICES_CATALOG_INTERVAL must be a duration of at least %s",
+			errConfig, MinPriceCatalogInterval)
 	}
+
 	return PriceCatalog{URL: raw, Interval: interval}, nil
 }
 
 // loadWeb reads the web listener's variables. Like loadOIDC, its errors name the
 // variable and never quote a value: LLMPROXY_SESSION_KEY is one of them.
 func loadWeb(oidcEnabled bool) (Web, error) {
-	w := Web{Addr: envOr("LLMPROXY_WEB_ADDR", defaultWebAddr), CookieSecure: true, LocalLogin: true}
-	if w.Addr == WebAddrOff {
+	web := Web{Addr: envOr("LLMPROXY_WEB_ADDR", defaultWebAddr), CookieSecure: true, LocalLogin: true}
+	if web.Addr == WebAddrOff {
 		return Web{}, nil
 	}
-	if err := checkAddr("LLMPROXY_WEB_ADDR", w.Addr); err != nil {
+
+	if err := checkAddr("LLMPROXY_WEB_ADDR", web.Addr); err != nil {
 		return Web{}, err
 	}
 
 	raw := os.Getenv("LLMPROXY_PUBLIC_API_URL")
 	if raw == "" {
-		return Web{}, errors.New("config: LLMPROXY_PUBLIC_API_URL is required while the web listener is on")
+		return Web{}, fmt.Errorf("%w: LLMPROXY_PUBLIC_API_URL is required while the web listener is on", errConfig)
 	}
-	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" ||
-		u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return Web{}, errors.New("config: LLMPROXY_PUBLIC_API_URL must be an absolute http(s) URL without query, fragment or credentials")
+
+	if parsed, ok := parseHTTPURL(raw); !ok || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return Web{}, fmt.Errorf("%w: LLMPROXY_PUBLIC_API_URL must be an absolute http(s) URL without query, fragment or credentials",
+			errConfig)
 	}
-	w.PublicAPIURL = strings.TrimRight(raw, "/")
+
+	web.PublicAPIURL = strings.TrimRight(raw, "/")
 
 	if raw := os.Getenv("LLMPROXY_COOKIE_SECURE"); raw != "" {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
-			return Web{}, errors.New("config: LLMPROXY_COOKIE_SECURE must be true or false")
+			return Web{}, fmt.Errorf("%w: LLMPROXY_COOKIE_SECURE must be true or false", errConfig)
 		}
-		w.CookieSecure = v
+
+		web.CookieSecure = v
 	}
-	if w.LocalLogin, err = localLogin(); err != nil {
+
+	var err error
+	if web.LocalLogin, err = localLogin(); err != nil {
 		return Web{}, err
 	}
 
 	key := os.Getenv("LLMPROXY_SESSION_KEY")
 	switch {
 	case key == "" && oidcEnabled:
-		return Web{}, errors.New("config: LLMPROXY_SESSION_KEY is required when LLMPROXY_OIDC_ISSUER is set")
+		return Web{}, fmt.Errorf("%w: LLMPROXY_SESSION_KEY is required when LLMPROXY_OIDC_ISSUER is set", errConfig)
 	case key != "" && len(key) < MinSessionKeyLen:
-		return Web{}, fmt.Errorf("config: LLMPROXY_SESSION_KEY must be at least %d bytes", MinSessionKeyLen)
+		return Web{}, fmt.Errorf("%w: LLMPROXY_SESSION_KEY must be at least %d bytes", errConfig, MinSessionKeyLen)
 	case key != "":
-		w.SessionKey = Secret(key)
+		web.SessionKey = Secret(key)
 	}
-	return w, nil
+
+	return web, nil
 }
 
 const defaultWebAddr = "127.0.0.1:8081"
@@ -339,10 +383,12 @@ func localLogin() (bool, error) {
 	if raw == "" {
 		return true, nil
 	}
+
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		return false, errors.New("config: LLMPROXY_LOCAL_LOGIN must be true or false")
+		return false, fmt.Errorf("%w: LLMPROXY_LOCAL_LOGIN must be true or false", errConfig)
 	}
+
 	return v, nil
 }
 
@@ -350,46 +396,51 @@ func localLogin() (bool, error) {
 // quote a value: the client secret is one of them, and the others sit next to it in
 // the same environment dump an operator pastes into a ticket.
 func loadOIDC() (OIDC, error) {
-	o := OIDC{Issuer: os.Getenv("LLMPROXY_OIDC_ISSUER")}
-	if !o.Enabled() {
+	oidc := OIDC{Issuer: os.Getenv("LLMPROXY_OIDC_ISSUER")}
+	if !oidc.Enabled() {
 		return OIDC{}, nil
 	}
-	o.ClientID = os.Getenv("LLMPROXY_OIDC_CLIENT_ID")
-	o.ClientSecret = os.Getenv("LLMPROXY_OIDC_CLIENT_SECRET")
-	o.RedirectURL = os.Getenv("LLMPROXY_OIDC_REDIRECT_URL")
-	o.RequiredGroup = os.Getenv("LLMPROXY_OIDC_REQUIRED_GROUP")
-	o.GroupsClaim = envOr("LLMPROXY_OIDC_GROUPS_CLAIM", "groups")
-	o.DisplayName = strings.TrimSpace(os.Getenv("LLMPROXY_OIDC_DISPLAY_NAME"))
+
+	oidc.ClientID = os.Getenv("LLMPROXY_OIDC_CLIENT_ID")
+	oidc.ClientSecret = os.Getenv("LLMPROXY_OIDC_CLIENT_SECRET")
+	oidc.RedirectURL = os.Getenv("LLMPROXY_OIDC_REDIRECT_URL")
+	oidc.RequiredGroup = os.Getenv("LLMPROXY_OIDC_REQUIRED_GROUP")
+	oidc.GroupsClaim = envOr("LLMPROXY_OIDC_GROUPS_CLAIM", "groups")
+	oidc.DisplayName = strings.TrimSpace(os.Getenv("LLMPROXY_OIDC_DISPLAY_NAME"))
 
 	for _, req := range []struct{ name, value string }{
-		{"LLMPROXY_OIDC_CLIENT_ID", o.ClientID},
-		{"LLMPROXY_OIDC_CLIENT_SECRET", o.ClientSecret},
-		{"LLMPROXY_OIDC_REDIRECT_URL", o.RedirectURL},
+		{"LLMPROXY_OIDC_CLIENT_ID", oidc.ClientID},
+		{"LLMPROXY_OIDC_CLIENT_SECRET", oidc.ClientSecret},
+		{"LLMPROXY_OIDC_REDIRECT_URL", oidc.RedirectURL},
 	} {
 		if req.value == "" {
-			return OIDC{}, fmt.Errorf("config: %s is required when LLMPROXY_OIDC_ISSUER is set", req.name)
+			return OIDC{}, fmt.Errorf("%w: %s is required when LLMPROXY_OIDC_ISSUER is set", errConfig, req.name)
 		}
 	}
-	if u, err := url.Parse(o.RedirectURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return OIDC{}, errors.New("config: LLMPROXY_OIDC_REDIRECT_URL must be an absolute http(s) URL")
+
+	if _, ok := parseHTTPURL(oidc.RedirectURL); !ok {
+		return OIDC{}, fmt.Errorf("%w: LLMPROXY_OIDC_REDIRECT_URL must be an absolute http(s) URL", errConfig)
 	}
 
 	if raw := os.Getenv("LLMPROXY_OIDC_ALLOW_SIGNUP"); raw != "" {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
-			return OIDC{}, errors.New("config: LLMPROXY_OIDC_ALLOW_SIGNUP must be true or false")
+			return OIDC{}, fmt.Errorf("%w: LLMPROXY_OIDC_ALLOW_SIGNUP must be true or false", errConfig)
 		}
-		o.AllowSignUp = v
+
+		oidc.AllowSignUp = v
 	}
 
-	o.DefaultPolicy = splitList(os.Getenv("LLMPROXY_OIDC_DEFAULT_POLICY"), ",")
+	oidc.DefaultPolicy = splitList(os.Getenv("LLMPROXY_OIDC_DEFAULT_POLICY"), ",")
 
 	gp, err := parseGroupPolicy(os.Getenv("LLMPROXY_OIDC_GROUP_POLICY"))
 	if err != nil {
 		return OIDC{}, err
 	}
-	o.GroupPolicy = gp
-	return o, nil
+
+	oidc.GroupPolicy = gp
+
+	return oidc, nil
 }
 
 // parseGroupPolicy reads `group=rule,rule;group=rule`. Only the structure is checked
@@ -397,25 +448,32 @@ func loadOIDC() (OIDC, error) {
 func parseGroupPolicy(raw string) (map[string][]string, error) {
 	entries := splitList(raw, ";")
 	if len(entries) == 0 {
-		return nil, nil
+		return nil, nil //nolint:nilnil // no group policy is a nil map, not an error
 	}
-	const bad = "config: LLMPROXY_OIDC_GROUP_POLICY entry %d: %s"
+
+	const bad = "%w: LLMPROXY_OIDC_GROUP_POLICY entry %d: %s"
+
 	out := make(map[string][]string, len(entries))
-	for i, entry := range entries {
+	for idx, entry := range entries {
 		group, rules, found := strings.Cut(entry, "=")
+
 		group = strings.TrimSpace(group)
 		if !found || group == "" {
-			return nil, fmt.Errorf(bad, i+1, "want group=rule[,rule]")
+			return nil, fmt.Errorf(bad, errConfig, idx+1, "want group=rule[,rule]")
 		}
+
 		if _, dup := out[group]; dup {
-			return nil, fmt.Errorf(bad, i+1, "group mapped twice")
+			return nil, fmt.Errorf(bad, errConfig, idx+1, "group mapped twice")
 		}
+
 		list := splitList(rules, ",")
 		if len(list) == 0 {
-			return nil, fmt.Errorf(bad, i+1, "group maps to no rules")
+			return nil, fmt.Errorf(bad, errConfig, idx+1, "group maps to no rules")
 		}
+
 		out[group] = list
 	}
+
 	return out, nil
 }
 
@@ -423,11 +481,13 @@ func parseGroupPolicy(raw string) (map[string][]string, error) {
 // a space after a comma is not an entry.
 func splitList(raw, sep string) []string {
 	var out []string
-	for _, item := range strings.Split(raw, sep) {
+
+	for item := range strings.SplitSeq(raw, sep) {
 		if item = strings.TrimSpace(item); item != "" {
 			out = append(out, item)
 		}
 	}
+
 	return out
 }
 
@@ -435,5 +495,6 @@ func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
 	}
+
 	return fallback
 }

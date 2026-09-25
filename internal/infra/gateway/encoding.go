@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -36,6 +37,9 @@ const maxDecodeWindow = 8 << 20
 var (
 	errDecodedTooLarge = errors.New("gateway: decoded request body too large")
 	errUnreadableBody  = errors.New("gateway: request body cannot be decoded")
+	// errUnsupportedEncoding is a coding decodeBody does not undo; the body
+	// is then unreadable, unless it is valid JSON as sent.
+	errUnsupportedEncoding = errors.New("gateway: unsupported request content encoding")
 )
 
 // contentEncoding is every coding the request's Content-Encoding header lines
@@ -43,13 +47,15 @@ var (
 func contentEncoding(r *http.Request) (string, bool) {
 	values := r.Header.Values("Content-Encoding")
 	encoded := false
+
 	for _, v := range values {
-		for _, part := range strings.Split(v, ",") {
+		for part := range strings.SplitSeq(v, ",") {
 			if p := strings.TrimSpace(part); p != "" && !strings.EqualFold(p, "identity") {
 				encoded = true
 			}
 		}
 	}
+
 	return strings.Join(values, ","), encoded
 }
 
@@ -72,6 +78,7 @@ func decodeRequestBody(ctx context.Context, raw []byte, encoding string, held *b
 	if err := held.grow(ctx, maxJSONBody); err != nil {
 		return nil, err
 	}
+
 	decoded, err := decodeBody(raw, encoding, maxJSONBody)
 	switch {
 	case errors.Is(err, errDecodedTooLarge):
@@ -81,7 +88,9 @@ func decodeRequestBody(ctx context.Context, raw []byte, encoding string, held *b
 	case err != nil:
 		return nil, errUnreadableBody
 	}
+
 	held.shrinkTo(int64(cap(decoded)))
+
 	return decoded, nil
 }
 
@@ -90,42 +99,52 @@ func decodeRequestBody(ctx context.Context, raw []byte, encoding string, held *b
 func decodeBody(raw []byte, encoding string, limit int64) ([]byte, error) {
 	parts := strings.Split(encoding, ",")
 	body := raw
-	for i := len(parts) - 1; i >= 0; i-- {
-		switch coding := strings.ToLower(strings.TrimSpace(parts[i])); coding {
+
+	for _, part := range slices.Backward(parts) {
+		switch coding := strings.ToLower(strings.TrimSpace(part)); coding {
 		case "", "identity":
 		case "zstd":
 			decoded, err := decodeZstd(body, limit)
 			if err != nil {
 				return nil, err
 			}
+
 			body = decoded
 		default:
-			return nil, fmt.Errorf("gateway: unsupported request content encoding %q", coding)
+			return nil, fmt.Errorf("%w %q", errUnsupportedEncoding, coding)
 		}
 	}
+
 	return body, nil
 }
 
 // decodeZstd decodes one zstd layer, refusing a window beyond
-// maxDecodeWindow or an output beyond limit before allocating for it.
+// maxDecodeWindow or an output beyond limit before allocating for it. A
+// negative limit admits no output at all.
 func decodeZstd(in []byte, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, errDecodedTooLarge
+	}
+
 	dec, err := zstd.NewReader(bytes.NewReader(in),
 		zstd.WithDecoderConcurrency(1),
 		zstd.WithDecoderLowmem(true),
 		zstd.WithDecoderMaxWindow(maxDecodeWindow),
 		zstd.WithDecoderMaxMemory(uint64(limit)))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gateway: start the zstd decoder: %w", err)
 	}
 	defer dec.Close()
+
 	out, err := io.ReadAll(io.LimitReader(dec, limit+1))
 	switch {
 	case errors.Is(err, zstd.ErrWindowSizeExceeded), errors.Is(err, zstd.ErrDecoderSizeExceeded):
 		return nil, errDecodedTooLarge
 	case err != nil:
-		return nil, err
+		return nil, fmt.Errorf("gateway: decode zstd: %w", err)
 	case int64(len(out)) > limit:
 		return nil, errDecodedTooLarge
 	}
+
 	return out, nil
 }

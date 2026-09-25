@@ -1,33 +1,34 @@
 package boot
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Each refusal the gate reports lands under its own reason, a refusal before
 // authentication under the unknown user, and a reason nobody mapped as "other"
 // rather than as some other reason.
 func TestGateRefusalsReachTheMetricsUnderTheirReasons(t *testing.T) {
-	m := metrics.New(prometheus.NewRegistry(),
+	meters := metrics.New(prometheus.NewRegistry(),
 		metrics.WithKnownModel(func(model string) (string, bool) { return model, model == "served-model" }))
-	g := gateMetrics{m}
+	gate := gateMetrics{meters}
 
-	g.AuthFailed(gateway.AuthMissing)
-	g.AuthFailed(gateway.AuthInvalid)
-	g.Denied("alice@example.com", "served-model", gateway.DenyModelNotAllowed)
-	g.Denied("alice@example.com", "Client-Invented-Model", gateway.DenyUnknownModel)
-	g.Denied("", "", gateway.DenyRouteNotAllowed)
-	g.Denied("alice@example.com", "served-model", gateway.DenyReason(200))
+	gate.AuthFailed(gateway.AuthMissing)
+	gate.AuthFailed(gateway.AuthInvalid)
+	gate.Denied("alice@example.com", "served-model", gateway.DenyModelNotAllowed)
+	gate.Denied("alice@example.com", "Client-Invented-Model", gateway.DenyUnknownModel)
+	gate.Denied("", "", gateway.DenyRouteNotAllowed)
+	gate.Denied("alice@example.com", "served-model", gateway.DenyReason(200))
 
 	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	meters.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
+
 	body := rec.Body.String()
 	for _, want := range []string{
 		`llmproxy_auth_failures_total{reason="missing"} 1`,

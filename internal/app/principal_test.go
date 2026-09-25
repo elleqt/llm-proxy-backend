@@ -7,28 +7,30 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
 )
 
 func TestPrincipalRoundTrips(t *testing.T) {
-	p := app.Principal{UserID: uuid.New(), TokenID: uuid.New()}
-	s := p.String()
-	if want := p.UserID.String() + ":" + p.TokenID.String(); s != want {
-		t.Fatalf("String() = %q, want %q", s, want)
+	principal := app.Principal{UserID: uuid.New(), TokenID: uuid.New()}
+
+	rendered := principal.String()
+	if want := principal.UserID.String() + ":" + principal.TokenID.String(); rendered != want {
+		t.Fatalf("String() = %q, want %q", rendered, want)
 	}
-	got, err := app.ParsePrincipal(s)
+
+	got, err := app.ParsePrincipal(rendered)
 	if err != nil {
-		t.Fatalf("ParsePrincipal(%q): %v", s, err)
+		t.Fatalf("ParsePrincipal(%q): %v", rendered, err)
 	}
-	if got != p {
-		t.Fatalf("ParsePrincipal(String()) = %+v, want %+v", got, p)
+
+	if got != principal {
+		t.Fatalf("ParsePrincipal(String()) = %+v, want %+v", got, principal)
 	}
 }
 
@@ -72,12 +74,13 @@ func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	human := activeHuman()
 	human.Email = "alice@example.com"
 	human.Policy = access.Policy{rule}
 	// The label travels with the principal too: a person's email, a service
 	// account's name.
-	for name, c := range map[string]struct {
+	for name, tc := range map[string]struct {
 		owner identity.User
 		label string
 	}{
@@ -85,7 +88,7 @@ func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 		"service": {identity.NewService(uuid.New(), "chat-panel", access.Policy{rule}), "chat-panel"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			owner := c.owner
+			owner := tc.owner
 			users, tokens := mocks.NewUserRepo(t), mocks.NewTokenRepo(t)
 			tok := liveToken(owner.ID)
 			// The lookup is by the hash of what was presented, never the secret itself.
@@ -96,7 +99,8 @@ func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
-			if want := (app.Principal{UserID: owner.ID, TokenID: tok.ID, Owner: c.label}); got != want {
+
+			if want := (app.Principal{UserID: owner.ID, TokenID: tok.ID, Owner: tc.label}); got != want {
 				t.Fatalf("Resolve = %+v, want %+v", got, want)
 			}
 			// The owner's policy travels with the principal: whoever decides
@@ -149,9 +153,10 @@ func TestResolveRefusalsAreIndistinguishable(t *testing.T) {
 			tc.expect(users, tokens)
 
 			got, policy, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
-			if err != app.ErrInvalidCredentials {
+			if !isExactly(err, app.ErrInvalidCredentials) {
 				t.Fatalf("Resolve = %+v, %v; want exactly ErrInvalidCredentials", got, err)
 			}
+
 			if got != (app.Principal{}) || policy != nil {
 				t.Fatalf("a refusal returned principal %+v, policy %v", got, policy)
 			}
@@ -163,7 +168,7 @@ func TestResolveRefusalsAreIndistinguishable(t *testing.T) {
 // expectations, so any repository call fails the test.
 func TestResolveRefusesAnEmptySecretWithoutALookup(t *testing.T) {
 	users, tokens := mocks.NewUserRepo(t), mocks.NewTokenRepo(t)
-	if _, _, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), ""); err != app.ErrInvalidCredentials {
+	if _, _, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), ""); !isExactly(err, app.ErrInvalidCredentials) {
 		t.Fatalf("Resolve(\"\") = %v, want ErrInvalidCredentials", err)
 	}
 }
@@ -174,6 +179,7 @@ func TestResolveRefusesAnEmptySecretWithoutALookup(t *testing.T) {
 func TestResolveReportsAFailedLookupAsAFailure(t *testing.T) {
 	outage := errors.New("connection refused")
 	owner := activeHuman()
+
 	for _, tc := range []struct {
 		name   string
 		expect func(users *mocks.UserRepo, tokens *mocks.TokenRepo)
@@ -194,6 +200,7 @@ func TestResolveReportsAFailedLookupAsAFailure(t *testing.T) {
 			if !errors.Is(err, outage) || errors.Is(err, app.ErrInvalidCredentials) {
 				t.Fatalf("Resolve = %v, want the lookup failure and not ErrInvalidCredentials", err)
 			}
+
 			if strings.Contains(err.Error(), presented) {
 				t.Fatalf("error %q carries the secret", err)
 			}

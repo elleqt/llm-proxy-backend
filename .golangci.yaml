@@ -1,0 +1,173 @@
+version: "2"
+run:
+  go: "1.27"
+linters:
+  default: all
+  enable:
+    - wsl_v5
+  disable:
+    # Deprecated in favour of wsl_v5 / gomodguard_v2 (enabled by default: all).
+    - wsl
+    - gomodguard
+    # With no deny rules depguard denies every import; this repo has none to ban.
+    - depguard
+    - noinlineerr
+    - gochecknoglobals
+    - exhaustruct
+    - exhaustruct_v5
+    - godox
+    - inamedparam
+    - ireturn
+    - mnd
+    - paralleltest
+    - tagalign
+    - tagliatelle
+    - gomoddirectives
+    # White-box tests are the convention: gateway, http and boot tests mutate
+    # process-global state, and domain/config tests read unexported fields.
+    - testpackage
+  settings:
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+    cyclop:
+      max-complexity: 25
+    dupl:
+      threshold: 300
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+    forbidigo:
+      analyze-types: true
+      # Ban hand-rolled scan closures over CollectableRow — every read path
+      # should plug a struct into pgx.RowToStructByName / RowToStructByNameLax.
+      forbid:
+        - pattern: '^pgx\.CollectableRow$'
+          msg: 'manual row.Scan closures are forbidden; tag a row struct with db:"col" and use pgx.RowToStructByName / RowToStructByNameLax instead'
+    funlen:
+      lines: 120
+    goconst:
+      ignore-tests: true
+      min-len: 3
+      min-occurrences: 3
+    gocritic:
+      disabled-checks:
+        - appendAssign
+        - dupImport
+        - evalOrder
+        - ifElseChain
+        - octalLiteral
+        - regexpSimplify
+        - sloppyReassign
+        - truncateCmp
+        - typeDefFirst
+        - unnamedResult
+        - unnecessaryDefer
+        - whyNoLint
+        - wrapperFunc
+        - rangeValCopy
+        - hugeParam
+      enabled-tags:
+        - diagnostic
+        - experimental
+        - performance
+    gosec:
+      excludes:
+        - G307
+        - G108
+    lll:
+      line-length: 140
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: bool-literal-in-expr
+        - name: time-equal
+        - name: constant-logical-expr
+    varnamelen:
+      max-distance: 5
+      min-name-length: 2
+      check-receiver: false
+      check-return: false
+      check-type-param: false
+      ignore-names:
+        - err
+        - ctx
+      ignore-type-assert-ok: false
+      ignore-map-index-ok: false
+      ignore-chan-recv-ok: false
+      ignore-decls:
+        - t testing.T
+        - T any
+    wrapcheck:
+      ignore-sigs:
+        - .Errorf(
+        - errors.New(
+        - errors.Unwrap(
+        - .Wrap(
+        - .Wrapf(
+        - .WithMessage(
+        - .WithMessagef(
+        - .WithStack(
+  exclusions:
+    generated: lax
+    rules:
+      - linters:
+          - funlen
+          - lll
+          - maintidx
+        path: _test.go
+      - linters:
+          - staticcheck
+        text: should not use dot imports
+      - linters:
+          - staticcheck
+        text: at least one file in a package should have a package comment
+      - linters:
+          - dupl
+          - gosec
+          - err113
+          - wrapcheck
+        path: _test\.go
+    paths:
+      - \.gen\.go$
+      - mocks
+formatters:
+  enable:
+    - gci
+    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - blank
+        - dot
+      custom-order: false
+  exclusions:
+    generated: lax
+    paths:
+      - \.gen\.go$
+      - mocks

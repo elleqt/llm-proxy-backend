@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"sort"
@@ -11,10 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/google/uuid"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 // UsageObserver is what the sink reports to besides the ledger: the metric
@@ -93,8 +93,9 @@ var (
 // NewUsageSink starts the sink's worker; it runs for the life of the process.
 // prices must answer from memory: it is read for every record.
 func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
-	observer UsageObserver, clock app.Clock, log app.Logger) *UsageSink {
-	s := &UsageSink{
+	observer UsageObserver, clock app.Clock, log app.Logger,
+) *UsageSink {
+	sink := &UsageSink{
 		events:     events,
 		tokens:     tokens,
 		users:      users,
@@ -107,8 +108,9 @@ func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo
 		userLabels: labelCache{},
 		quota:      map[string]map[string]app.QuotaSignal{},
 	}
-	go s.run()
-	return s
+	go sink.run()
+
+	return sink
 }
 
 // HandleUsage enqueues record and returns at once. When the queue is full, or
@@ -117,8 +119,10 @@ func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo
 func (s *UsageSink) HandleUsage(_ context.Context, record cliproxyusage.Record) {
 	if s.closed.Load() {
 		s.dropped.Add(1)
+
 		return
 	}
+
 	select {
 	case s.queue <- record:
 	default:
@@ -136,173 +140,17 @@ func (s *UsageSink) Panics() uint64 { return s.panics.Load() }
 // Drain is for shutdown. It stops accepting records — HandleUsage drops and
 // counts them from then on — and returns once every record accepted before
 // has been processed: written (or failed and logged), observed and touched.
-// If ctx ends first it returns ctx.Err(); the worker finishes on its own.
+// If ctx ends first it returns an error wrapping ctx.Err(); the worker
+// finishes on its own.
 func (s *UsageSink) Drain(ctx context.Context) error {
 	s.closed.Store(true)
+
 	return s.sync(ctx)
-}
-
-// sync returns once every record enqueued before the call has been processed,
-// or ctx.Err(). It does not stop intake: the worker processes only as many
-// records as were queued when it took the request, so arrivals cannot keep it
-// from answering.
-func (s *UsageSink) sync(ctx context.Context) error {
-	done := make(chan struct{})
-	select {
-	case s.flush <- done:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (s *UsageSink) run() {
-	batch := make([]cliproxyusage.Record, 0, usageBatchMax)
-	for {
-		select {
-		case r := <-s.queue:
-			batch = s.fill(append(batch, r), usageBatchMax-1)
-			s.process(batch)
-			batch = batch[:0]
-		case done := <-s.flush:
-			// Only this goroutine receives, so at least n records are queued.
-			for n := len(s.queue); n > 0; n -= len(batch) {
-				batch = s.take(batch[:0], min(n, usageBatchMax))
-				s.process(batch)
-			}
-			batch = batch[:0]
-			close(done)
-		}
-	}
-}
-
-// fill tops batch up with at most n more queued records, without waiting.
-func (s *UsageSink) fill(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
-	for ; n > 0; n-- {
-		select {
-		case r := <-s.queue:
-			batch = append(batch, r)
-		default:
-			return batch
-		}
-	}
-	return batch
-}
-
-// take appends exactly n queued records to batch.
-func (s *UsageSink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
-	for ; n > 0; n-- {
-		batch = append(batch, <-s.queue)
-	}
-	return batch
-}
-
-// process handles one batch: map and observe every record, write the ledger
-// rows, then stamp the tokens and owners the batch used.
-func (s *UsageSink) process(records []cliproxyusage.Record) {
-	events := make([]app.UsageEvent, 0, len(records))
-	for _, r := range records {
-		s.guard(func(p any) {
-			s.log.Warn("recovered a panic handling a usage record",
-				slog.String("provider", policyProvider(r.Provider)), slog.String("model", r.Model), slog.Any("panic", p))
-		}, func() {
-			ev := s.eventOf(r)
-			events = append(events, ev)
-			s.observe(r, ev)
-		})
-	}
-	s.guard(func(p any) {
-		s.log.Warn("recovered a panic writing usage ledger rows", slog.Int("rows", len(events)), slog.Any("panic", p))
-	}, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), usageWriteTimeout)
-		defer cancel()
-		if err := s.events.AppendBatch(ctx, events); err != nil {
-			s.log.Warn("usage ledger rows lost", slog.Int("rows", len(events)), slog.Any("err", err))
-		}
-		s.touch(ctx, events)
-	})
-}
-
-// guard runs fn, and on a panic counts it and hands the value to report.
-func (s *UsageSink) guard(report func(any), fn func()) {
-	defer func() {
-		if p := recover(); p != nil {
-			s.panics.Add(1)
-			report(p)
-		}
-	}()
-	fn()
-}
-
-// observe feeds the metrics and the quota store from one record.
-func (s *UsageSink) observe(r cliproxyusage.Record, ev app.UsageEvent) {
-	s.observer.ObserveUsage(ev, s.userLabel(ev.UserID))
-	if r.AuthID == "" {
-		return
-	}
-	if r.Failed {
-		s.observer.ObserveAccountFailure(r.AuthID, ev.Provider)
-	}
-	s.observeQuota(r, ev.Provider, completedAt(ev))
 }
 
 // completedAt is when the response of ev finished arriving.
 func completedAt(ev app.UsageEvent) time.Time {
 	return ev.At.Add(time.Duration(ev.LatencyMS) * time.Millisecond)
-}
-
-// eventOf maps a record onto a ledger row. Record.APIKey carries the principal
-// (app.Principal.String); a record without one is kept unattributed.
-func (s *UsageSink) eventOf(r cliproxyusage.Record) app.UsageEvent {
-	ev := app.UsageEvent{
-		At:              r.RequestedAt,
-		Provider:        policyProvider(r.Provider),
-		Model:           r.Model,
-		Alias:           r.Alias,
-		Stream:          r.Stream,
-		ServiceTier:     r.ResponseServiceTier,
-		LatencyMS:       int(r.Latency.Milliseconds()),
-		TTFTMS:          int(r.TTFT.Milliseconds()),
-		Failed:          r.Failed,
-		StatusCode:      r.Fail.StatusCode,
-		VendorAccountID: r.AuthID,
-	}
-	if ev.At.IsZero() {
-		ev.At = s.clock.Now().Add(-r.Latency)
-	}
-	// The tier the vendor served, not the one the client asked for.
-	if ev.ServiceTier == "" {
-		ev.ServiceTier = r.ServiceTier
-	}
-	if p, err := app.ParsePrincipal(r.APIKey); err == nil {
-		ev.UserID, ev.TokenID = p.UserID, p.TokenID
-	} else {
-		// The value is not logged: it may be a credential upstream recorded.
-		s.log.Warn("usage record carries no principal; stored unattributed",
-			slog.String("provider", ev.Provider), slog.String("model", r.Model))
-	}
-
-	// Upstream's canonical breakdown partitions the total without double
-	// counting cache or reasoning tokens; the raw detail is the fallback.
-	if b := r.Detail.TokenBreakdown; b.Valid() {
-		ev.TokensInput = b.Input.UncachedTokens
-		ev.TokensCacheRead = b.Input.CacheReadTokens
-		ev.TokensCacheWrite = b.Input.CacheWriteTokens
-		ev.TokensOutput = b.Output.NonReasoningTokens
-		ev.TokensReasoning = b.Output.ReasoningTokens
-		ev.TokensTotal = b.TotalTokens
-		ev.BreakdownQuality = string(b.Quality)
-	} else {
-		partitionDetail(&ev, r.Provider, r.Detail)
-	}
-	price, ok := s.prices.Price(ev.Provider, ev.Model)
-	ev.Cost = app.PriceUsage(ev, price, ok)
-	return ev
 }
 
 // BreakdownQuality of a row whose token kinds the sink derived from the raw
@@ -331,17 +179,19 @@ const (
 // than the output that includes it, or kinds adding up to more than a reported
 // total leave every token unclassified, so none is priced. A zero reported total
 // is taken from the kinds.
-func partitionDetail(ev *app.UsageEvent, providerKey string, d cliproxyusage.Detail) {
-	in, out, reasoning := max(d.InputTokens, 0), max(d.OutputTokens, 0), max(d.ReasoningTokens, 0)
-	cacheRead, cacheWrite := max(d.CacheReadTokens, 0), max(d.CacheCreationTokens, 0)
+func partitionDetail(ev *app.UsageEvent, providerKey string, detail cliproxyusage.Detail) {
+	in, out, reasoning := max(detail.InputTokens, 0), max(detail.OutputTokens, 0), max(detail.ReasoningTokens, 0)
+	cacheRead, cacheWrite := max(detail.CacheReadTokens, 0), max(detail.CacheCreationTokens, 0)
 	// A legacy cached count stands for the cache reads only when neither cache
 	// count is set: upstream copies cache creation into it when there are no reads.
 	if cacheRead == 0 && cacheWrite == 0 {
-		cacheRead = max(d.CachedTokens, 0)
+		cacheRead = max(detail.CachedTokens, 0)
 	}
-	total := max(d.TotalTokens, 0)
+
+	total := max(detail.TotalTokens, 0)
 
 	quality := qualityReconstructed
+
 	cacheInInput, reasoningInOutput, known := detailSemantics(providerKey)
 	switch {
 	case !known:
@@ -352,85 +202,62 @@ func partitionDetail(ev *app.UsageEvent, providerKey string, d cliproxyusage.Det
 		if cacheInInput {
 			in -= cacheRead + cacheWrite
 		}
+
 		if reasoningInOutput {
 			out -= reasoning
 		}
+
 		if classified := in + out + reasoning + cacheRead + cacheWrite; total == 0 {
 			total = classified
 		} else if classified > total {
 			quality = qualityInconsistent
 		}
 	}
+
 	ev.BreakdownQuality = quality
 	if quality != qualityReconstructed {
 		// Every token unclassified: the total, or the least the counts imply.
 		if total == 0 {
-			total = max(in, cacheRead+cacheWrite, max(d.CachedTokens, 0)) + max(out, reasoning)
+			total = max(in, cacheRead+cacheWrite, max(detail.CachedTokens, 0)) + max(out, reasoning)
 		}
+
 		ev.TokensTotal = total
+
 		return
 	}
+
 	ev.TokensInput, ev.TokensOutput, ev.TokensReasoning = in, out, reasoning
 	ev.TokensCacheRead, ev.TokensCacheWrite = cacheRead, cacheWrite
 	ev.TokensTotal = total
 }
 
-// detailSemantics says whether an upstream provider key's raw usage counts cache
-// tokens inside the prompt count and reasoning inside the completion count; known
-// is false for a protocol it does not recognise.
-func detailSemantics(providerKey string) (cacheInInput, reasoningInOutput, known bool) {
+// detailSemantics says, for an upstream provider key's raw usage, whether the
+// prompt count includes the cache tokens, whether the completion count includes
+// the reasoning tokens, and whether the protocol is known at all: all false for
+// a protocol it does not recognise.
+func detailSemantics(providerKey string) (bool, bool, bool) {
 	key := strings.ToLower(strings.TrimSpace(providerKey))
-	if key == "openai-compatibility" || strings.HasPrefix(key, openAICompatiblePrefix) {
+	if key == openAICompatibilityKey || strings.HasPrefix(key, openAICompatiblePrefix) {
 		return true, true, true
 	}
+
 	if strings.Contains(key, "claude") || strings.Contains(key, "anthropic") {
 		return false, true, true
 	}
+
 	for _, marker := range [...]string{"gemini", "aistudio", "antigravity", "vertex", "interaction"} {
 		if strings.Contains(key, marker) {
 			return true, false, true
 		}
 	}
-	for _, marker := range [...]string{"openai", "codex", "xai", "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+
+	for _, marker := range [...]string{"openai", codexProviderKey, xaiProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
 		if strings.Contains(key, marker) {
 			return true, true, true
 		}
 	}
+
 	return false, false, false
-}
-
-// touch stamps each token and owner in events once, with the latest time one
-// of its requests completed. Records arrive in completion order, and the
-// repositories never move a stamp backwards.
-func (s *UsageSink) touch(ctx context.Context, events []app.UsageEvent) {
-	tokens, users := map[uuid.UUID]time.Time{}, map[uuid.UUID]time.Time{}
-	for _, ev := range events {
-		at := completedAt(ev)
-		if ev.TokenID != uuid.Nil && at.After(tokens[ev.TokenID]) {
-			tokens[ev.TokenID] = at
-		}
-		if ev.UserID != uuid.Nil && at.After(users[ev.UserID]) {
-			users[ev.UserID] = at
-		}
-	}
-	for id, at := range tokens {
-		if err := s.tokens.TouchLastUsed(ctx, id, at); err != nil {
-			s.log.Warn("stamping token last use failed", slog.Any("err", err))
-		}
-	}
-	for id, at := range users {
-		if err := s.users.TouchLastSeen(ctx, id, at); err != nil {
-			s.log.Warn("stamping user last seen failed", slog.Any("err", err))
-		}
-	}
-}
-
-// userLabel is the owner's label (identity.User.Label).
-func (s *UsageSink) userLabel(id uuid.UUID) string {
-	return s.userLabels.get(s.clock.Now(), id, func(ctx context.Context) (string, error) {
-		u, err := s.users.ByID(ctx, id)
-		return u.Label(), err
-	})
 }
 
 // labelCache remembers resolved labels for labelTTL. A failed lookup is not
@@ -446,22 +273,29 @@ func (c labelCache) get(now time.Time, id uuid.UUID, lookup func(context.Context
 	if id == uuid.Nil {
 		return unknownLabel
 	}
+
 	if l, ok := c[id]; ok && now.Before(l.expires) {
 		return l.label
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), usageLookupTimeout)
 	defer cancel()
+
 	label, err := lookup(ctx)
 	if err != nil {
 		return unknownLabel
 	}
+
 	if label == "" {
 		label = unknownLabel
 	}
+
 	if len(c) >= labelCacheMax {
 		clear(c)
 	}
+
 	c[id] = cachedLabel{label: label, expires: now.Add(labelTTL)}
+
 	return label
 }
 
@@ -469,7 +303,9 @@ func (c labelCache) get(now time.Time, id uuid.UUID, lookup func(context.Context
 // window.
 func (s *UsageSink) QuotaSignals() []app.QuotaSignal {
 	s.quotaMu.Lock()
+
 	var out []app.QuotaSignal
+
 	for _, windows := range s.quota {
 		for _, q := range windows {
 			out = append(out, q)
@@ -480,8 +316,10 @@ func (s *UsageSink) QuotaSignals() []app.QuotaSignal {
 		if out[i].Account != out[j].Account {
 			return out[i].Account < out[j].Account
 		}
+
 		return out[i].Window < out[j].Window
 	})
+
 	return out
 }
 
@@ -493,11 +331,224 @@ func (s *UsageSink) ForgetAccount(account string) {
 	s.quotaMu.Unlock()
 }
 
-// observeQuota reads the vendor's quota headers off r, whose response arrived
-// at observedAt, into the metrics and the quota store, under the policy-facing
-// provider name. The headers are chosen by r's upstream provider key. A header
-// that does not parse is ignored. Names and formats as upstream v7.3.15 reads
-// them:
+// sync returns once every record enqueued before the call has been
+// processed, or an error wrapping ctx.Err(). It does not stop intake: the
+// worker processes only as many records as were queued when it took the
+// request, so arrivals cannot keep it from answering.
+func (s *UsageSink) sync(ctx context.Context) error {
+	done := make(chan struct{})
+	select {
+	case s.flush <- done:
+	case <-ctx.Done():
+		return fmt.Errorf("gateway: usage sink: hand over the flush: %w", ctx.Err())
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("gateway: usage sink: wait for the flush: %w", ctx.Err())
+	}
+}
+
+func (s *UsageSink) run() {
+	batch := make([]cliproxyusage.Record, 0, usageBatchMax)
+
+	for {
+		select {
+		case r := <-s.queue:
+			batch = s.fill(append(batch, r), usageBatchMax-1)
+			s.process(batch)
+			batch = batch[:0]
+		case done := <-s.flush:
+			// Only this goroutine receives, so at least n records are queued.
+			for n := len(s.queue); n > 0; n -= len(batch) {
+				batch = s.take(batch[:0], min(n, usageBatchMax))
+				s.process(batch)
+			}
+
+			batch = batch[:0]
+
+			close(done)
+		}
+	}
+}
+
+// fill tops batch up with at most n more queued records, without waiting.
+func (s *UsageSink) fill(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
+	for ; n > 0; n-- {
+		select {
+		case r := <-s.queue:
+			batch = append(batch, r)
+		default:
+			return batch
+		}
+	}
+
+	return batch
+}
+
+// take appends exactly n queued records to batch.
+func (s *UsageSink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
+	for ; n > 0; n-- {
+		batch = append(batch, <-s.queue)
+	}
+
+	return batch
+}
+
+// process handles one batch: map and observe every record, write the ledger
+// rows, then stamp the tokens and owners the batch used.
+func (s *UsageSink) process(records []cliproxyusage.Record) {
+	events := make([]app.UsageEvent, 0, len(records))
+	for _, record := range records {
+		s.guard(func(p any) {
+			s.log.Warn("recovered a panic handling a usage record",
+				slog.String("provider", policyProvider(record.Provider)), slog.String("model", record.Model), slog.Any("panic", p))
+		}, func() {
+			ev := s.eventOf(record)
+			events = append(events, ev)
+			s.observe(record, ev)
+		})
+	}
+
+	s.guard(func(p any) {
+		s.log.Warn("recovered a panic writing usage ledger rows", slog.Int("rows", len(events)), slog.Any("panic", p))
+	}, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), usageWriteTimeout)
+		defer cancel()
+
+		if err := s.events.AppendBatch(ctx, events); err != nil {
+			s.log.Warn("usage ledger rows lost", slog.Int("rows", len(events)), slog.Any("err", err))
+		}
+
+		s.touch(ctx, events)
+	})
+}
+
+// guard runs fn, and on a panic counts it and hands the value to report.
+func (s *UsageSink) guard(report func(any), fn func()) {
+	defer func() {
+		if p := recover(); p != nil {
+			s.panics.Add(1)
+			report(p)
+		}
+	}()
+
+	fn()
+}
+
+// observe feeds the metrics and the quota store from one record.
+func (s *UsageSink) observe(record cliproxyusage.Record, ev app.UsageEvent) {
+	s.observer.ObserveUsage(ev, s.userLabel(ev.UserID))
+
+	if record.AuthID == "" {
+		return
+	}
+
+	if record.Failed {
+		s.observer.ObserveAccountFailure(record.AuthID, ev.Provider)
+	}
+
+	s.observeQuota(record, ev.Provider, completedAt(ev))
+}
+
+// eventOf maps a record onto a ledger row. Record.APIKey carries the principal
+// (app.Principal.String); a record without one is kept unattributed.
+func (s *UsageSink) eventOf(record cliproxyusage.Record) app.UsageEvent {
+	ev := app.UsageEvent{
+		At:              record.RequestedAt,
+		Provider:        policyProvider(record.Provider),
+		Model:           record.Model,
+		Alias:           record.Alias,
+		Stream:          record.Stream,
+		ServiceTier:     record.ResponseServiceTier,
+		LatencyMS:       int(record.Latency.Milliseconds()),
+		TTFTMS:          int(record.TTFT.Milliseconds()),
+		Failed:          record.Failed,
+		StatusCode:      record.Fail.StatusCode,
+		VendorAccountID: record.AuthID,
+	}
+	if ev.At.IsZero() {
+		ev.At = s.clock.Now().Add(-record.Latency)
+	}
+	// The tier the vendor served, not the one the client asked for.
+	if ev.ServiceTier == "" {
+		ev.ServiceTier = record.ServiceTier
+	}
+
+	if p, err := app.ParsePrincipal(record.APIKey); err == nil {
+		ev.UserID, ev.TokenID = p.UserID, p.TokenID
+	} else {
+		// The value is not logged: it may be a credential upstream recorded.
+		s.log.Warn("usage record carries no principal; stored unattributed",
+			slog.String("provider", ev.Provider), slog.String("model", record.Model))
+	}
+
+	// Upstream's canonical breakdown partitions the total without double
+	// counting cache or reasoning tokens; the raw detail is the fallback.
+	if breakdown := record.Detail.TokenBreakdown; breakdown.Valid() {
+		ev.TokensInput = breakdown.Input.UncachedTokens
+		ev.TokensCacheRead = breakdown.Input.CacheReadTokens
+		ev.TokensCacheWrite = breakdown.Input.CacheWriteTokens
+		ev.TokensOutput = breakdown.Output.NonReasoningTokens
+		ev.TokensReasoning = breakdown.Output.ReasoningTokens
+		ev.TokensTotal = breakdown.TotalTokens
+		ev.BreakdownQuality = string(breakdown.Quality)
+	} else {
+		partitionDetail(&ev, record.Provider, record.Detail)
+	}
+
+	price, ok := s.prices.Price(ev.Provider, ev.Model)
+	ev.Cost = app.PriceUsage(ev, price, ok)
+
+	return ev
+}
+
+// touch stamps each token and owner in events once, with the latest time one
+// of its requests completed. Records arrive in completion order, and the
+// repositories never move a stamp backwards.
+func (s *UsageSink) touch(ctx context.Context, events []app.UsageEvent) {
+	tokens, users := map[uuid.UUID]time.Time{}, map[uuid.UUID]time.Time{}
+
+	for _, ev := range events {
+		at := completedAt(ev)
+		if ev.TokenID != uuid.Nil && at.After(tokens[ev.TokenID]) {
+			tokens[ev.TokenID] = at
+		}
+
+		if ev.UserID != uuid.Nil && at.After(users[ev.UserID]) {
+			users[ev.UserID] = at
+		}
+	}
+
+	for id, at := range tokens {
+		if err := s.tokens.TouchLastUsed(ctx, id, at); err != nil {
+			s.log.Warn("stamping token last use failed", slog.Any("err", err))
+		}
+	}
+
+	for id, at := range users {
+		if err := s.users.TouchLastSeen(ctx, id, at); err != nil {
+			s.log.Warn("stamping user last seen failed", slog.Any("err", err))
+		}
+	}
+}
+
+// userLabel is the owner's label (identity.User.Label).
+func (s *UsageSink) userLabel(id uuid.UUID) string {
+	return s.userLabels.get(s.clock.Now(), id, func(ctx context.Context) (string, error) {
+		u, err := s.users.ByID(ctx, id)
+
+		return u.Label(), err
+	})
+}
+
+// observeQuota reads the vendor's quota headers off record, whose response
+// arrived at observedAt, into the metrics and the quota store, under the
+// policy-facing provider name. The headers are chosen by record's upstream
+// provider key. A header that does not parse is ignored. Names and formats
+// as upstream v7.3.15 reads them:
 //
 //   - claude: Anthropic-Ratelimit-Unified-{5h,7d}-Utilization, a ratio, and
 //     -Reset, epoch seconds (internal/runtime/executor/helps/claude_ratelimit.go
@@ -511,63 +562,78 @@ func (s *UsageSink) ForgetAccount(account string) {
 // Like upstream's own snapshot (sdk/cliproxy/auth/quota_signals.go), a
 // response carrying any signal replaces the account's whole snapshot, so a
 // window the vendor stopped reporting disappears; one carrying none leaves it.
-func (s *UsageSink) observeQuota(r cliproxyusage.Record, provider string, observedAt time.Time) {
-	h := r.ResponseHeaders
-	if h == nil {
+func (s *UsageSink) observeQuota(record cliproxyusage.Record, provider string, observedAt time.Time) {
+	headers := record.ResponseHeaders
+	if headers == nil {
 		return
 	}
+
 	var snapshot []app.QuotaSignal
+
 	add := func(window string, ratio float64, reset time.Time) {
 		snapshot = append(snapshot, app.QuotaSignal{
-			Account: r.AuthID, Provider: provider, Window: window,
+			Account: record.AuthID, Provider: provider, Window: window,
 			UsedRatio: ratio, ResetAt: reset, ObservedAt: observedAt,
 		})
 	}
-	switch r.Provider {
+
+	switch record.Provider {
 	case "claude":
-		for _, w := range [...]string{"5h", "7d"} {
-			prefix := "Anthropic-Ratelimit-Unified-" + w + "-"
-			ratio, ok := parseShare(h.Get(prefix+"Utilization"), 1)
+		for _, window := range [...]string{"5h", "7d"} {
+			prefix := "Anthropic-Ratelimit-Unified-" + window + "-"
+
+			ratio, ok := parseShare(headers.Get(prefix+"Utilization"), 1)
 			if !ok {
 				continue
 			}
-			reset, _ := parseEpochOrRFC3339(h.Get(prefix + "Reset"))
-			add(w, ratio, reset)
+
+			reset, _ := parseEpochOrRFC3339(headers.Get(prefix + "Reset"))
+			add(window, ratio, reset)
 		}
-	case "codex":
+	case codexProviderKey:
 		for _, pos := range [...]struct{ name, fallback string }{{"Primary", "5h"}, {"Secondary", "7d"}} {
 			prefix := "X-Codex-" + pos.name + "-"
-			ratio, ok := parseShare(h.Get(prefix+"Used-Percent"), 100)
+
+			ratio, ok := parseShare(headers.Get(prefix+"Used-Percent"), 100)
 			if !ok {
 				continue
 			}
-			window := windowOf(h.Get(prefix+"Window-Minutes"), pos.fallback)
-			reset, ok := parseEpochOrRFC3339(h.Get(prefix + "Reset-At"))
+
+			window := windowOf(headers.Get(prefix+"Window-Minutes"), pos.fallback)
+
+			reset, ok := parseEpochOrRFC3339(headers.Get(prefix + "Reset-At"))
 			if !ok {
-				reset = afterSeconds(h.Get(prefix+"Reset-After-Seconds"), observedAt)
+				reset = afterSeconds(headers.Get(prefix+"Reset-After-Seconds"), observedAt)
 			}
+
 			add(window, ratio, reset)
 		}
 	}
+
 	if len(snapshot) == 0 {
 		return
 	}
-	for _, q := range snapshot {
-		s.observer.ObserveVendorQuota(q.Account, q.Provider, q.Window, q.UsedRatio, q.ResetAt)
+
+	for _, signal := range snapshot {
+		s.observer.ObserveVendorQuota(signal.Account, signal.Provider, signal.Window, signal.UsedRatio, signal.ResetAt)
 	}
 
 	s.quotaMu.Lock()
 	defer s.quotaMu.Unlock()
-	previous := s.quota[r.AuthID]
+
+	previous := s.quota[record.AuthID]
+
 	windows := make(map[string]app.QuotaSignal, len(snapshot))
-	for _, q := range snapshot {
+	for _, signal := range snapshot {
 		// Like the reset gauge, a report without a reset keeps the last one known.
-		if q.ResetAt.IsZero() {
-			q.ResetAt = previous[q.Window].ResetAt
+		if signal.ResetAt.IsZero() {
+			signal.ResetAt = previous[signal.Window].ResetAt
 		}
-		windows[q.Window] = q
+
+		windows[signal.Window] = signal
 	}
-	s.quota[r.AuthID] = windows
+
+	s.quota[record.AuthID] = windows
 }
 
 // parseShare reads a non-negative finite number, divides it by scale and caps
@@ -577,6 +643,7 @@ func parseShare(raw string, scale float64) (float64, bool) {
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
 		return 0, false
 	}
+
 	return min(v/scale, 1), true
 }
 
@@ -586,15 +653,19 @@ func parseEpochOrRFC3339(raw string) (time.Time, bool) {
 	if raw == "" {
 		return time.Time{}, false
 	}
+
 	if sec, err := strconv.ParseInt(raw, 10, 64); err == nil {
 		if sec <= 0 {
 			return time.Time{}, false
 		}
+
 		return time.Unix(sec, 0).UTC(), true
 	}
+
 	if t, err := time.Parse(time.RFC3339, raw); err == nil {
 		return t.UTC(), true
 	}
+
 	return time.Time{}, false
 }
 
@@ -604,21 +675,22 @@ func afterSeconds(raw string, from time.Time) time.Time {
 	if err != nil || sec < 0 {
 		return time.Time{}
 	}
+
 	return from.Add(time.Duration(sec) * time.Second).UTC()
 }
 
 // windowOf names a Codex window from its length in minutes: whole days as
 // "<n>d", whole hours as "<n>h", else "<n>m"; fallback when absent or invalid.
 func windowOf(raw, fallback string) string {
-	m, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+	minutes, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	switch {
-	case err != nil || m <= 0:
+	case err != nil || minutes <= 0:
 		return fallback
-	case m%(24*60) == 0:
-		return strconv.FormatInt(m/(24*60), 10) + "d"
-	case m%60 == 0:
-		return strconv.FormatInt(m/60, 10) + "h"
+	case minutes%(24*60) == 0:
+		return strconv.FormatInt(minutes/(24*60), 10) + "d"
+	case minutes%60 == 0:
+		return strconv.FormatInt(minutes/60, 10) + "h"
 	default:
-		return strconv.FormatInt(m, 10) + "m"
+		return strconv.FormatInt(minutes, 10) + "m"
 	}
 }

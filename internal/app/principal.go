@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
+	"github.com/google/uuid"
 )
 
 // ErrMalformedPrincipal reports a string ParsePrincipal cannot read back.
@@ -42,14 +41,17 @@ func ParsePrincipal(s string) (Principal, error) {
 	if !ok {
 		return Principal{}, ErrMalformedPrincipal
 	}
+
 	userID, err := parseCanonical(user)
 	if err != nil {
 		return Principal{}, err
 	}
+
 	tokenID, err := parseCanonical(token)
 	if err != nil {
 		return Principal{}, err
 	}
+
 	return Principal{UserID: userID, TokenID: tokenID}, nil
 }
 
@@ -60,6 +62,7 @@ func parseCanonical(s string) (uuid.UUID, error) {
 	if err != nil || id == uuid.Nil || id.String() != s {
 		return uuid.UUID{}, ErrMalformedPrincipal
 	}
+
 	return id, nil
 }
 
@@ -88,25 +91,32 @@ func (r *TokenResolver) Resolve(ctx context.Context, secret string) (Principal, 
 	if secret == "" {
 		return Principal{}, nil, ErrInvalidCredentials
 	}
+
 	tok, err := r.tokens.ByHash(ctx, credentials.HashSecret(secret))
 	if errors.Is(err, ErrNotFound) {
 		return Principal{}, nil, ErrInvalidCredentials
 	}
+
 	if err != nil {
 		return Principal{}, nil, fmt.Errorf("app: resolve token: %w", err)
 	}
+
 	if !tok.Active() {
 		return Principal{}, nil, ErrInvalidCredentials
 	}
+
 	owner, err := r.users.ByID(ctx, tok.UserID)
 	if errors.Is(err, ErrNotFound) {
 		return Principal{}, nil, ErrInvalidCredentials
 	}
+
 	if err != nil {
 		return Principal{}, nil, fmt.Errorf("app: resolve token owner: %w", err)
 	}
+
 	if !owner.CanUseAPI() {
 		return Principal{}, nil, ErrInvalidCredentials
 	}
+
 	return Principal{UserID: tok.UserID, TokenID: tok.ID, Owner: owner.Label()}, owner.Policy, nil
 }

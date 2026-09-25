@@ -18,11 +18,10 @@ import (
 	"testing"
 	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
-	"github.com/go-jose/go-jose/v4/jwt"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 const (
@@ -32,9 +31,9 @@ const (
 	groupsClaim  = "team_groups"
 )
 
-// fakeIdP is a minimal OpenID provider: discovery, a key set, and a token endpoint
+// fakeIDP is a minimal OpenID provider: discovery, a key set, and a token endpoint
 // that answers any code with whatever ID token the test mints.
-type fakeIdP struct {
+type fakeIDP struct {
 	srv *httptest.Server
 	key *rsa.PrivateKey
 
@@ -46,20 +45,22 @@ type fakeIdP struct {
 	signingKey *rsa.PrivateKey
 }
 
-func newFakeIdP(t *testing.T) *fakeIdP {
+func newFakeIDP(t *testing.T) *fakeIDP {
 	t.Helper()
+
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	f := &fakeIdP{key: key}
+
+	fake := &fakeIDP{key: key}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{
-			"issuer":                                f.srv.URL,
-			"authorization_endpoint":                f.srv.URL + "/auth",
-			"token_endpoint":                        f.srv.URL + "/token",
-			"jwks_uri":                              f.srv.URL + "/keys",
+			"issuer":                                fake.srv.URL,
+			"authorization_endpoint":                fake.srv.URL + "/auth",
+			"token_endpoint":                        fake.srv.URL + "/token",
+			"jwks_uri":                              fake.srv.URL + "/keys",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -68,62 +69,78 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 			{Key: &key.PublicKey, KeyID: "k1", Algorithm: "RS256", Use: "sig"},
 		}})
 	})
-	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+	mux.HandleFunc("/token", func(writer http.ResponseWriter, req *http.Request) {
+		if err := req.ParseForm(); err != nil {
+			http.Error(writer, err.Error(), http.StatusBadRequest)
+
 			return
 		}
-		f.mu.Lock()
-		f.forms = append(f.forms, r.PostForm)
-		mint, key := f.mint, f.signingKey
-		f.mu.Unlock()
+
+		fake.mu.Lock()
+		fake.forms = append(fake.forms, req.PostForm)
+		mint, key := fake.mint, fake.signingKey
+		fake.mu.Unlock()
+
 		if key == nil {
-			key = f.key
+			key = fake.key
 		}
-		writeJSON(w, map[string]any{
+
+		writeJSON(writer, map[string]any{
 			"access_token": "access-token-value",
 			"token_type":   "Bearer",
 			"expires_in":   300,
-			"id_token":     sign(t, key, mint(f.srv.URL)),
+			"id_token":     sign(t, key, mint(fake.srv.URL)),
 		})
 	})
-	f.srv = httptest.NewServer(mux)
-	t.Cleanup(f.srv.Close)
-	return f
+	fake.srv = httptest.NewServer(mux)
+	t.Cleanup(fake.srv.Close)
+
+	return fake
 }
 
 func sign(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
+	t.Helper()
+
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key},
 		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "k1"))
 	if err != nil {
 		t.Errorf("signer: %v", err)
+
 		return ""
 	}
+
 	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
 		t.Errorf("sign: %v", err)
 	}
+
 	return raw
 }
 
-func (f *fakeIdP) setMint(m func(issuer string) map[string]any) {
+func (f *fakeIDP) setMint(m func(issuer string) map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	f.mint = m
 }
 
-func (f *fakeIdP) lastForm() url.Values {
+func (f *fakeIDP) lastForm() url.Values {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+
 	if len(f.forms) == 0 {
 		return nil
 	}
+
 	return f.forms[len(f.forms)-1]
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
 
 var challenge = app.Challenge{
@@ -135,6 +152,7 @@ var challenge = app.Challenge{
 // validClaims is a token the relying party must accept for challenge.
 func validClaims(issuer string) map[string]any {
 	now := time.Now()
+
 	return map[string]any{
 		"iss":            issuer,
 		"sub":            "subject-1",
@@ -151,9 +169,10 @@ func validClaims(issuer string) map[string]any {
 	}
 }
 
-func newProvider(t *testing.T, idp *fakeIdP) *oidc.Provider {
+func newProvider(t *testing.T, idp *fakeIDP) *oidc.Provider {
 	t.Helper()
-	p, err := oidc.New(context.Background(), oidc.Config{
+
+	provider, err := oidc.New(context.Background(), oidc.Config{
 		Issuer:       idp.srv.URL,
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
@@ -163,39 +182,45 @@ func newProvider(t *testing.T, idp *fakeIdP) *oidc.Provider {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return p
+
+	return provider
 }
 
 func TestExchangeAcceptsAValidTokenBoundToTheLogin(t *testing.T) {
-	idp := newFakeIdP(t)
+	idp := newFakeIDP(t)
 	idp.setMint(validClaims)
-	p := newProvider(t, idp)
+	provider := newProvider(t, idp)
 
 	// The authorization request carries the state, the nonce, and the S256 challenge
 	// of the verifier — never the verifier itself.
-	auth, err := url.Parse(p.AuthURL(challenge))
+	auth, err := url.Parse(provider.AuthURL(challenge))
 	if err != nil {
 		t.Fatalf("parse AuthURL: %v", err)
 	}
-	q := auth.Query()
+
+	query := auth.Query()
+
 	sum := sha256.Sum256([]byte(challenge.Verifier))
-	if q.Get("state") != challenge.State || q.Get("nonce") != challenge.Nonce ||
-		q.Get("code_challenge_method") != "S256" ||
-		q.Get("code_challenge") != base64.RawURLEncoding.EncodeToString(sum[:]) {
-		t.Fatalf("AuthURL query = %v, want state, nonce and the S256 challenge", q)
+	if query.Get("state") != challenge.State || query.Get("nonce") != challenge.Nonce ||
+		query.Get("code_challenge_method") != "S256" ||
+		query.Get("code_challenge") != base64.RawURLEncoding.EncodeToString(sum[:]) {
+		t.Fatalf("AuthURL query = %v, want state, nonce and the S256 challenge", query)
 	}
+
 	if strings.Contains(auth.String(), challenge.Verifier) {
 		t.Fatal("AuthURL reveals the PKCE verifier")
 	}
 
-	got, err := p.Exchange(context.Background(), "the-code", challenge)
+	got, err := provider.Exchange(context.Background(), "the-code", challenge)
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
+
 	form := idp.lastForm()
 	if form.Get("code") != "the-code" || form.Get("code_verifier") != challenge.Verifier {
 		t.Fatalf("token request = %v, want the code and the PKCE verifier", form)
 	}
+
 	want := app.Claims{
 		Issuer: idp.srv.URL, Subject: "subject-1",
 		Email: "person@example.com", EmailVerified: true,
@@ -214,6 +239,7 @@ func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+
 	cases := []struct {
 		name   string
 		mutate func(c map[string]any)
@@ -230,10 +256,11 @@ func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			idp := newFakeIdP(t)
+			idp := newFakeIDP(t)
 			idp.setMint(func(issuer string) map[string]any {
 				c := validClaims(issuer)
 				tc.mutate(c)
+
 				return c
 			})
 			idp.signingKey = tc.key
@@ -243,6 +270,7 @@ func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 			if !errors.Is(err, app.ErrInvalidCredentials) {
 				t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 			}
+
 			for _, secret := range []string{clientSecret, challenge.Verifier, "the-code"} {
 				if strings.Contains(err.Error(), secret) {
 					t.Fatalf("error %q leaks %q", err, secret)
@@ -271,16 +299,19 @@ func TestExchangeNamesThePerson(t *testing.T) {
 		{"cut to 100 runes", map[string]any{"name": long}, strings.Repeat("é", 100)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			idp := newFakeIdP(t)
+			idp := newFakeIDP(t)
 			idp.setMint(func(issuer string) map[string]any {
 				c := validClaims(issuer)
 				maps.Copy(c, tc.claims)
+
 				return c
 			})
+
 			got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
 			if err != nil {
 				t.Fatalf("Exchange: %v", err)
 			}
+
 			if got.Name != tc.want {
 				t.Fatalf("Name = %q, want %q", got.Name, tc.want)
 			}
@@ -288,12 +319,14 @@ func TestExchangeNamesThePerson(t *testing.T) {
 	}
 
 	// No name, no username, no email: no name either.
-	idp := newFakeIdP(t)
+	idp := newFakeIDP(t)
 	idp.setMint(func(issuer string) map[string]any {
 		c := validClaims(issuer)
 		delete(c, "email")
+
 		return c
 	})
+
 	got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
 	if err != nil || got.Name != "" {
 		t.Fatalf("Name = %q, err %v; want empty", got.Name, err)

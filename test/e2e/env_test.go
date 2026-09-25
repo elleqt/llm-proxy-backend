@@ -22,11 +22,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/sirupsen/logrus"
-
 	"github.com/elleqt/llm-proxy-backend/internal/boot"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
@@ -34,6 +29,10 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/sirupsen/logrus"
 )
 
 // childEnv marks the fresh process a test runs its body in.
@@ -47,13 +46,16 @@ const childEnv = "LLMPROXY_E2E_CHILD"
 // the caller is the child and must run the body.
 func inFreshProcess(t *testing.T) bool {
 	t.Helper()
+
 	if isChild() {
 		return true
 	}
+
 	out, err := runChild(t)
 	if err != nil || !strings.Contains(string(out), "--- PASS: "+t.Name()) {
 		t.Fatalf("in a fresh process: %v\n%s", err, out)
 	}
+
 	return false
 }
 
@@ -64,12 +66,16 @@ func isChild() bool { return os.Getenv(childEnv) != "" }
 func runChild(t *testing.T) ([]byte, error) {
 	t.Helper()
 	t.Parallel()
+
 	args := []string{"-test.run=^" + t.Name() + "$", "-test.count=1", "-test.v"}
 	if testing.Short() {
 		args = append(args, "-test.short")
 	}
-	cmd := exec.Command(os.Args[0], args...)
+
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
+
 	cmd.Env = append(os.Environ(), childEnv+"=1")
+
 	return cmd.CombinedOutput()
 }
 
@@ -97,16 +103,19 @@ type output struct {
 	buf bytes.Buffer
 }
 
-func (o *output) Write(b []byte) (int, error) {
+func (o *output) Write(data []byte) (int, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.t.Logf("process: %s", bytes.TrimSpace(b))
-	return o.buf.Write(b)
+
+	o.t.Logf("process: %s", bytes.TrimSpace(data))
+
+	return o.buf.Write(data)
 }
 
 func (o *output) String() string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	return o.buf.String()
 }
 
@@ -141,6 +150,7 @@ var bootstrapBanner = regexp.MustCompile(`temporary password: (\S+)`)
 // once all three listeners serve.
 func startProcess(t *testing.T, settingsDoc string, env map[string]string) *process {
 	t.Helper()
+
 	pool := pgtest.NewTestPool(t)
 	if settingsDoc != "" {
 		if err := postgres.NewSettingsRepo(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now()); err != nil {
@@ -148,31 +158,33 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		}
 	}
 
-	p := &process{
+	proc := &process{
 		pool:       pool,
 		users:      postgres.NewUserRepo(pool),
 		out:        &output{t: t},
 		adminEmail: "admin@example.com",
 		a:          vendor{policyName: "vendora", alias: "e2e-model-a", fake: &faketest.Vendor{Payload: []byte(vendorPayload)}},
-		b: vendor{policyName: "vendorb", alias: "e2e-model-b",
-			fake: &faketest.Vendor{Payload: []byte(vendorPayload), Latency: slowVendorLatency}},
+		b: vendor{
+			policyName: "vendorb", alias: "e2e-model-b",
+			fake: &faketest.Vendor{Payload: []byte(vendorPayload), Latency: slowVendorLatency},
+		},
 	}
-	srvA, srvB := faketest.Start(t, p.a.fake), faketest.Start(t, p.b.fake)
-	entryA := faketest.Compatibility(p.a.policyName, srvA.URL, "vendor-key-a1", "upstream-model-a", p.a.alias)
+	srvA, srvB := faketest.Start(t, proc.a.fake), faketest.Start(t, proc.b.fake)
+	entryA := faketest.Compatibility(proc.a.policyName, srvA.URL, "vendor-key-a1", "upstream-model-a", proc.a.alias)
 	entryA.APIKeyEntries = append(entryA.APIKeyEntries, cliproxyconfig.OpenAICompatibilityAPIKey{APIKey: "vendor-key-a2"})
-	entryB := faketest.Compatibility(p.b.policyName, srvB.URL, "vendor-key-b", "upstream-model-b", p.b.alias)
+	entryB := faketest.Compatibility(proc.b.policyName, srvB.URL, "vendor-key-b", "upstream-model-b", proc.b.alias)
 
 	apiAddr, webAddr, metricsAddr := freeAddr(t), freeAddr(t), freeAddr(t)
-	p.apiURL, p.webURL, p.metricsURL = "http://"+apiAddr, "http://"+webAddr, "http://"+metricsAddr
+	proc.apiURL, proc.webURL, proc.metricsURL = "http://"+apiAddr, "http://"+webAddr, "http://"+metricsAddr
 	vars := map[string]string{
 		"LLMPROXY_DATABASE_URL":              pool.Config().ConnString(),
 		"LLMPROXY_LISTEN_ADDR":               apiAddr,
 		"LLMPROXY_WEB_ADDR":                  webAddr,
 		"LLMPROXY_METRICS_ADDR":              metricsAddr,
-		"LLMPROXY_PUBLIC_API_URL":            p.apiURL,
+		"LLMPROXY_PUBLIC_API_URL":            proc.apiURL,
 		"LLMPROXY_RUNTIME_DIR":               t.TempDir(),
 		"LLMPROXY_AUTH_DIR":                  t.TempDir(),
-		"LLMPROXY_BOOTSTRAP_ADMIN_EMAIL":     p.adminEmail,
+		"LLMPROXY_BOOTSTRAP_ADMIN_EMAIL":     proc.adminEmail,
 		"LLMPROXY_PASSWORD_HASH_CONCURRENCY": "2",
 		// The web listener here is plain http, as behind the local stack's nginx.
 		"LLMPROXY_COOKIE_SECURE": "false",
@@ -191,6 +203,7 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		"LLMPROXY_MODEL_CATALOG_UPDATES": "off",
 	}
 	maps.Copy(vars, env)
+
 	for k, v := range vars {
 		t.Setenv(k, v)
 	}
@@ -202,53 +215,64 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 	logrus.AddHook(watching)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	p.cancel, p.done = cancel, make(chan error, 1)
+
+	proc.cancel, proc.done = cancel, make(chan error, 1)
 	go func() {
-		err := boot.Run(ctx, boot.Options{Output: p.out, Compatibility: []cliproxyconfig.OpenAICompatibility{entryA, entryB}})
-		p.returnedAt = time.Now()
-		p.done <- err
+		err := boot.Run(ctx, boot.Options{Output: proc.out, Compatibility: []cliproxyconfig.OpenAICompatibility{entryA, entryB}})
+
+		proc.returnedAt = time.Now()
+		proc.done <- err
 	}()
+
 	t.Cleanup(func() {
-		if err := p.stop(); err != nil {
+		if err := proc.stop(); err != nil {
 			t.Errorf("the process stopped with %v", err)
 		}
 	})
 
-	for _, probe := range []string{p.apiURL + "/healthz", p.webURL + "/api/auth/config", p.metricsURL + "/metrics"} {
+	for _, probe := range []string{proc.apiURL + "/healthz", proc.webURL + "/api/auth/config", proc.metricsURL + "/metrics"} {
 		eventually(t, "GET "+probe+" answers 200", func() bool {
 			select {
-			case err := <-p.done:
+			case err := <-proc.done:
 				t.Fatalf("the process stopped while starting: %v", err)
 			default:
 			}
-			resp, err := http.Get(probe)
+
+			resp, err := get(t, probe)
 			if err != nil {
 				return false
 			}
+
 			_ = resp.Body.Close()
+
 			return resp.StatusCode == http.StatusOK
 		})
 	}
+
 	select {
 	case <-watching.seen:
-	case err := <-p.done:
+	case err := <-proc.done:
 		t.Fatalf("the process stopped while starting: %v", err)
 	case <-time.After(30 * time.Second):
 		t.Fatal("upstream never finished starting: no file watcher")
 	}
-	m := bootstrapBanner.FindStringSubmatch(p.out.String())
+
+	m := bootstrapBanner.FindStringSubmatch(proc.out.String())
 	if m == nil {
 		t.Fatal("the process printed no bootstrap password")
 	}
-	p.adminPassword = m[1]
-	p.readyAt = time.Now()
+
+	proc.adminPassword = m[1]
+	proc.readyAt = time.Now()
 
 	jar, err := cookiejar.New(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.browser = &http.Client{Jar: jar, Timeout: 30 * time.Second}
-	return p
+
+	proc.browser = &http.Client{Jar: jar, Timeout: 30 * time.Second}
+
+	return proc
 }
 
 // logSeen is a logrus hook that closes seen the first time a message containing
@@ -265,12 +289,14 @@ func (h *logSeen) Fire(e *logrus.Entry) error {
 	if strings.Contains(e.Message, h.msg) {
 		h.once.Do(func() { close(h.seen) })
 	}
+
 	return nil
 }
 
 // stop cancels Run, if nothing stopped it yet, and returns its result.
 func (p *process) stop() error {
 	p.cancel()
+
 	return p.awaitReturn(60 * time.Second)
 }
 
@@ -283,29 +309,47 @@ func (p *process) awaitReturn(within time.Duration) error {
 			p.stopErr = fmt.Errorf("Run did not return within %s", within)
 		}
 	})
+
 	return p.stopErr
 }
 
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
-	addr := l.Addr().String()
-	if err := l.Close(); err != nil {
+
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+
 	return addr
+}
+
+// get is http.Get bound to the test's context.
+func get(t *testing.T, target string) (*http.Response, error) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return http.DefaultClient.Do(req)
 }
 
 func eventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
+
 	deadline := time.Now().Add(30 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting until %s", what)
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -313,35 +357,43 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // webCall is one request to the web API as the browser makes it.
 func (p *process) webCall(t *testing.T, method, path, body string) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(method, p.webURL+path, strings.NewReader(body))
+
+	req, err := http.NewRequestWithContext(t.Context(), method, p.webURL+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	resp, err := p.browser.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, path, err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return resp.StatusCode, out
 }
 
 // webJSON is webCall that requires status and decodes the body into v.
-func (p *process) webJSON(t *testing.T, method, path, body string, status int, v any) {
+func (p *process) webJSON(t *testing.T, method, path, body string, status int, dest any) {
 	t.Helper()
+
 	code, out := p.webCall(t, method, path, body)
 	if code != status {
 		t.Fatalf("%s %s = %d (%s), want %d", method, path, code, out, status)
 	}
-	if v != nil {
-		if err := json.Unmarshal(out, v); err != nil {
+
+	if dest != nil {
+		if err := json.Unmarshal(out, dest); err != nil {
 			t.Fatalf("%s %s: decode: %v (%s)", method, path, err, out)
 		}
 	}
@@ -359,19 +411,25 @@ func (p *process) signInAsBootstrapAdmin(t *testing.T) {
 // restriction.
 func (p *process) claimTemporaryPassword(t *testing.T, temporary, chosen string) {
 	t.Helper()
+
 	var me api.Me
 	p.webJSON(t, http.MethodPost, "/api/auth/login",
 		`{"email":"`+p.adminEmail+`","password":"`+temporary+`"}`, http.StatusOK, &me)
+
 	if !me.Restricted {
 		t.Fatal("the session a temporary password opens is not restricted")
 	}
+
 	var refused api.Error
 	p.webJSON(t, http.MethodGet, "/api/me/tokens", "", http.StatusForbidden, &refused)
+
 	if refused.Code != "password_change_required" {
 		t.Fatalf("restricted session on /api/me/tokens: code %q, want password_change_required", refused.Code)
 	}
+
 	p.webJSON(t, http.MethodPost, "/api/auth/password", `{"newPassword":"`+chosen+`"}`, http.StatusNoContent, nil)
 	p.webJSON(t, http.MethodGet, "/api/me", "", http.StatusOK, &me)
+
 	if me.Restricted {
 		t.Fatal("the session is still restricted after the password change")
 	}
@@ -380,24 +438,30 @@ func (p *process) claimTemporaryPassword(t *testing.T, temporary, chosen string)
 // issueToken issues an API token in the cabinet and returns its secret.
 func (p *process) issueToken(t *testing.T, label string) api.IssuedToken {
 	t.Helper()
+
 	var issued api.IssuedToken
 	p.webJSON(t, http.MethodPost, "/api/me/tokens", `{"label":"`+label+`"}`, http.StatusCreated, &issued)
+
 	return issued
 }
 
 // sessionCookie is the session cookie the browser holds now.
 func (p *process) sessionCookie(t *testing.T) *http.Cookie {
 	t.Helper()
+
 	u, err := url.Parse(p.webURL)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	for _, c := range p.browser.Jar.Cookies(u) {
 		if c.Name == "llmproxy_session" {
 			return c
 		}
 	}
+
 	t.Fatal("the browser holds no session cookie")
+
 	return nil
 }
 
@@ -406,31 +470,39 @@ func (p *process) chat(t *testing.T, secret, model string) int {
 	t.Helper()
 	code, _ := send(t, http.MethodPost, p.apiURL+"/v1/chat/completions", secret,
 		`{"model":"`+model+`","messages":[{"role":"user","content":"say hello"}]}`)
+
 	return code
 }
 
 // send is one request to any listener, with secret as a bearer token unless empty.
 func send(t *testing.T, method, target, secret, body string) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(method, target, strings.NewReader(body))
+
+	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
+
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, target, err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	out, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return resp.StatusCode, out
 }
 
@@ -438,6 +510,7 @@ func send(t *testing.T, method, target, secret, body string) (int, []byte) {
 func (p *process) models(t *testing.T, secret string) map[string]bool {
 	t.Helper()
 	code, body := send(t, http.MethodGet, p.apiURL+"/v1/models", secret, "")
+
 	var list struct {
 		Data []struct {
 			ID string `json:"id"`
@@ -446,30 +519,37 @@ func (p *process) models(t *testing.T, secret string) map[string]bool {
 	if err := json.Unmarshal(body, &list); err != nil {
 		t.Fatalf("GET /v1/models: status %d, decode: %v", code, err)
 	}
+
 	out := map[string]bool{}
 	for _, m := range list.Data {
 		out[m.ID] = true
 	}
+
 	return out
 }
 
 // setPolicy is the administrator's policy edit, made in the store directly.
 func (p *process) setPolicy(t *testing.T, email string, rules ...string) {
 	t.Helper()
+
 	ctx := context.Background()
-	u, err := p.users.ByEmail(ctx, email)
+
+	user, err := p.users.ByEmail(ctx, email)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	policy := make(access.Policy, 0, len(rules))
 	for _, raw := range rules {
 		r, err := access.ParseRule(raw)
 		if err != nil {
 			t.Fatal(err)
 		}
+
 		policy = append(policy, r)
 	}
-	if err := p.users.UpdatePolicy(ctx, u.ID, policy); err != nil {
+
+	if err := p.users.UpdatePolicy(ctx, user.ID, policy); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -477,21 +557,26 @@ func (p *process) setPolicy(t *testing.T, email string, rules ...string) {
 // scrapeMetrics returns what the metrics listener serves on /metrics.
 func (p *process) scrapeMetrics(t *testing.T) string {
 	t.Helper()
+
 	code, body := send(t, http.MethodGet, p.metricsURL+"/metrics", "", "")
 	if code != http.StatusOK {
 		t.Fatalf("GET /metrics on the metrics listener = %d", code)
 	}
+
 	return string(body)
 }
 
 // metricFamilies is the set of families the metrics listener exposes.
 func (p *process) metricFamilies(t *testing.T) map[string]bool {
 	t.Helper()
+
 	out := map[string]bool{}
+
 	for line := range strings.Lines(p.scrapeMetrics(t)) {
 		if rest, ok := strings.CutPrefix(line, "# TYPE "); ok {
 			out[strings.Fields(rest)[0]] = true
 		}
 	}
+
 	return out
 }

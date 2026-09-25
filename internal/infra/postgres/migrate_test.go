@@ -8,12 +8,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // expectedTables is every table the migrations are required to create. Spelled out
@@ -52,13 +51,13 @@ const (
 
 // TestMigrations exercises the whole schema against a single container: starting one
 // costs roughly two seconds, so every assertion shares this pool.
-func TestMigrations(t *testing.T) {
+func TestMigrations(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
 	pool := pgtest.NewTestPool(t)
 	ctx := context.Background()
 
 	t.Run("creates every expected table", func(t *testing.T) {
 		for _, table := range expectedTables {
-			if !tableExists(t, ctx, pool, table) {
+			if !tableExists(ctx, t, pool, table) {
 				t.Errorf("table %q was not created", table)
 			}
 		}
@@ -67,6 +66,7 @@ func TestMigrations(t *testing.T) {
 	t.Run("creates every expected index", func(t *testing.T) {
 		for _, index := range expectedIndexes {
 			var exists bool
+
 			err := pool.QueryRow(ctx,
 				`SELECT EXISTS (SELECT 1 FROM pg_indexes
 				                WHERE schemaname = 'public' AND indexname = $1)`,
@@ -74,6 +74,7 @@ func TestMigrations(t *testing.T) {
 			if err != nil {
 				t.Fatalf("query index %q: %v", index, err)
 			}
+
 			if !exists {
 				t.Errorf("index %q was not created", index)
 			}
@@ -129,8 +130,9 @@ func TestMigrations(t *testing.T) {
 	})
 
 	t.Run("pending_identities rejects an address differing only in case", func(t *testing.T) {
-		first := insertUser(t, ctx, pool)
-		second := insertUser(t, ctx, pool)
+		first := insertUser(ctx, t, pool)
+		second := insertUser(ctx, t, pool)
+
 		const invite = `INSERT INTO pending_identities (user_id, issuer, expected_email, expires_at)
 		                VALUES ($1, 'issuer-a', $2, now() + interval '1 hour')`
 		if _, err := pool.Exec(ctx, invite, first, "Invitee@Example.com"); err != nil {
@@ -142,13 +144,15 @@ func TestMigrations(t *testing.T) {
 	})
 
 	t.Run("api_tokens.hash rejects a duplicate", func(t *testing.T) {
-		user := insertUser(t, ctx, pool)
+		user := insertUser(ctx, t, pool)
+
 		const hash = "duplicate-token-hash"
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO api_tokens (id, user_id, label, hash, prefix)
 			 VALUES (gen_random_uuid(), $1, 'first', $2, 'pfx')`, user, hash); err != nil {
 			t.Fatalf("insert first token: %v", err)
 		}
+
 		_, err := pool.Exec(ctx,
 			`INSERT INTO api_tokens (id, user_id, label, hash, prefix)
 			 VALUES (gen_random_uuid(), $1, 'second', $2, 'pfx')`, user, hash)
@@ -156,8 +160,9 @@ func TestMigrations(t *testing.T) {
 	})
 
 	t.Run("user_identities rejects a duplicate issuer and subject", func(t *testing.T) {
-		first := insertUser(t, ctx, pool)
-		second := insertUser(t, ctx, pool)
+		first := insertUser(ctx, t, pool)
+		second := insertUser(ctx, t, pool)
+
 		const issuer, subject = "issuer-a", "subject-a"
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO user_identities (user_id, issuer, subject) VALUES ($1, $2, $3)`,
@@ -176,9 +181,11 @@ func TestMigrations(t *testing.T) {
 	t.Run("concurrent migrate calls do not race", func(t *testing.T) {
 		dsn := pool.Config().ConnString()
 		errs := make(chan error, 2)
+
 		for range 2 {
 			go func() { errs <- postgres.Migrate(ctx, dsn) }()
 		}
+
 		for range 2 {
 			if err := <-errs; err != nil {
 				t.Errorf("concurrent migrate: %v", err)
@@ -193,30 +200,38 @@ func TestMigrations(t *testing.T) {
 		dsn := pool.Config().ConnString()
 		migrated := func(want bool, state string) {
 			t.Helper()
+
 			got, err := postgres.Migrated(ctx, dsn)
 			if err != nil || got != want {
 				t.Fatalf("%s: Migrated = %v, %v; want %v", state, got, err, want)
 			}
 		}
 		migrated(true, "migrated")
+
 		if err := postgres.MigrateDown(ctx, dsn); err != nil {
 			t.Fatal(err)
 		}
+
 		if _, err := pool.Exec(ctx, `DROP TABLE goose_db_version`); err != nil {
 			t.Fatal(err)
 		}
+
 		migrated(false, "never migrated")
 		// Asking wrote nothing: the database is as fresh as it was.
-		if tableExists(t, ctx, pool, "goose_db_version") {
+		if tableExists(ctx, t, pool, "goose_db_version") {
 			t.Fatal("Migrated created goose's version table in a fresh database")
 		}
+
 		if err := postgres.MigrateTo(ctx, dsn, 1); err != nil {
 			t.Fatal(err)
 		}
+
 		migrated(false, "partly migrated")
+
 		if err := postgres.Migrate(ctx, dsn); err != nil {
 			t.Fatal(err)
 		}
+
 		migrated(true, "migrated again")
 	})
 
@@ -226,16 +241,19 @@ func TestMigrations(t *testing.T) {
 		if err := postgres.MigrateDown(ctx, dsn); err != nil {
 			t.Fatalf("migrate down: %v", err)
 		}
+
 		for _, table := range expectedTables {
-			if tableExists(t, ctx, pool, table) {
+			if tableExists(ctx, t, pool, table) {
 				t.Errorf("table %q survived the down migration", table)
 			}
 		}
+
 		if err := postgres.Migrate(ctx, dsn); err != nil {
 			t.Fatalf("migrate up again: %v", err)
 		}
+
 		for _, table := range expectedTables {
-			if !tableExists(t, ctx, pool, table) {
+			if !tableExists(ctx, t, pool, table) {
 				t.Errorf("table %q was not recreated after rollback", table)
 			}
 		}
@@ -249,25 +267,31 @@ func TestMigrations(t *testing.T) {
 		if err := postgres.MigrateDown(ctx, dsn); err != nil {
 			t.Fatalf("migrate down: %v", err)
 		}
+
 		if err := postgres.MigrateTo(ctx, dsn, 1); err != nil {
 			t.Fatalf("migrate to 1: %v", err)
 		}
+
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO model_prices (provider, model, input, output, cache_read, cache_write, updated_at)
 			 VALUES ('claude', 'claude-sonnet-5', 3, 15, 0.3, 3.75, '2026-09-01T00:00:00Z')`); err != nil {
 			t.Fatalf("insert a manual price: %v", err)
 		}
+
 		if err := postgres.Migrate(ctx, dsn); err != nil {
 			t.Fatalf("migrate up: %v", err)
 		}
+
 		manual, err := postgres.NewPriceRepo(pool).List(ctx)
 		if err != nil || len(manual) != 1 || manual[0].Model != "claude-sonnet-5" || manual[0].CacheWrite != 3.75 {
 			t.Fatalf("manual prices after the upgrade = %+v, %v; want the row kept", manual, err)
 		}
+
 		catalog := postgres.NewPriceCatalogRepo(pool)
 		if prices, err := catalog.List(ctx); err != nil || len(prices) != 0 {
 			t.Fatalf("catalog prices = %+v, %v; want none", prices, err)
 		}
+
 		if state, err := catalog.State(ctx); err != nil || state != (app.CatalogState{}) {
 			t.Fatalf("catalog state = %+v, %v; want a never-checked row", state, err)
 		}
@@ -281,11 +305,14 @@ func TestMigrations(t *testing.T) {
 		if err := postgres.MigrateDown(ctx, dsn); err != nil {
 			t.Fatalf("migrate down: %v", err)
 		}
+
 		if err := postgres.MigrateTo(ctx, dsn, 2); err != nil {
 			t.Fatalf("migrate to 2: %v", err)
 		}
+
 		manual := app.ModelPrice{Provider: "claude", Model: "sonnet", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
 		catalogOnly := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10, CacheRead: 0.125}
+
 		if _, err := pool.Exec(ctx, `
 			INSERT INTO model_prices (provider, model, input, output, cache_read, cache_write)
 			VALUES ('claude', 'sonnet', 3, 15, 0.3, 3.75);
@@ -293,17 +320,22 @@ func TestMigrations(t *testing.T) {
 			VALUES ('claude', 'sonnet', 100, 100, 100, 100), ('chatgpt', 'gpt-6', 1.25, 10, 0.125, 0)`); err != nil {
 			t.Fatalf("insert prices: %v", err)
 		}
+
 		rows := []struct {
 			ev    app.UsageEvent
 			price app.ModelPrice
 			ok    bool
 		}{
 			// Manual price, with 100 unclassified tokens and cache writes outweighing reads.
-			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100,
-				TokensCacheRead: 200, TokensCacheWrite: 4000, TokensTotal: 5600}, manual, true},
+			{app.UsageEvent{
+				Provider: "claude", Model: "sonnet", TokensInput: 1000, TokensOutput: 200, TokensReasoning: 100,
+				TokensCacheRead: 200, TokensCacheWrite: 4000, TokensTotal: 5600,
+			}, manual, true},
 			// No cache-write rate: writes cost the input rate.
-			{app.UsageEvent{Provider: "chatgpt", Model: "gpt-6", TokensInput: 600, TokensOutput: 50, TokensCacheRead: 400,
-				TokensCacheWrite: 300, TokensTotal: 1350}, catalogOnly, true},
+			{app.UsageEvent{
+				Provider: "chatgpt", Model: "gpt-6", TokensInput: 600, TokensOutput: 50, TokensCacheRead: 400,
+				TokensCacheWrite: 300, TokensTotal: 1350,
+			}, catalogOnly, true},
 			// A total only: nothing classified, so nothing priced.
 			{app.UsageEvent{Provider: "claude", Model: "sonnet", TokensTotal: 500}, manual, true},
 			// No price at all.
@@ -311,28 +343,31 @@ func TestMigrations(t *testing.T) {
 			// No price, and kinds above the total: every classified token is unpriced.
 			{app.UsageEvent{Provider: "claude", Model: "unknown", TokensInput: 50, TokensOutput: 30, TokensTotal: 40}, app.ModelPrice{}, false},
 		}
-		for i, r := range rows {
-			e := r.ev
+		for idx, row := range rows {
+			e := row.ev
 			if _, err := pool.Exec(ctx, `INSERT INTO usage_events (id, at, provider, model, tokens_input, tokens_output,
 				tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_total) VALUES ($1, now(), $2, $3, $4, $5, $6, $7, $8, $9)`,
-				i+1, e.Provider, e.Model, e.TokensInput, e.TokensOutput, e.TokensReasoning, e.TokensCacheRead,
+				idx+1, e.Provider, e.Model, e.TokensInput, e.TokensOutput, e.TokensReasoning, e.TokensCacheRead,
 				e.TokensCacheWrite, e.TokensTotal); err != nil {
-				t.Fatalf("insert usage %d: %v", i, err)
+				t.Fatalf("insert usage %d: %v", idx, err)
 			}
 		}
+
 		if err := postgres.Migrate(ctx, dsn); err != nil {
 			t.Fatalf("migrate up: %v", err)
 		}
-		for i, r := range rows {
+
+		for idx, row := range rows {
 			var got app.UsageCost
 			if err := pool.QueryRow(ctx, `SELECT cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd,
-				cache_savings_usd, unpriced_tokens, priced FROM usage_events WHERE id = $1`, i+1).Scan(
+				cache_savings_usd, unpriced_tokens, priced FROM usage_events WHERE id = $1`, idx+1).Scan(
 				&got.InputUSD, &got.OutputUSD, &got.CacheReadUSD, &got.CacheWriteUSD, &got.CacheSavingsUSD,
 				&got.UnpricedTokens, &got.Priced); err != nil {
-				t.Fatalf("read row %d: %v", i, err)
+				t.Fatalf("read row %d: %v", idx, err)
 			}
-			if want := app.PriceUsage(r.ev, r.price, r.ok); got != want {
-				t.Errorf("row %d (%s/%s) backfilled as %+v\nwant                %+v", i, r.ev.Provider, r.ev.Model, got, want)
+
+			if want := app.PriceUsage(row.ev, row.price, row.ok); got != want {
+				t.Errorf("row %d (%s/%s) backfilled as %+v\nwant                %+v", idx, row.ev.Provider, row.ev.Model, got, want)
 			}
 		}
 	})
@@ -351,18 +386,22 @@ func TestMigrateDoesNotLeakPasswordFromMalformedDSN(t *testing.T) {
 		dsn      = "host=h port=notaport user=u password=hun ter2 dbname=d"
 		leftover = "ter2"
 	)
+
 	err := postgres.Migrate(context.Background(), dsn)
 	if err == nil {
 		t.Fatal("Migrate with a malformed DSN returned nil error")
 	}
+
 	if strings.Contains(err.Error(), leftover) {
 		t.Fatalf("error leaks part of the password: %v", err)
 	}
 }
 
-func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table string) bool {
+func tableExists(ctx context.Context, t *testing.T, pool *pgxpool.Pool, table string) bool {
 	t.Helper()
+
 	var exists bool
+
 	err := pool.QueryRow(ctx,
 		`SELECT EXISTS (SELECT 1 FROM information_schema.tables
 		                WHERE table_schema = 'public' AND table_name = $1)`,
@@ -370,12 +409,15 @@ func tableExists(t *testing.T, ctx context.Context, pool *pgxpool.Pool, table st
 	if err != nil {
 		t.Fatalf("query table %q: %v", table, err)
 	}
+
 	return exists
 }
 
-func insertUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
+func insertUser(ctx context.Context, t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
+
 	var id string
+
 	err := pool.QueryRow(ctx,
 		`INSERT INTO users (id, kind, email, role, status, policy_managed_by)
 		 VALUES (gen_random_uuid(), 'human', $1, 'user', 'active', 'local')
@@ -383,6 +425,7 @@ func insertUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool) string {
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
+
 	return id
 }
 
@@ -391,15 +434,18 @@ var emailSeq atomic.Int64
 // uniqueEmail keeps inserts from colliding on the users.email unique constraint.
 func uniqueEmail(t *testing.T) string {
 	t.Helper()
+
 	return fmt.Sprintf("user-%d@example.test", emailSeq.Add(1))
 }
 
 func requirePgError(t *testing.T, err error, code string) {
 	t.Helper()
+
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
 		t.Fatalf("got error %v, want a postgres error with SQLSTATE %s", err, code)
 	}
+
 	if pgErr.Code != code {
 		t.Fatalf("got SQLSTATE %s (%s), want %s", pgErr.Code, pgErr.Message, code)
 	}

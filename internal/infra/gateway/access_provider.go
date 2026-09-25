@@ -7,10 +7,9 @@ import (
 	"strings"
 	"sync"
 
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
 
 // accessProviderType is the key the provider is registered and made exclusive
@@ -47,10 +46,12 @@ func (p *AccessProvider) Authenticate(ctx context.Context, r *http.Request) (*sd
 	if principal, source, ok := principalFrom(ctx); ok {
 		return result(principal, source), nil
 	}
+
 	principal, _, source, err := authenticate(ctx, p.resolver, r)
 	if err != nil {
 		return nil, err
 	}
+
 	return result(principal, source), nil
 }
 
@@ -69,17 +70,21 @@ func authenticate(ctx context.Context, resolver Resolver, r *http.Request) (app.
 		if r.Header.Get("Authorization") != "" {
 			return app.Principal{}, nil, "", sdkaccess.NewInvalidCredentialError()
 		}
+
 		return app.Principal{}, nil, "", sdkaccess.NewNoCredentialsError()
 	}
+
 	for _, c := range candidates {
 		principal, policy, err := resolver.Resolve(ctx, c.secret)
 		if err == nil {
 			return principal, policy, c.source, nil
 		}
+
 		if !errors.Is(err, app.ErrInvalidCredentials) {
 			return app.Principal{}, nil, "", sdkaccess.NewInternalAuthError("", err)
 		}
 	}
+
 	return app.Principal{}, nil, "", sdkaccess.NewInvalidCredentialError()
 }
 
@@ -97,7 +102,7 @@ type candidate struct {
 	source string
 }
 
-// credentialCandidates returns the credentials r presents, in the order and
+// credentialCandidates returns the credentials req presents, in the order and
 // from exactly the places upstream's built-in provider reads them
 // (internal/access/config_access/provider.go Authenticate, v7.3.15):
 // Authorization (the token after "Bearer ", or the whole header when it has no
@@ -106,25 +111,29 @@ type candidate struct {
 // credential that authenticates admits the request; a value repeated in
 // several places is resolved once. The policy gate reads credentials through
 // this function too, so both resolve the same token.
-func credentialCandidates(r *http.Request) []candidate {
+func credentialCandidates(req *http.Request) []candidate {
 	var query map[string][]string
-	if r.URL != nil {
-		query = r.URL.Query()
+	if req.URL != nil {
+		query = req.URL.Query()
 	}
+
 	all := [...]candidate{
-		{bearerToken(r.Header.Get("Authorization")), "authorization"},
-		{r.Header.Get("X-Goog-Api-Key"), "x-goog-api-key"},
-		{r.Header.Get("X-Api-Key"), "x-api-key"},
+		{bearerToken(req.Header.Get("Authorization")), "authorization"},
+		{req.Header.Get("X-Goog-Api-Key"), "x-goog-api-key"},
+		{req.Header.Get("X-Api-Key"), "x-api-key"},
 		{first(query["key"]), "query-key"},
 		{first(query["auth_token"]), "query-auth-token"},
 	}
+
 	out := make([]candidate, 0, len(all))
 	for _, c := range all {
 		if c.secret == "" || seen(out, c.secret) {
 			continue
 		}
+
 		out = append(out, c)
 	}
+
 	return out
 }
 
@@ -132,6 +141,7 @@ func first(values []string) string {
 	if len(values) == 0 {
 		return ""
 	}
+
 	return values[0]
 }
 
@@ -141,6 +151,7 @@ func seen(cs []candidate, secret string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -150,6 +161,7 @@ func bearerToken(header string) string {
 	if !ok || !strings.EqualFold(scheme, "bearer") {
 		return header
 	}
+
 	return strings.TrimSpace(token)
 }
 
@@ -173,6 +185,7 @@ func withPrincipal(ctx context.Context, p app.Principal, source string) context.
 // principalFrom returns what withPrincipal recorded on ctx.
 func principalFrom(ctx context.Context) (app.Principal, string, bool) {
 	v, ok := ctx.Value(principalKey{}).(resolvedPrincipal)
+
 	return v.principal, v.source, ok
 }
 

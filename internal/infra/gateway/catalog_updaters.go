@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+
 	_ "unsafe" // go:linkname
 )
 

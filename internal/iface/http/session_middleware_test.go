@@ -7,12 +7,11 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
 )
 
 func okHandler() http.Handler {
@@ -23,11 +22,12 @@ func okHandler() http.Handler {
 
 func TestRestrictedSessionIsRejectedByFullSessionGuard(t *testing.T) {
 	handler := requireFullSession(okHandler())
-	req := httptest.NewRequest(http.MethodGet, "/api/me/tokens", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me/tokens", http.NoBody)
 	req = req.WithContext(withCaller(req.Context(), caller{session: app.Session{Restricted: true}}))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rec.Code)
 	}
@@ -35,11 +35,12 @@ func TestRestrictedSessionIsRejectedByFullSessionGuard(t *testing.T) {
 
 func TestFullSessionPasses(t *testing.T) {
 	handler := requireFullSession(okHandler())
-	req := httptest.NewRequest(http.MethodGet, "/api/me/tokens", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me/tokens", http.NoBody)
 	req = req.WithContext(withCaller(req.Context(), caller{session: app.Session{Restricted: false}}))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -49,11 +50,12 @@ func TestFullSessionPasses(t *testing.T) {
 // stay reachable, or a restricted session is a locked door with no key.
 func TestRequireSessionAdmitsARestrictedSession(t *testing.T) {
 	handler := requireSession(okHandler())
-	req := httptest.NewRequest(http.MethodPost, "/api/me/password", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/me/password", http.NoBody)
 	req = req.WithContext(withCaller(req.Context(), caller{session: app.Session{Restricted: true}}))
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
@@ -67,7 +69,8 @@ func TestBothGuardsRefuseARequestWithNoSession(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			guard(okHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+			guard(okHandler()).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me", http.NoBody))
+
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("status = %d, want 401", rec.Code)
 			}
@@ -87,8 +90,9 @@ func TestASessionCanOnlyComeFromThisPackage(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/me/tokens", nil).WithContext(ctx)
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/me/tokens", http.NoBody)
 	requireFullSession(okHandler()).ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
@@ -112,16 +116,19 @@ func activeUser(id uuid.UUID) identity.User {
 // never gets as far as loading a user.
 func TestAnExpiredSessionDoesNotAuthenticate(t *testing.T) {
 	const id = "a-session-id"
+
 	sessions := mocks.NewSessionRepo(t)
 	users := mocks.NewUserRepo(t)
+
 	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
 		Return(app.Session{}, app.ErrNotFound)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/me/tokens", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me/tokens", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
+
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", rec.Code)
 	}
@@ -131,31 +138,39 @@ func TestAnExpiredSessionDoesNotAuthenticate(t *testing.T) {
 // passed the cookie value through would make the stored column as good as the cookie.
 func TestLoadSessionResolvesTheCookieByItsHash(t *testing.T) {
 	const id = "a-session-id"
+
 	owner := uuid.New()
 	stored := app.Session{IDHash: app.HashSessionID(id), UserID: owner}
 
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(activeUser(owner), nil)
 
-	var got caller
-	var ok bool
+	var (
+		got caller
+		ok  bool
+	)
+
 	handler := loadSession(resolverOver(users, sessions), &testLog{t: t}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got, ok = callerFrom(r.Context())
+
 		w.WriteHeader(http.StatusOK)
 	}))
 
-	req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	if !ok {
 		t.Fatal("the handler saw no session")
 	}
+
 	if got.session.UserID != owner || got.user.ID != owner {
 		t.Fatalf("caller = %+v, want the owner %v", got, owner)
 	}
+
 	if got.session.ID != "" {
 		t.Fatalf("the loaded session carries the plaintext id %q", got.session.ID)
 	}
@@ -166,6 +181,7 @@ func TestLoadSessionResolvesTheCookieByItsHash(t *testing.T) {
 // person is holding now instead of the next one they open.
 func TestARestrictionIssuedAfterSignInBindsTheLiveSession(t *testing.T) {
 	const id = "a-session-id"
+
 	owner := uuid.New()
 	// The row is exactly what SignIn wrote before the administrator acted: it
 	// carries no restriction, and there is nowhere for one to have been recorded.
@@ -176,11 +192,12 @@ func TestARestrictionIssuedAfterSignInBindsTheLiveSession(t *testing.T) {
 
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(user, nil)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/me/tokens", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me/tokens", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireFullSession(okHandler())).ServeHTTP(rec, req)
 
@@ -195,6 +212,7 @@ func TestARestrictionIssuedAfterSignInBindsTheLiveSession(t *testing.T) {
 // somehow held a cookie is refused too.
 func TestBlockingAUserEndsTheirLiveSession(t *testing.T) {
 	const id = "a-session-id"
+
 	owner := uuid.New()
 	stored := app.Session{IDHash: app.HashSessionID(id), UserID: owner}
 
@@ -203,11 +221,12 @@ func TestBlockingAUserEndsTheirLiveSession(t *testing.T) {
 
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(blocked, nil)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/api/me/password", nil)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me/password", http.NoBody)
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
 
@@ -221,16 +240,18 @@ func TestBlockingAUserEndsTheirLiveSession(t *testing.T) {
 // either one can be the one that is down.
 func TestLoadSessionFailsLoudlyWhenAStoreIsUnreachable(t *testing.T) {
 	const id = "a-session-id"
+
 	owner := uuid.New()
 	down := errors.New("database unreachable")
 
 	t.Run("the session store", func(t *testing.T) {
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, down)
+
 		users := mocks.NewUserRepo(t)
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me", http.NoBody)
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 		loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
 
@@ -241,11 +262,12 @@ func TestLoadSessionFailsLoudlyWhenAStoreIsUnreachable(t *testing.T) {
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().ByHash(mock.Anything, mock.Anything).
 			Return(app.Session{IDHash: app.HashSessionID(id), UserID: owner}, nil)
+
 		users := mocks.NewUserRepo(t)
 		users.EXPECT().ByID(mock.Anything, owner).Return(identity.User{}, down)
 
 		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me", http.NoBody)
 		req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 		loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
 
@@ -260,16 +282,19 @@ func TestLoadSessionPassesAnAnonymousRequestThrough(t *testing.T) {
 	users := mocks.NewUserRepo(t)
 
 	var seen bool
+
 	handler := loadSession(resolverOver(users, sessions), &testLog{t: t}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, seen = callerFrom(r.Context())
+
 		w.WriteHeader(http.StatusOK)
 	}))
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/health", http.NoBody))
 
 	if seen {
 		t.Fatal("a request with no cookie arrived with a session")
 	}
+
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}

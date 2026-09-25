@@ -1,5 +1,3 @@
-// Package app_test, not app: internal/app/mocks imports internal/app, so a test
-// declared `package app` that touches a generated mock is an import cycle.
 package app_test
 
 import (
@@ -12,13 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
 )
 
 // fixedClock pins time so an expiry window is a decision of the test rather than a
@@ -43,10 +40,12 @@ func humanUser(email string) identity.User {
 
 func mustHash(t *testing.T, plain string) string {
 	t.Helper()
+
 	h, err := identity.HashPassword(plain)
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+
 	return h
 }
 
@@ -60,21 +59,27 @@ const (
 // requires the sign-in to charge this one and then clear them all: only a success
 // may, and a success must.
 func clearingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle {
+	t.Helper()
+
 	attempts := mocks.NewLoginAttemptRepo(t)
 	attempts.EXPECT().Failures(mock.Anything, email).Return(testMaxFailures-2, nil, nil)
 	attempts.EXPECT().Charge(mock.Anything, email, testMaxFailures, mock.Anything, mock.Anything).
 		Return(testMaxFailures-1, nil, nil)
 	attempts.EXPECT().Clear(mock.Anything, email).Return(nil)
+
 	return app.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
 }
 
 // countingThrottle stands over an address that has never failed, and requires the
 // sign-in to charge one attempt against it and clear nothing.
 func countingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle {
+	t.Helper()
+
 	attempts := mocks.NewLoginAttemptRepo(t)
 	attempts.EXPECT().Failures(mock.Anything, email).Return(0, nil, nil)
 	attempts.EXPECT().Charge(mock.Anything, email, testMaxFailures, mock.Anything, mock.Anything).
 		Return(1, nil, nil)
+
 	return app.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
 }
 
@@ -94,21 +99,27 @@ func TestSignInReturnsTheSessionIDToTheCallerAndStoresOnlyItsHash(t *testing.T) 
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "a good password"), nil, nil)
 
 	var stored app.Session
+
 	sessions.EXPECT().Create(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, s app.Session) error {
 			stored = s
+
 			return nil
 		})
+
 	var recorded app.AuditEvent
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 			recorded = e
+
 			return nil
 		})
 
 	clock := fixedClock{now: now}
 	svc := app.NewAuthService(users, passwords, clearingThrottle(t, "person@example.com", clock), testHasher(),
 		sessions, audit, clock)
+
 	got, _, err := svc.SignIn(ctx, "person@example.com", "a good password",
 		app.SessionMeta{IP: "198.51.100.7", UserAgent: "a browser"})
 	if err != nil {
@@ -118,18 +129,23 @@ func TestSignInReturnsTheSessionIDToTheCallerAndStoresOnlyItsHash(t *testing.T) 
 	if got.ID == "" {
 		t.Fatal("SignIn returned no session id: the caller has nothing to put in a cookie")
 	}
+
 	if stored.ID != "" {
 		t.Fatalf("the stored session carries the plaintext id %q", stored.ID)
 	}
+
 	if stored.IDHash != app.HashSessionID(got.ID) || got.IDHash != stored.IDHash {
 		t.Fatalf("stored hash = %q, want the SHA-256 of the returned id", stored.IDHash)
 	}
+
 	if stored.UserID != user.ID {
 		t.Fatalf("stored session = %+v, want user %v", stored, user.ID)
 	}
+
 	if stored.IP != "198.51.100.7" || stored.UserAgent != "a browser" {
 		t.Fatalf("stored session lost its metadata: %+v", stored)
 	}
+
 	if !stored.CreatedAt.Equal(now) || !stored.ExpiresAt.Equal(now.Add(app.SessionTTL)) {
 		t.Fatalf("window = %v..%v, want %v..%v",
 			stored.CreatedAt, stored.ExpiresAt, now, now.Add(app.SessionTTL))
@@ -159,29 +175,35 @@ func TestSignInRestrictsTheSessionOfAUserWhoMustChangeTheirPassword(t *testing.T
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "issued by an admin"), &expiry, nil)
 
 	var stored app.Session
+
 	sessions.EXPECT().Create(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, s app.Session) error {
 			stored = s
+
 			return nil
 		})
 
 	clock := fixedClock{now: expiry.Add(-time.Hour)}
 	svc := app.NewAuthService(users, passwords, clearingThrottle(t, "temp@example.com", clock), testHasher(),
 		sessions, nopAudit{}, clock)
+
 	got, _, err := svc.SignIn(context.Background(), "temp@example.com", "issued by an admin", app.SessionMeta{})
 	if err != nil {
 		t.Fatalf("SignIn: %v", err)
 	}
+
 	if stored.Restricted {
 		t.Fatal("the restriction was written to the session row: it is derived from the user, not stored")
 	}
 
 	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(got.ID)).Return(stored, nil)
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
+
 	resolved, _, err := svc.ResolveSession(context.Background(), got.ID)
 	if err != nil {
 		t.Fatalf("ResolveSession: %v", err)
 	}
+
 	if !resolved.Restricted {
 		t.Fatal("a session opened with a temporary password is not restricted")
 	}
@@ -196,7 +218,7 @@ func TestServiceAccountCannotSignInThroughTheService(t *testing.T) {
 	users.EXPECT().ByEmail(mock.Anything, "chat-panel@example.com").Return(service, nil)
 
 	_, _, err := svc.SignIn(context.Background(), "chat-panel@example.com", "whatever", app.SessionMeta{})
-	if err != app.ErrInvalidCredentials {
+	if !isExactly(err, app.ErrInvalidCredentials) {
 		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
 	}
 }
@@ -205,7 +227,7 @@ func TestServiceAccountCannotSignInThroughTheService(t *testing.T) {
 // from a wrong password, and must not be able to learn that an address belongs to a
 // blocked person or to a machine.
 //
-// The comparison is == and not errors.Is on purpose: fmt.Errorf("no such user: %w",
+// The comparison is identity (isExactly) and not errors.Is on purpose: fmt.Errorf("no such user: %w",
 // ErrInvalidCredentials) satisfies errors.Is on every row here while putting the
 // answer back in the message, which is the oracle this test exists to close.
 //
@@ -285,6 +307,7 @@ func TestEveryRefusalIsTheSameAnswer(t *testing.T) {
 			users := mocks.NewUserRepo(t)
 			passwords := mocks.NewPasswordRepo(t)
 			tc.setup(users, passwords)
+
 			attempts := mocks.NewLoginAttemptRepo(t)
 			attempts.EXPECT().Failures(mock.Anything, tc.email).Return(0, nil, nil)
 			attempts.EXPECT().Charge(mock.Anything, tc.email, testMaxFailures, now, now.Add(testLockFor)).
@@ -295,15 +318,18 @@ func TestEveryRefusalIsTheSameAnswer(t *testing.T) {
 			// or wrote a record would nil-panic here rather than pass quietly.
 			svc := app.NewAuthService(users, passwords,
 				app.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
+
 			var err error
 			// "expired-but-correct" is the right password for the expired row; it is
 			// refused because the window closed, not because it is wrong.
 			spent := allocatedBy(func() {
 				_, _, err = svc.SignIn(context.Background(), tc.email, "expired-but-correct", app.SessionMeta{})
 			})
-			if err != app.ErrInvalidCredentials {
+
+			if !isExactly(err, app.ErrInvalidCredentials) {
 				t.Fatalf("err = %v, want exactly app.ErrInvalidCredentials, unwrapped", err)
 			}
+
 			if spent < derivation/2 {
 				t.Fatalf("refusal allocated %d bytes against %d for one derivation: "+
 					"it skipped the password work and answers faster than the others", spent, derivation)
@@ -324,6 +350,7 @@ func TestEveryRefusalIsTheSameAnswer(t *testing.T) {
 // fails it too.
 func TestLockedAddressIsRefusedWithoutAnyPasswordWork(t *testing.T) {
 	const email = "locked@example.com"
+
 	now := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 	until := now.Add(time.Minute)
 
@@ -353,21 +380,26 @@ func TestLockedAddressIsRefusedWithoutAnyPasswordWork(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			attempts := mocks.NewLoginAttemptRepo(t)
 			tc.setup(attempts)
+
 			clock := fixedClock{now: now}
 			svc := app.NewAuthService(mocks.NewUserRepo(t), mocks.NewPasswordRepo(t),
 				app.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
 
 			var err error
+
 			spent := allocatedBy(func() {
 				_, _, err = svc.SignIn(context.Background(), email, "the right password", app.SessionMeta{})
 			})
+
 			var locked *app.LockedOutError
 			if !errors.As(err, &locked) || !errors.Is(err, app.ErrLockedOut) {
 				t.Fatalf("err = %v, want a *app.LockedOutError that is app.ErrLockedOut", err)
 			}
+
 			if !locked.Until.Equal(until) {
 				t.Fatalf("Until = %v, want %v: the client is told when to come back", locked.Until, until)
 			}
+
 			if spent >= derivation/2 {
 				t.Fatalf("locked refusal allocated %d bytes against %d for one derivation: "+
 					"it spent password work on a locked address", spent, derivation)
@@ -384,6 +416,7 @@ func allocatedBy(f func()) uint64 {
 	runtime.ReadMemStats(&before)
 	f()
 	runtime.ReadMemStats(&after)
+
 	return after.TotalAlloc - before.TotalAlloc
 }
 
@@ -422,23 +455,30 @@ func TestSignInSpendsPasswordWorkEvenWhenThereIsNothingToVerify(t *testing.T) {
 	}
 }
 
-func medianDuration(f func()) time.Duration {
+func medianDuration(run func()) time.Duration {
 	const samples = 3
+
 	var got [samples]time.Duration
 	for i := range got {
 		start := time.Now()
-		f()
+
+		run()
+
 		got[i] = time.Since(start)
 	}
+
 	if got[0] > got[1] {
 		got[0], got[1] = got[1], got[0]
 	}
+
 	if got[1] > got[2] {
 		got[1] = got[2]
 	}
+
 	if got[0] > got[1] {
 		got[1] = got[0]
 	}
+
 	return got[1]
 }
 
@@ -462,23 +502,30 @@ func TestChangePasswordClearsTheRestrictionAndTheExpiry(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "temporary"), &expiry, nil)
 
-	var order []string
-	var newHash string
+	var (
+		order   []string
+		newHash string
+	)
+
 	passwords.EXPECT().Set(mock.Anything, user.ID, mock.Anything, (*time.Time)(nil)).
 		RunAndReturn(func(_ context.Context, _ uuid.UUID, hash string, _ *time.Time) error {
 			order = append(order, "set password")
 			newHash = hash
+
 			return nil
 		})
 	users.EXPECT().SetMustChangePassword(mock.Anything, user.ID, false).
 		RunAndReturn(func(_ context.Context, _ uuid.UUID, _ bool) error {
 			order = append(order, "clear flag")
+
 			return nil
 		})
+
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().DeleteByUserExcept(mock.Anything, user.ID, sess.IDHash).
 		RunAndReturn(func(context.Context, uuid.UUID, string) error {
 			order = append(order, "end other sessions")
+
 			return nil
 		})
 
@@ -487,6 +534,7 @@ func TestChangePasswordClearsTheRestrictionAndTheExpiry(t *testing.T) {
 	if err := svc.ChangePassword(context.Background(), sess, "", "one I chose myself"); err != nil {
 		t.Fatalf("ChangePassword: %v", err)
 	}
+
 	if !identity.VerifyPassword(newHash, "one I chose myself") {
 		t.Fatal("the stored hash does not verify the new password")
 	}
@@ -506,13 +554,15 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 	t.Run("wrong current password writes nothing", func(t *testing.T) {
 		users := mocks.NewUserRepo(t)
 		passwords := mocks.NewPasswordRepo(t)
+
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 		// No Set expectation: a write would fail the test.
 
 		svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+
 		err := svc.ChangePassword(context.Background(), sess, "a guess", "something new")
-		if err != app.ErrInvalidCredentials {
+		if !isExactly(err, app.ErrInvalidCredentials) {
 			t.Fatalf("err = %v, want app.ErrInvalidCredentials", err)
 		}
 	})
@@ -520,12 +570,14 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 	t.Run("no current password at all writes nothing", func(t *testing.T) {
 		users := mocks.NewUserRepo(t)
 		passwords := mocks.NewPasswordRepo(t)
+
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 
 		svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+
 		err := svc.ChangePassword(context.Background(), sess, "", "something new")
-		if err != app.ErrInvalidCredentials {
+		if !isExactly(err, app.ErrInvalidCredentials) {
 			t.Fatalf("err = %v, want app.ErrInvalidCredentials", err)
 		}
 	})
@@ -533,6 +585,7 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 	t.Run("the right current password succeeds", func(t *testing.T) {
 		users := mocks.NewUserRepo(t)
 		passwords := mocks.NewPasswordRepo(t)
+
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 		passwords.EXPECT().Set(mock.Anything, user.ID, mock.Anything, (*time.Time)(nil)).Return(nil)
@@ -550,10 +603,12 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 	t.Run("sessions that could not be ended are an error", func(t *testing.T) {
 		users := mocks.NewUserRepo(t)
 		passwords := mocks.NewPasswordRepo(t)
+
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 		passwords.EXPECT().Set(mock.Anything, user.ID, mock.Anything, (*time.Time)(nil)).Return(nil)
 		users.EXPECT().SetMustChangePassword(mock.Anything, user.ID, false).Return(nil)
+
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().DeleteByUserExcept(mock.Anything, user.ID, sess.IDHash).Return(errors.New("connection reset"))
 
@@ -580,9 +635,10 @@ func TestChangePasswordRefusesAnExpiredTemporaryPassword(t *testing.T) {
 	// No Set and no SetMustChangePassword expectation: either call fails the test.
 
 	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, fixedClock{now: now})
+
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "temporary", "a new one")
-	if err != app.ErrInvalidCredentials {
+	if !isExactly(err, app.ErrInvalidCredentials) {
 		t.Fatalf("err = %v, want app.ErrInvalidCredentials", err)
 	}
 }
@@ -596,6 +652,7 @@ func TestChangePasswordRefusesABlockedUser(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 
 	svc := app.NewAuthService(users, nil, nil, testHasher(), nil, nopAudit{}, systemClock{})
+
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID}, "whatever", "a new one")
 	if !errors.Is(err, app.ErrForbidden) {
@@ -613,10 +670,12 @@ func TestChangePasswordRefusesTheEmptyPassword(t *testing.T) {
 
 	users := mocks.NewUserRepo(t)
 	passwords := mocks.NewPasswordRepo(t)
+
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "current"), nil, nil)
 
 	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "", "")
 	if !errors.Is(err, identity.ErrEmptyPassword) {
@@ -634,14 +693,16 @@ func TestChangePasswordDoesNotTrustASessionThatClaimsToBeRestricted(t *testing.T
 
 	users := mocks.NewUserRepo(t)
 	passwords := mocks.NewPasswordRepo(t)
+
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "the current one"), nil, nil)
 	// No Set expectation: a write would fail the test.
 
 	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "", "something new")
-	if err != app.ErrInvalidCredentials {
+	if !isExactly(err, app.ErrInvalidCredentials) {
 		t.Fatalf("err = %v, want app.ErrInvalidCredentials: a caller-supplied "+
 			"restriction was allowed to waive the current-password proof", err)
 	}
@@ -661,29 +722,36 @@ func TestSignInDropsTheSessionWhenTheAuditFails(t *testing.T) {
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "a good password"), nil, nil)
 
 	var created string
+
 	sessions.EXPECT().Create(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, s app.Session) error {
 			created = s.IDHash
+
 			return nil
 		})
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(errors.New("sink down"))
 
 	var deleted string
+
 	sessions.EXPECT().Delete(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, idHash string) error {
 			deleted = idHash
+
 			return nil
 		})
 
 	svc := app.NewAuthService(users, passwords, clearingThrottle(t, user.Email, systemClock{}), testHasher(),
 		sessions, audit, systemClock{})
+
 	got, _, err := svc.SignIn(context.Background(), user.Email, "a good password", app.SessionMeta{})
 	if err == nil {
 		t.Fatal("SignIn succeeded although the sign-in was never recorded")
 	}
+
 	if got.ID != "" {
 		t.Fatalf("SignIn handed back a session id (%q) it had just dropped", got.ID)
 	}
+
 	if deleted != created || created == "" {
 		t.Fatalf("deleted %q, want the session just created (%q)", deleted, created)
 	}
@@ -705,15 +773,20 @@ func TestSignInDropsTheSessionEvenWhenTheClientHungUp(t *testing.T) {
 
 	ctx, hangUp := context.WithCancel(context.Background())
 	defer hangUp()
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).
 		RunAndReturn(func(context.Context, app.AuditEvent) error {
 			hangUp()
+
 			return ctx.Err()
 		})
+
 	var deleteCtx compensationSeen
+
 	sessions.EXPECT().Delete(mock.Anything, mock.Anything).
 		RunAndReturn(func(dctx context.Context, _ string) error {
 			deleteCtx = observe(dctx)
+
 			return dctx.Err()
 		})
 
@@ -722,12 +795,13 @@ func TestSignInDropsTheSessionEvenWhenTheClientHungUp(t *testing.T) {
 	if _, _, err := svc.SignIn(ctx, user.Email, "a good password", app.SessionMeta{}); err == nil {
 		t.Fatal("SignIn succeeded although the sign-in was never recorded")
 	}
+
 	assertCompensationContext(t, deleteCtx)
 }
 
 // A password the owner chooses has a floor, counted in characters, not bytes.
 func TestChangePasswordRefusesAShortPassword(t *testing.T) {
-	for _, c := range []struct {
+	for _, tc := range []struct {
 		name, plain string
 		want        error
 	}{
@@ -736,16 +810,18 @@ func TestChangePasswordRefusesAShortPassword(t *testing.T) {
 		{"multi-byte, one short", strings.Repeat("é", app.MinPasswordLength-1), app.ErrWeakPassword},
 		{"multi-byte at the floor", strings.Repeat("é", app.MinPasswordLength), nil},
 	} {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			user := humanUser("person@example.com")
 			user.MustChangePassword = true
 
 			users := mocks.NewUserRepo(t)
 			passwords := mocks.NewPasswordRepo(t)
+
 			users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 			passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "current"), nil, nil)
 			sessions := mocks.NewSessionRepo(t)
-			if c.want == nil {
+
+			if tc.want == nil {
 				passwords.EXPECT().Set(mock.Anything, user.ID, mock.Anything, (*time.Time)(nil)).Return(nil)
 				users.EXPECT().SetMustChangePassword(mock.Anything, user.ID, false).Return(nil)
 				sessions.EXPECT().DeleteByUserExcept(mock.Anything, user.ID, "").Return(nil)
@@ -753,9 +829,10 @@ func TestChangePasswordRefusesAShortPassword(t *testing.T) {
 			// No Set expectation for the refused case: a write fails the test.
 
 			svc := app.NewAuthService(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
-			err := svc.ChangePassword(context.Background(), app.Session{UserID: user.ID}, "", c.plain)
-			if !errors.Is(err, c.want) {
-				t.Fatalf("err = %v, want %v", err, c.want)
+
+			err := svc.ChangePassword(context.Background(), app.Session{UserID: user.ID}, "", tc.plain)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
 	}
@@ -768,10 +845,14 @@ func TestSignOutDeletesTheSessionAndRecordsIt(t *testing.T) {
 
 	sessions := mocks.NewSessionRepo(t)
 	audit := mocks.NewAuditSink(t)
+
 	sessions.EXPECT().Delete(mock.Anything, sess.IDHash).Return(nil)
+
 	var got app.AuditEvent
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		got = e
+
 		return nil
 	})
 
@@ -779,6 +860,7 @@ func TestSignOutDeletesTheSessionAndRecordsIt(t *testing.T) {
 	if err := svc.SignOut(context.Background(), sess); err != nil {
 		t.Fatalf("SignOut: %v", err)
 	}
+
 	if got.Action != "auth.signout" || got.ActorID != owner || got.IP != "192.0.2.1" {
 		t.Fatalf("audit = %+v, want auth.signout by %s from 192.0.2.1", got, owner)
 	}
@@ -792,6 +874,7 @@ func TestSignOutRecordsNothingWhenTheSessionSurvives(t *testing.T) {
 
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().Delete(mock.Anything, sess.IDHash).Return(down)
+
 	audit := mocks.NewAuditSink(t) // strict: a Record call fails the test
 
 	svc := app.NewAuthService(nil, nil, nil, testHasher(), sessions, audit, systemClock{})
@@ -806,15 +889,20 @@ func TestSignOutEndsTheSessionOfAClientThatHungUp(t *testing.T) {
 	hangUp()
 
 	sessions := mocks.NewSessionRepo(t)
+
 	var deleteCtx compensationSeen
+
 	sessions.EXPECT().Delete(mock.Anything, sess.IDHash).RunAndReturn(func(dctx context.Context, _ string) error {
 		deleteCtx = observe(dctx)
+
 		return dctx.Err()
 	})
+
 	svc := app.NewAuthService(nil, nil, nil, testHasher(), sessions, nopAudit{}, systemClock{})
 	if err := svc.SignOut(ctx, sess); err != nil {
 		t.Fatalf("SignOut on a hung-up request: %v; the session was left open", err)
 	}
+
 	assertCompensationContext(t, deleteCtx)
 }
 
@@ -828,6 +916,7 @@ type compensationSeen struct {
 
 func observe(ctx context.Context) compensationSeen {
 	_, ok := ctx.Deadline()
+
 	return compensationSeen{called: true, err: ctx.Err(), hasDeadline: ok}
 }
 
@@ -836,12 +925,15 @@ func observe(ctx context.Context) compensationSeen {
 // deadline of its own, so a database that hangs cannot hold the compensation forever.
 func assertCompensationContext(t *testing.T, seen compensationSeen) {
 	t.Helper()
+
 	if !seen.called {
 		t.Fatal("the compensating write was never made")
 	}
+
 	if seen.err != nil {
 		t.Fatalf("the compensating write ran on a dead context (%v): the client's hang-up skipped it", seen.err)
 	}
+
 	if !seen.hasDeadline {
 		t.Fatal("the compensating write runs with no deadline: a hung database holds it forever")
 	}

@@ -7,16 +7,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
 )
 
 // TestSettingsAndPriceRepos covers both repositories on one container.
-func TestSettingsAndPriceRepos(t *testing.T) {
+func TestSettingsAndPriceRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
 
@@ -26,20 +25,26 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 			t.Fatalf("before any save: err = %v, want ErrNotFound", err)
 		}
 
-		admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Email: "root@example.com",
-			Role: identity.RoleAdmin, Status: identity.StatusActive, PolicySource: identity.PolicyLocal}
+		admin := identity.User{
+			ID: uuid.New(), Kind: identity.KindHuman, Email: "root@example.com",
+			Role: identity.RoleAdmin, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
+		}
 		if err := postgres.NewUserRepo(pool).Create(ctx, admin); err != nil {
 			t.Fatalf("create admin: %v", err)
 		}
+
 		at := time.Now().UTC().Truncate(time.Microsecond)
+
 		first := "# notes: \"quoted\" and unicode ✓\nproxy-url: http://u:p@proxy.test:3128\nrequest-retry: 2\n"
 		if err := repo.SetUpstreamDocument(ctx, first, admin.ID, at); err != nil {
 			t.Fatalf("set: %v", err)
 		}
+
 		second := "request-retry: 3\n"
 		if err := repo.SetUpstreamDocument(ctx, second, admin.ID, at.Add(time.Second)); err != nil {
 			t.Fatalf("overwrite: %v", err)
 		}
+
 		got, err := repo.UpstreamDocument(ctx)
 		if err != nil || got != second {
 			t.Fatalf("UpstreamDocument = %q, %v; want %q", got, err, second)
@@ -48,14 +53,19 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if err := repo.SetUpstreamDocument(ctx, first, admin.ID, at); err != nil {
 			t.Fatalf("set again: %v", err)
 		}
+
 		if got, _ := repo.UpstreamDocument(ctx); got != first {
 			t.Fatalf("UpstreamDocument = %q, want the document byte for byte", got)
 		}
-		var by uuid.UUID
-		var updated time.Time
+
+		var (
+			by      uuid.UUID
+			updated time.Time
+		)
 		if err := pool.QueryRow(ctx, `SELECT updated_by, updated_at FROM settings WHERE key = 'upstream'`).Scan(&by, &updated); err != nil {
 			t.Fatalf("read row: %v", err)
 		}
+
 		if by != admin.ID || !updated.Equal(at) {
 			t.Fatalf("row updated_by/at = %v/%v, want %v/%v", by, updated, admin.ID, at)
 		}
@@ -68,6 +78,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 
 		sonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
 		gpt := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10}
+
 		opus := app.ModelPrice{Provider: "claude", Model: "claude-opus-5", Input: 15, Output: 75}
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, gpt, opus}, t0); err != nil {
 			t.Fatalf("first replace: %v", err)
@@ -85,6 +96,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
+
 		want := []struct {
 			price app.ModelPrice
 			at    time.Time
@@ -92,14 +104,16 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if len(got) != len(want) {
 			t.Fatalf("List = %+v, want %d rows", got, len(want))
 		}
-		for i, w := range want {
-			g := got[i]
-			if !g.UpdatedAt.Equal(w.at) {
-				t.Errorf("%s/%s updated_at = %v, want %v", g.Provider, g.Model, g.UpdatedAt, w.at)
+
+		for idx, expected := range want {
+			actual := got[idx]
+			if !actual.UpdatedAt.Equal(expected.at) {
+				t.Errorf("%s/%s updated_at = %v, want %v", actual.Provider, actual.Model, actual.UpdatedAt, expected.at)
 			}
-			g.UpdatedAt = time.Time{}
-			if g != w.price {
-				t.Errorf("row %d = %+v, want %+v", i, g, w.price)
+
+			actual.UpdatedAt = time.Time{}
+			if actual != expected.price {
+				t.Errorf("row %d = %+v, want %+v", idx, actual, expected.price)
 			}
 		}
 
@@ -107,18 +121,19 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if err := repo.Replace(ctx, []app.ModelPrice{haiku, haiku}, t1.Add(time.Minute)); err == nil {
 			t.Fatal("Replace accepted a duplicate model")
 		}
+
 		if after, _ := repo.List(ctx); len(after) != 3 {
 			t.Fatalf("a failed replace changed the list: %+v", after)
 		}
 
 		// The schema refuses what the service validates, for writers that skip it.
-		for name, p := range map[string]app.ModelPrice{
+		for name, price := range map[string]app.ModelPrice{
 			"negative": {Provider: "x", Model: "y", Input: -1},
 			"NaN":      {Provider: "x", Model: "y", Output: math.NaN()},
 			"infinite": {Provider: "x", Model: "y", CacheRead: math.Inf(1)},
 			"blank":    {Provider: "", Model: "y"},
 		} {
-			if err := repo.Replace(ctx, []app.ModelPrice{p}, t1); err == nil {
+			if err := repo.Replace(ctx, []app.ModelPrice{price}, t1); err == nil {
 				t.Errorf("%s price accepted", name)
 			}
 		}
@@ -126,6 +141,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if err := repo.Replace(ctx, nil, t1); err != nil {
 			t.Fatalf("empty replace: %v", err)
 		}
+
 		if after, err := repo.List(ctx); err != nil || len(after) != 0 {
 			t.Fatalf("after an empty replace List = %+v, %v; want none", after, err)
 		}
@@ -137,22 +153,31 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		t1 := t0.Add(time.Minute)
 		sonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}
 		gpt := app.ModelPrice{Provider: "chatgpt", Model: "gpt-6", Input: 1.25, Output: 10}
-		first := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"},
-			Fingerprint: "2 https://catalog.example.com/models.json", CheckedAt: t0, ChangedAt: t0}
+
+		first := app.CatalogState{
+			Validators:  app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"},
+			Fingerprint: "2 https://catalog.example.com/models.json", CheckedAt: t0, ChangedAt: t0,
+		}
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, gpt}, first, t0); err != nil {
 			t.Fatalf("first replace: %v", err)
 		}
+
 		cheaper := gpt
 		cheaper.Output = 8
-		second := app.CatalogState{Validators: app.CatalogValidators{ETag: `"v2"`}, Fingerprint: "3 https://catalog.example.com/models.json",
-			CheckedAt: t1, ChangedAt: t1}
+
+		second := app.CatalogState{
+			Validators: app.CatalogValidators{ETag: `"v2"`}, Fingerprint: "3 https://catalog.example.com/models.json",
+			CheckedAt: t1, ChangedAt: t1,
+		}
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, cheaper}, second, t1); err != nil {
 			t.Fatalf("second replace: %v", err)
 		}
+
 		got, err := repo.List(ctx)
 		if err != nil || len(got) != 2 || !got[0].UpdatedAt.Equal(t1) || got[0].Output != 8 || !got[1].UpdatedAt.Equal(t0) {
 			t.Fatalf("List = %+v, %v; want gpt-6 changed at t1 and sonnet kept at t0", got, err)
 		}
+
 		if state, err := repo.State(ctx); err != nil || state != second {
 			t.Fatalf("State = %+v, %v; want %+v", state, err, second)
 		}
@@ -161,18 +186,22 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 		if err := repo.Replace(ctx, []app.ModelPrice{sonnet, sonnet}, first, t1.Add(time.Minute)); err == nil {
 			t.Fatal("Replace accepted a duplicate model")
 		}
+
 		if state, _ := repo.State(ctx); state != second {
 			t.Fatalf("a failed replace changed the state to %+v", state)
 		}
 
 		failed := second
+
 		failed.LastError = "the catalog answered 503"
 		if err := repo.SetState(ctx, failed); err != nil {
 			t.Fatalf("SetState: %v", err)
 		}
+
 		if state, err := repo.State(ctx); err != nil || state != failed {
 			t.Fatalf("State = %+v, %v; want %+v", state, err, failed)
 		}
+
 		if after, _ := repo.List(ctx); len(after) != 2 {
 			t.Fatalf("SetState changed the prices: %+v", after)
 		}

@@ -37,16 +37,22 @@ func main() {
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		if err := boot.Run(context.Background(), boot.Options{Output: stderr, Version: version}); err != nil {
-			fmt.Fprintf(stderr, "gateway: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "gateway: %v\n", err)
+
 			return 1
 		}
+
 		return 0
 	}
+
 	if args[0] != "reset-password" {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
+
 		return 2
 	}
+
 	opts := boot.ResetPasswordOptions{Output: stdout, Warnings: stderr}
+
 	for _, a := range args[1:] {
 		switch {
 		case a == "--unblock":
@@ -54,17 +60,23 @@ func run(args []string, stdout, stderr io.Writer) int {
 		case opts.Email == "" && a != "" && a[0] != '-':
 			opts.Email = a
 		default:
-			fmt.Fprint(stderr, usage)
+			_, _ = fmt.Fprint(stderr, usage)
+
 			return 2
 		}
 	}
+
 	if opts.Email == "" {
-		fmt.Fprint(stderr, usage)
+		_, _ = fmt.Fprint(stderr, usage)
+
 		return 2
 	}
+
 	if err := boot.ResetPassword(context.Background(), opts); err != nil {
-		fmt.Fprintf(stderr, "gateway reset-password: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "gateway reset-password: %v\n", err)
+
 		return 1
 	}
+
 	return 0
 }

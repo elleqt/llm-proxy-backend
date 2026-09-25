@@ -31,6 +31,7 @@ const (
 // restores.
 type PriceEntry struct {
 	ModelPrice
+
 	Source  PriceSource
 	Catalog *ModelPrice
 }
@@ -97,7 +98,8 @@ type Prices struct {
 
 // NewPrices builds the service. source is nil when no catalog is configured.
 func NewPrices(repo PriceRepo, catalog PriceCatalogRepo, source PriceCatalogSource, sink PriceSink,
-	metrics PriceCatalogMetrics, audit AuditSink, clock Clock, log InfoLogger) *Prices {
+	metrics PriceCatalogMetrics, audit AuditSink, clock Clock, log InfoLogger,
+) *Prices {
 	return &Prices{
 		repo: repo, catalog: catalog, source: source, sink: sink, metrics: metrics,
 		audit: audit, clock: clock, log: log, checking: make(chan struct{}, 1),
@@ -111,6 +113,7 @@ func (p *Prices) Load(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("app: load prices: %w", err)
 	}
+
 	var (
 		catalog []ModelPrice
 		state   CatalogState
@@ -119,15 +122,20 @@ func (p *Prices) Load(ctx context.Context) error {
 		if catalog, err = p.catalog.List(ctx); err != nil {
 			return fmt.Errorf("app: load catalog prices: %w", err)
 		}
+
 		if state, err = p.catalog.State(ctx); err != nil {
 			return fmt.Errorf("app: load catalog state: %w", err)
 		}
+
 		p.metrics.SetPriceCatalog(len(catalog), state.CheckedAt)
 	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	p.manual, p.catalogPrices, p.state = manual, catalog, state
 	p.publish()
+
 	return nil
 }
 
@@ -136,8 +144,10 @@ func (p *Prices) Get(_ context.Context, actor identity.User) (PriceList, error) 
 	if err := requireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return p.listLocked(), nil
 }
 
@@ -149,12 +159,14 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 	if err := requireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
+
 	if err := validatePrices(list); err != nil {
 		return PriceList{}, err
 	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	now := p.clock.Now()
 	if err := p.repo.Replace(ctx, list, now); err != nil {
 		return PriceList{}, fmt.Errorf("app: replace prices: %w", err)
@@ -163,10 +175,12 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 	// read-back below must not leave the metrics pricing with the old list.
 	p.manual = slices.Clone(list)
 	p.publish()
+
 	stored, err := p.repo.List(ctx)
 	if err != nil {
 		return PriceList{}, fmt.Errorf("app: prices replaced; read back: %w", err)
 	}
+
 	p.manual = stored
 	if err := p.audit.Record(ctx, AuditEvent{
 		At:      now,
@@ -177,6 +191,7 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 	}); err != nil {
 		return PriceList{}, fmt.Errorf("app: prices.replace applied but not audited: %w", err)
 	}
+
 	return p.listLocked(), nil
 }
 
@@ -187,17 +202,21 @@ func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, e
 	if err := requireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
+
 	if p.source == nil {
 		return PriceList{}, ErrCatalogDisabled
 	}
+
 	res, err := p.check(ctx)
 	if err != nil {
 		return PriceList{}, err
 	}
+
 	detail := map[string]any{"outcome": res.outcome, "models": res.models}
 	if res.failure != "" {
 		detail["error"] = res.failure
 	}
+
 	if err := p.audit.Record(ctx, AuditEvent{
 		At:      p.clock.Now(),
 		ActorID: actor.ID,
@@ -207,8 +226,10 @@ func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, e
 	}); err != nil {
 		return PriceList{}, fmt.Errorf("app: prices.refresh done but not audited: %w", err)
 	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	return p.listLocked(), nil
 }
 
@@ -219,12 +240,15 @@ func (p *Prices) RunCatalog(ctx context.Context, interval time.Duration) {
 	if p.source == nil {
 		return
 	}
+
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
+
 	for {
 		if _, err := p.check(ctx); err != nil && ctx.Err() == nil {
 			p.log.Warn("price catalog check failed", slog.Any("err", err))
 		}
+
 		select {
 		case <-ctx.Done():
 			return
@@ -248,11 +272,13 @@ func (p *Prices) check(ctx context.Context) (checkResult, error) {
 	select {
 	case p.checking <- struct{}{}:
 	case <-ctx.Done():
-		return checkResult{}, ctx.Err()
+		return checkResult{}, fmt.Errorf("app: price catalog check: %w", ctx.Err())
 	}
+
 	defer func() { <-p.checking }()
 
 	p.mu.Lock()
+
 	since := p.state.Validators
 	if p.state.Fingerprint != p.source.Fingerprint() {
 		// Stored by another URL or parser: this one must read the whole catalog.
@@ -264,63 +290,83 @@ func (p *Prices) check(ctx context.Context) (checkResult, error) {
 	if err == nil && !fetched.Unchanged {
 		err = acceptCatalog(fetched.Prices)
 	}
+
 	if err != nil {
 		if ctx.Err() != nil {
 			// Stopped, not failed: a shutdown is not the catalog's fault.
-			return checkResult{}, ctx.Err()
+			return checkResult{}, fmt.Errorf("app: price catalog check: %w", ctx.Err())
 		}
+
 		return p.recordFailure(ctx, err.Error())
 	}
+
 	return p.recordSuccess(ctx, fetched)
 }
+
+// The reasons acceptCatalog refuses a fetched list. Their text is the failure the
+// check records, audits, logs and shows.
+var (
+	errCatalogEmpty        = errors.New("the catalog has no price for any of our providers")
+	errCatalogZero         = errors.New("the catalog prices every model at zero")
+	errCatalogInvalidPrice = errors.New("the catalog carries an invalid price")
+)
 
 // acceptCatalog refuses a fetched list the prices in force must not be replaced
 // with: an empty one, which would unprice every model, one that prices every
 // model at zero, which would zero the cost estimate, or an invalid one.
 func acceptCatalog(prices []ModelPrice) error {
 	if len(prices) == 0 {
-		return errors.New("the catalog has no price for any of our providers")
+		return errCatalogEmpty
 	}
+
 	if !slices.ContainsFunc(prices, func(p ModelPrice) bool { return p.Input > 0 || p.Output > 0 }) {
-		return errors.New("the catalog prices every model at zero")
+		return errCatalogZero
 	}
+
 	if err := validatePrices(prices); err != nil {
-		var ie *InvalidInputError
-		if errors.As(err, &ie) {
-			return fmt.Errorf("the catalog carries an invalid price (%s)", ie.Field)
+		if ie, ok := errors.AsType[*InvalidInputError](err); ok {
+			return fmt.Errorf("%w (%s)", errCatalogInvalidPrice, ie.Field)
 		}
+
 		return err
 	}
+
 	return nil
 }
 
 // maxCatalogError bounds the failure text stored, audited, logged and shown.
 const maxCatalogError = 200
 
-// clip cuts s to at most maxCatalogError bytes, on a rune boundary.
-func clip(s string) string {
-	if len(s) <= maxCatalogError {
-		return s
+// clip cuts text to at most maxCatalogError bytes, on a rune boundary.
+func clip(text string) string {
+	if len(text) <= maxCatalogError {
+		return text
 	}
+
 	cut := maxCatalogError
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
 		cut--
 	}
-	return s[:cut]
+
+	return text[:cut]
 }
 
 func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, error) {
 	why = clip(why)
+
 	p.metrics.ObservePriceCatalogFailure()
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
 	p.state.LastError = why
 	res := checkResult{outcome: catalogFailed, models: len(p.catalogPrices), failure: why}
 	p.log.Warn("price catalog check failed; catalog prices in force are kept",
 		slog.String("reason", why), slog.Int("prices", res.models))
+
 	if err := p.catalog.SetState(ctx, p.state); err != nil {
 		return res, fmt.Errorf("app: record the price catalog failure: %w", err)
 	}
+
 	return res, nil
 }
 
@@ -330,33 +376,44 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 	now := p.clock.Now()
 	p.mu.Lock()
 	state := p.state
+
 	state.CheckedAt, state.LastError = now, ""
 	if !fetched.Unchanged {
 		state.Validators, state.Fingerprint = fetched.Validators, p.source.Fingerprint()
 	}
+
 	changed := !fetched.Unchanged && !sameRates(p.catalogPrices, fetched.Prices)
+
 	var err error
+
 	if changed {
 		state.ChangedAt = now
 		err = p.catalog.Replace(ctx, fetched.Prices, state, now)
 	} else {
 		err = p.catalog.SetState(ctx, state)
 	}
+
 	if err != nil {
 		p.mu.Unlock()
+
 		if ctx.Err() != nil {
 			// Stopped while storing, not failed: nothing was stored.
-			return checkResult{}, ctx.Err()
+			return checkResult{}, fmt.Errorf("app: price catalog check: %w", ctx.Err())
 		}
+
 		p.log.Warn("price catalog: storing the check failed", slog.Any("err", err))
+
 		return p.recordFailure(ctx, "the catalog could not be stored")
 	}
+
 	defer p.mu.Unlock()
+
 	p.state = state
 
 	if !changed {
 		p.metrics.SetPriceCatalog(len(p.catalogPrices), now)
 		p.log.Info("price catalog checked: unchanged", slog.Int("prices", len(p.catalogPrices)))
+
 		return checkResult{outcome: catalogUnchanged, models: len(p.catalogPrices)}, nil
 	}
 	// As in Replace: what was stored goes to the sink before the read-back.
@@ -365,31 +422,37 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 	p.metrics.SetPriceCatalog(len(fetched.Prices), now)
 	p.log.Info("price catalog updated", slog.Int("prices", len(fetched.Prices)))
 	res := checkResult{outcome: catalogChanged, models: len(fetched.Prices)}
+
 	stored, err := p.catalog.List(ctx)
 	if err != nil {
 		return res, fmt.Errorf("app: price catalog stored; read back: %w", err)
 	}
+
 	p.catalogPrices = stored
+
 	return res, nil
 }
 
 // sameRates reports whether two price lists price the same models at the same
 // rates, whatever their order and UpdatedAt.
-func sameRates(a, b []ModelPrice) bool {
-	if len(a) != len(b) {
+func sameRates(left, right []ModelPrice) bool {
+	if len(left) != len(right) {
 		return false
 	}
-	byKey := make(map[priceKey]ModelPrice, len(a))
-	for _, mp := range a {
+
+	byKey := make(map[priceKey]ModelPrice, len(left))
+	for _, mp := range left {
 		mp.UpdatedAt = time.Time{}
 		byKey[priceKey{mp.Provider, mp.Model}] = mp
 	}
-	for _, mp := range b {
+
+	for _, mp := range right {
 		mp.UpdatedAt = time.Time{}
 		if old, ok := byKey[priceKey{mp.Provider, mp.Model}]; !ok || old != mp {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -399,34 +462,42 @@ type priceKey struct{ provider, model string }
 // replacing the catalog's for its model. p.mu must be held.
 func (p *Prices) entriesLocked() []PriceEntry {
 	out := make([]PriceEntry, 0, len(p.catalogPrices)+len(p.manual))
+
 	at := make(map[priceKey]int, len(p.catalogPrices))
 	for _, c := range p.catalogPrices {
 		at[priceKey{c.Provider, c.Model}] = len(out)
 		out = append(out, PriceEntry{ModelPrice: c, Source: PriceSourceCatalog})
 	}
+
 	for _, m := range p.manual {
-		e := PriceEntry{ModelPrice: m, Source: PriceSourceManual}
+		entry := PriceEntry{ModelPrice: m, Source: PriceSourceManual}
 		if i, ok := at[priceKey{m.Provider, m.Model}]; ok {
 			c := out[i].ModelPrice
-			e.Catalog = &c
-			out[i] = e
+			entry.Catalog = &c
+			out[i] = entry
+
 			continue
 		}
-		out = append(out, e)
+
+		out = append(out, entry)
 	}
+
 	slices.SortFunc(out, func(a, b PriceEntry) int {
 		return cmp.Or(strings.Compare(a.Provider, b.Provider), strings.Compare(a.Model, b.Model))
 	})
+
 	return out
 }
 
 // publish hands the effective list to the sink. p.mu must be held.
 func (p *Prices) publish() {
 	entries := p.entriesLocked()
+
 	prices := make([]ModelPrice, len(entries))
 	for i, e := range entries {
 		prices[i] = e.ModelPrice
 	}
+
 	p.sink.SetPrices(prices)
 }
 
@@ -437,19 +508,22 @@ func (p *Prices) listLocked() PriceList {
 		status.CheckedAt, status.ChangedAt = p.state.CheckedAt, p.state.ChangedAt
 		status.Models, status.LastError = len(p.catalogPrices), p.state.LastError
 	}
+
 	return PriceList{Prices: p.entriesLocked(), Catalog: status}
 }
 
 func validatePrices(list []ModelPrice) error {
 	seen := make(map[priceKey]struct{}, len(list))
-	for i, mp := range list {
-		field := func(name string) error { return &InvalidInputError{Field: fmt.Sprintf("[%d].%s", i, name)} }
+	for index, mp := range list {
+		field := func(name string) error { return &InvalidInputError{Field: fmt.Sprintf("[%d].%s", index, name)} }
 		if strings.TrimSpace(mp.Provider) == "" {
 			return field("provider")
 		}
+
 		if strings.TrimSpace(mp.Model) == "" {
 			return field("model")
 		}
+
 		for _, r := range [...]struct {
 			name string
 			v    float64
@@ -458,11 +532,14 @@ func validatePrices(list []ModelPrice) error {
 				return field(r.name)
 			}
 		}
+
 		k := priceKey{mp.Provider, mp.Model}
 		if _, dup := seen[k]; dup {
-			return &InvalidInputError{Field: fmt.Sprintf("[%d]", i)}
+			return &InvalidInputError{Field: fmt.Sprintf("[%d]", index)}
 		}
+
 		seen[k] = struct{}{}
 	}
+
 	return nil
 }

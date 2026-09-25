@@ -8,9 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/elleqt/llm-proxy-backend/internal/config"
+	"github.com/sirupsen/logrus"
 )
 
 // An upstream logrus record reaches the process log as a record of its own:
@@ -21,6 +20,7 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 	std := logrus.StandardLogger()
 	out, formatter, level := std.Out, std.Formatter, std.GetLevel()
 	hooks := std.ReplaceHooks(make(logrus.LevelHooks))
+
 	t.Cleanup(func() {
 		std.SetOutput(out)
 		std.SetFormatter(formatter)
@@ -39,13 +39,16 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("got %d records, want the warning and the info line only:\n%s", len(lines), buf.String())
 	}
+
 	var warn, info map[string]any
 	if err := json.Unmarshal([]byte(lines[0]), &warn); err != nil {
 		t.Fatalf("record %q: %v", lines[0], err)
 	}
+
 	if err := json.Unmarshal([]byte(lines[1]), &info); err != nil {
 		t.Fatalf("record %q: %v", lines[1], err)
 	}
+
 	for k, want := range map[string]any{
 		"level": "WARN", "msg": "quota exceeded", "provider": "claude",
 		"version": "0.1.2", "component": "cliproxyapi",
@@ -54,15 +57,19 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 			t.Errorf("%s = %v, want %v (record %s)", k, warn[k], want, lines[0])
 		}
 	}
+
 	if v, _ := warn["cliproxy_version"].(string); !strings.HasPrefix(v, "v7.") {
 		t.Errorf("cliproxy_version = %q, want the embedded CLIProxyAPI v7 module's version", v)
 	}
+
 	if ts, _ := warn["time"].(string); !strings.HasSuffix(ts, "Z") {
 		t.Errorf("time = %q, want UTC", ts)
 	}
+
 	if _, ok := warn["request_id"]; ok {
 		t.Errorf("the placeholder request_id was kept: %s", lines[0])
 	}
+
 	if info["request_id"] != "a1b2c3d4" {
 		t.Errorf("request_id = %v, want a real id kept", info["request_id"])
 	}
@@ -92,7 +99,7 @@ func TestLogrusLevelsKeepTheirSeverity(t *testing.T) {
 // tree names no release.
 func TestVersionPrecedence(t *testing.T) {
 	vcs := []debug.BuildSetting{{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}}
-	for _, c := range []struct {
+	for _, tc := range []struct {
 		name, injected string
 		bi             *debug.BuildInfo
 		want           string
@@ -106,8 +113,8 @@ func TestVersionPrecedence(t *testing.T) {
 		{"no commit", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, "unknown"},
 		{"no build info", "", nil, "unknown"},
 	} {
-		if got := versionOf(c.injected, c.bi); got != c.want {
-			t.Errorf("%s: versionOf = %q, want %q", c.name, got, c.want)
+		if got := versionOf(tc.injected, tc.bi); got != tc.want {
+			t.Errorf("%s: versionOf = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

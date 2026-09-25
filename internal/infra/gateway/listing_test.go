@@ -10,13 +10,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
 // modelList is one listing format: how to ask for it and how to read the
@@ -34,14 +33,19 @@ type modelList struct {
 func arrayNames(key, field string, decode func(string) string) func(*testing.T, string) []string {
 	return func(t *testing.T, body string) []string {
 		t.Helper()
+
 		list := gjson.Get(body, key)
 		if !list.IsArray() {
 			t.Fatalf("response %s has no %q array", body, key)
 		}
-		var names []string
-		for _, entry := range list.Array() {
+
+		entries := list.Array()
+
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
 			names = append(names, decode(entry.Get(field).String()))
 		}
+
 		return names
 	}
 }
@@ -62,23 +66,28 @@ var modelLists = []modelList{
 // and body.
 func (r *running) getAs(t *testing.T, path string, header http.Header) (int, string) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, r.baseURL+path, nil)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, r.baseURL+path, http.NoBody)
 	if err != nil {
 		t.Fatalf("build GET %s: %v", path, err)
 	}
-	for k, v := range header {
-		req.Header[k] = v
-	}
+
+	maps.Copy(req.Header, header)
+
 	req.Header.Set("Authorization", "Bearer "+wireSecret)
+
 	resp, err := noRedirects.Do(req)
 	if err != nil {
 		t.Fatalf("GET %s: %v", path, err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read GET %s: %v", path, err)
 	}
+
 	return resp.StatusCode, string(body)
 }
 
@@ -88,7 +97,7 @@ func (r *running) getAs(t *testing.T, path string, header http.Header) (int, str
 // empty list.
 func TestListingsShowOnlyWhatThePolicyAdmits(t *testing.T) {
 	policy := &switchableResolver{}
-	r := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
 
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	claudeOnly, codexOnly, shared := "list-claude-"+seq, "list-codex-"+seq, "list-shared-"+seq
@@ -106,24 +115,32 @@ func TestListingsShowOnlyWhatThePolicyAdmits(t *testing.T) {
 		{nil, nil},
 	} {
 		policy.set(tc.rules...)
+
 		for _, list := range modelLists {
-			code, body := r.getAs(t, list.path, list.header)
+			code, body := srv.getAs(t, list.path, list.header)
 			if code != http.StatusOK {
 				t.Fatalf("%s list for %v = %d %s, want 200", list.name, tc.rules, code, body)
 			}
+
 			names := list.names(t, body)
+
 			var got []string
+
 			for _, n := range names {
 				if slices.Contains(ours, n) {
 					got = append(got, n)
 				}
 			}
+
 			slices.Sort(got)
+
 			want := slices.Clone(tc.want)
 			slices.Sort(want)
+
 			if !slices.Equal(got, want) {
 				t.Errorf("%s list for policy %v shows %v of this test's models, want %v", list.name, tc.rules, got, want)
 			}
+
 			if tc.rules == nil && len(names) != 0 {
 				t.Errorf("%s list for an empty policy = %v, want none", list.name, names)
 			}
@@ -136,7 +153,7 @@ func TestListingsShowOnlyWhatThePolicyAdmits(t *testing.T) {
 // see, and empty when there are none — never a model the filter removed.
 func TestAnthropicListingBoundsFollowTheFilter(t *testing.T) {
 	policy := &switchableResolver{}
-	r := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	registerClient(t, "bounds-client-allowed-"+seq, "claude", "bounds-a-"+seq, "bounds-b-"+seq)
 	registerClient(t, "bounds-client-denied-"+seq, "codex", "bounds-denied-"+seq)
@@ -146,16 +163,20 @@ func TestAnthropicListingBoundsFollowTheFilter(t *testing.T) {
 		want  int
 	}{{[]string{"claude:bounds-*"}, 2}, {nil, 0}} {
 		policy.set(tc.rules...)
+
 		for _, header := range []http.Header{{"Anthropic-Version": {"2023-06-01"}}, {"User-Agent": {"claude-cli/2.0"}}} {
-			_, body := r.getAs(t, "/v1/models", header)
+			_, body := srv.getAs(t, "/v1/models", header)
+
 			ids := gjson.Get(body, "data.#.id").Array()
 			if len(ids) != tc.want {
 				t.Fatalf("Anthropic list for %v = %s, want %d models", tc.rules, body, tc.want)
 			}
+
 			first, last := "", ""
 			if len(ids) > 0 {
 				first, last = ids[0].String(), ids[len(ids)-1].String()
 			}
+
 			if got := [2]string{gjson.Get(body, "first_id").String(), gjson.Get(body, "last_id").String()}; got != [2]string{first, last} {
 				t.Errorf("Anthropic list for %v has first_id, last_id %q, want %q", tc.rules, got, [2]string{first, last})
 			}
@@ -169,24 +190,28 @@ func TestAnthropicListingBoundsFollowTheFilter(t *testing.T) {
 // registered the way Gemini models are, named "models/<id>".
 func TestSingleGeminiModelIsHiddenLikeAnUnknownOne(t *testing.T) {
 	policy := &switchableResolver{}
-	r := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	model := "single-" + seq
 	cliproxy.GlobalModelRegistry().RegisterClient("single-client-"+seq, "gemini",
 		[]*cliproxy.ModelInfo{{ID: model, Name: "models/" + model}})
 	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient("single-client-" + seq) })
+
 	paths := []string{"/v1beta/models/" + model, "/v1beta/models/models/" + model}
 
 	policy.set("gemini:*")
+
 	for _, path := range paths {
-		if code, body := r.getAs(t, path, nil); code != http.StatusOK || gjson.Get(body, "name").String() != "models/"+model {
+		if code, body := srv.getAs(t, path, nil); code != http.StatusOK || gjson.Get(body, "name").String() != "models/"+model {
 			t.Fatalf("GET %s allowed = %d %s, want 200 naming it", path, code, body)
 		}
 	}
+
 	policy.set("claude:*")
-	unknownCode, unknownBody := r.getAs(t, "/v1beta/models/no-such-model-"+seq, nil)
+
+	unknownCode, unknownBody := srv.getAs(t, "/v1beta/models/no-such-model-"+seq, nil)
 	for _, path := range paths {
-		code, body := r.getAs(t, path, nil)
+		code, body := srv.getAs(t, path, nil)
 		if code != http.StatusNotFound || code != unknownCode || body != unknownBody {
 			t.Fatalf("GET %s denied = %d %s, want what an unknown model gets: %d %s", path, code, body, unknownCode, unknownBody)
 		}
@@ -199,7 +224,9 @@ func TestSingleGeminiModelIsHiddenLikeAnUnknownOne(t *testing.T) {
 // none of what the handler wrote reaches the client.
 func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 	catalog := fixedCatalog(map[string][]string{"secret-model": {"chatgpt"}})
+
 	const unavailable = `{"error":{"message":"model list unavailable","type":"server_error"}}`
+
 	for _, tc := range []struct {
 		what, path string
 		write      func(c *gin.Context)
@@ -225,10 +252,12 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 	} {
 		engine := gateEngine(staticResolver(gateSecret, gatePrincipal, "*:*"), catalog)
 		engine.GET(strings.TrimSuffix(tc.path, "/"), tc.write)
-		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, tc.path, http.NoBody)
 		req.Header.Set("Authorization", "Bearer "+gateSecret)
+
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, req)
+
 		if rec.Code != http.StatusBadGateway || rec.Body.String() != unavailable {
 			t.Errorf("%s = %d %.200s, want 502 %s", tc.what, rec.Code, rec.Body, unavailable)
 		}
@@ -239,14 +268,16 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 // allowed one of them is listed that vendor's model and not the other's, nor
 // the model both serve.
 func TestListingThroughTheWire(t *testing.T) {
-	v := startVendorPair(t)
-	code, body := v.getAs(t, "/v1/models", nil)
+	pair := startVendorPair(t)
+
+	code, body := pair.getAs(t, "/v1/models", nil)
 	if code != http.StatusOK {
 		t.Fatalf("GET /v1/models = %d %s", code, body)
 	}
+
 	ids := arrayNames("data", "id", same)(t, body)
-	if !slices.Contains(ids, v.allowedAlias) || slices.Contains(ids, v.otherAlias) || slices.Contains(ids, v.sharedAlias) {
-		t.Fatalf("GET /v1/models = %v, want %s and neither %s nor %s", ids, v.allowedAlias, v.otherAlias, v.sharedAlias)
+	if !slices.Contains(ids, pair.allowedAlias) || slices.Contains(ids, pair.otherAlias) || slices.Contains(ids, pair.sharedAlias) {
+		t.Fatalf("GET /v1/models = %v, want %s and neither %s nor %s", ids, pair.allowedAlias, pair.otherAlias, pair.sharedAlias)
 	}
 }
 
@@ -259,8 +290,8 @@ func TestListingThroughTheWire(t *testing.T) {
 // its own providers instead of the gate's routing would disagree.
 func TestCabinetListsWhatTheListingLists(t *testing.T) {
 	policy := &switchableResolver{}
-	r := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
-	cabinet := app.NewModelsService(r.gateway.Catalog())
+	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	cabinet := app.NewModelsService(srv.gateway.Catalog())
 
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	claudeOnly, codexOnly, shared := "cab-claude-"+seq, "cab-codex-"+seq, "cab-shared-"+seq
@@ -276,21 +307,27 @@ func TestCabinetListsWhatTheListingLists(t *testing.T) {
 		{[]string{"claude:*"}, map[string][]string{"claude": {claudeOnly, think}, "chatgpt": {thinkHigh}}},
 		{[]string{"chatgpt:*"}, map[string][]string{"chatgpt": {codexOnly}}},
 		{[]string{"claude:*", "chatgpt:cab-*"}, map[string][]string{
-			"claude": {claudeOnly, shared, think}, "chatgpt": {codexOnly, shared, thinkHigh}}},
+			"claude": {claudeOnly, shared, think}, "chatgpt": {codexOnly, shared, thinkHigh},
+		}},
 		{nil, map[string][]string{}},
 	} {
 		policy.set(tc.rules...)
-		code, body := r.getAs(t, "/v1/models", nil)
+
+		code, body := srv.getAs(t, "/v1/models", nil)
 		if code != http.StatusOK {
 			t.Fatalf("GET /v1/models for %v = %d %s", tc.rules, code, body)
 		}
+
 		listed := arrayNames("data", "id", same)(t, body)
 		slices.Sort(listed)
 		listed = slices.Compact(listed)
 
 		providers := cabinet.Allowed(identity.User{Policy: mustPolicy(tc.rules...)})
+
 		var cabinetModels []string
+
 		ours := map[string][]string{}
+
 		for _, p := range providers {
 			cabinetModels = append(cabinetModels, p.Models...)
 			for _, m := range p.Models {
@@ -299,12 +336,14 @@ func TestCabinetListsWhatTheListingLists(t *testing.T) {
 				}
 			}
 		}
+
 		slices.Sort(cabinetModels)
 		cabinetModels = slices.Compact(cabinetModels)
 
 		if !slices.Equal(cabinetModels, listed) {
 			t.Errorf("policy %v: the cabinet lists %v, GET /v1/models lists %v", tc.rules, cabinetModels, listed)
 		}
+
 		if !maps.EqualFunc(ours, tc.want, slices.Equal) {
 			t.Errorf("policy %v: the cabinet lists this test's models as %v, want %v", tc.rules, ours, tc.want)
 		}

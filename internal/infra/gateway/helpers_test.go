@@ -6,11 +6,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // The tests in this package must stay serial: none may call t.Parallel().
@@ -30,6 +29,7 @@ func gateEngine(resolver Resolver, catalog access.Catalog) *gin.Engine {
 	engine.Use(func(c *gin.Context) {
 		c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
 	}, policyGate(resolver, catalog, nil, nil))
+
 	return engine
 }
 
@@ -54,20 +54,24 @@ func mustPolicy(rules ...string) access.Policy {
 		if err != nil {
 			panic(err)
 		}
+
 		policy = append(policy, rule)
 	}
+
 	return policy
 }
 
-// staticResolver accepts exactly secret, as p whose owner's policy is rules,
+// staticResolver accepts exactly secret, as principal whose owner's policy is rules,
 // and refuses everything else the way app.TokenResolver refuses.
-func staticResolver(secret string, p app.Principal, rules ...string) resolverFunc {
+func staticResolver(secret string, principal app.Principal, rules ...string) resolverFunc {
 	policy := mustPolicy(rules...)
+
 	return func(_ context.Context, presented string) (app.Principal, access.Policy, error) {
 		if presented != secret {
 			return app.Principal{}, nil, app.ErrInvalidCredentials
 		}
-		return p, policy, nil
+
+		return principal, policy, nil
 	}
 }
 
@@ -78,17 +82,19 @@ type switchableResolver struct {
 	rules []string
 }
 
-func (r *switchableResolver) set(rules ...string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.rules = rules
-}
-
 func (r *switchableResolver) Resolve(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
 	r.mu.Lock()
 	rules := r.rules
 	r.mu.Unlock()
+
 	return staticResolver(wireSecret, wirePrincipal, rules...)(ctx, secret)
+}
+
+func (r *switchableResolver) set(rules ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.rules = rules
 }
 
 // wireSecret is the one API token the gateways under test accept, as

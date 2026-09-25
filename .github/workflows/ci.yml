@@ -39,6 +39,28 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.build.yml config -q
           docker compose -f docker-compose.minimal.yml -f docker-compose.build.yml config -q
 
+  # New issues only: a later config or version bump never blocks on old code.
+  # Tag pushes are skipped, they have no meaningful diff base.
+  lint:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: --new-from-rev needs the merge base.
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Lint (new issues only)
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            make lint LINT_FLAGS="--new-from-rev=origin/${{ github.base_ref }}"
+          else
+            # push to main: main accepts only squash merges, so HEAD~1 is the previous tip.
+            make lint LINT_FLAGS="--new-from-rev=HEAD~1"
+          fi
+
   # Pull requests: build both platforms, never log in, never push.
   image-check:
     if: github.event_name == 'pull_request'

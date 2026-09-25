@@ -7,14 +7,13 @@ import (
 	"sync"
 	"testing"
 
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/mock"
 )
 
 // observed is one refusal a recordingObserver was told of.
@@ -34,18 +33,21 @@ type recordingObserver struct {
 func (o *recordingObserver) AuthFailed(reason string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.all = append(o.all, observed{authFailed: reason})
 }
 
 func (o *recordingObserver) Denied(owner, model string, reason DenyReason) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.all = append(o.all, observed{owner: owner, model: model, reason: reason, denied: true})
 }
 
 func (o *recordingObserver) seen() []observed {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	return append([]observed(nil), o.all...)
 }
 
@@ -67,43 +69,46 @@ func TestGateReportsEveryRefusal(t *testing.T) {
 	tokens.EXPECT().ByHash(mock.Anything, credentials.HashSecret(wireSecret)).Return(token, nil).Times(2)
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil).Times(2)
 	tokens.EXPECT().ByHash(mock.Anything, credentials.HashSecret("sk-not-a-token")).Return(credentials.Token{}, app.ErrNotFound).Once()
-	w := startOnTheWireWith(t, &faketest.Vendor{Payload: []byte(`{}`)}, Params{
+	wire := startOnTheWireWith(t, &faketest.Vendor{Payload: []byte(`{}`)}, Params{
 		Config:   &cliproxyconfig.Config{},
 		Resolver: app.NewTokenResolver(users, tokens),
 		Observer: observer,
 	})
 
-	for _, c := range []struct {
+	for _, tc := range []struct {
 		method, path, key, body string
 		want                    int
 	}{
 		{http.MethodGet, "/v1/models", "", "", http.StatusUnauthorized},
 		{http.MethodGet, "/v1/models", "sk-not-a-token", "", http.StatusUnauthorized},
-		{http.MethodPost, "/v1/chat/completions", wireSecret, `{"model":"` + w.alias + `","messages":[]}`, http.StatusForbidden},
+		{http.MethodPost, "/v1/chat/completions", wireSecret, `{"model":"` + wire.alias + `","messages":[]}`, http.StatusForbidden},
 		{http.MethodPost, "/v1/chat/completions", wireSecret, `{"model":"Client-Invented-Model","messages":[]}`, http.StatusForbidden},
 		{http.MethodGet, "/v1/ws", wireSecret, "", http.StatusNotFound},
 	} {
-		req, err := http.NewRequest(c.method, w.baseURL+c.path, strings.NewReader(c.body))
+		req, err := http.NewRequestWithContext(t.Context(), tc.method, wire.baseURL+tc.path, strings.NewReader(tc.body))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.key != "" {
-			req.Header.Set("Authorization", "Bearer "+c.key)
+
+		if tc.key != "" {
+			req.Header.Set("Authorization", "Bearer "+tc.key)
 		}
+
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
-			t.Fatalf("%s %s: %v", c.method, c.path, err)
+			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
 		}
+
 		_ = resp.Body.Close()
-		if resp.StatusCode != c.want {
-			t.Fatalf("%s %s with key %q = %d, want %d", c.method, c.path, c.key, resp.StatusCode, c.want)
+		if resp.StatusCode != tc.want {
+			t.Fatalf("%s %s with key %q = %d, want %d", tc.method, tc.path, tc.key, resp.StatusCode, tc.want)
 		}
 	}
 
 	want := []observed{
 		{authFailed: AuthMissing},
 		{authFailed: AuthInvalid},
-		{owner: "alice@example.com", model: w.alias, reason: DenyModelNotAllowed, denied: true},
+		{owner: "alice@example.com", model: wire.alias, reason: DenyModelNotAllowed, denied: true},
 		{owner: "alice@example.com", model: "Client-Invented-Model", reason: DenyUnknownModel, denied: true},
 		{reason: DenyRouteNotAllowed, denied: true},
 	}

@@ -7,9 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
 )
 
 // temporaryPasswordLen is the number of random bytes behind every password this
@@ -23,8 +22,9 @@ const temporaryPasswordLen = 24
 func newTemporaryPassword() (string, error) {
 	buf := make([]byte, temporaryPasswordLen)
 	if _, err := rand.Read(buf); err != nil {
-		return "", err
+		return "", fmt.Errorf("app: read temporary password: %w", err)
 	}
+
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
@@ -50,10 +50,12 @@ func Bootstrap(ctx context.Context, users UserRepo, passwords PasswordRepo, hash
 	if email == "" {
 		return "", nil
 	}
+
 	exists, err := users.AdminExists(ctx)
 	if err != nil {
 		return "", fmt.Errorf("app: bootstrap: %w", err)
 	}
+
 	if exists {
 		return resumeBootstrap(ctx, users, passwords, hasher, email)
 	}
@@ -71,29 +73,32 @@ func Bootstrap(ctx context.Context, users UserRepo, passwords PasswordRepo, hash
 	if err := users.Create(ctx, admin); err != nil {
 		return "", fmt.Errorf("app: bootstrap administrator: %w", err)
 	}
+
 	return issueBootstrapPassword(ctx, passwords, hasher, admin.ID)
 }
 
 // resumeBootstrap issues a password to a bootstrap administrator whose password
 // never landed, and does nothing for anyone else.
 func resumeBootstrap(ctx context.Context, users UserRepo, passwords PasswordRepo, hasher *PasswordHasher, email string) (string, error) {
-	u, err := users.ByEmail(ctx, email)
+	user, err := users.ByEmail(ctx, email)
 	switch {
 	case errors.Is(err, ErrNotFound):
 		return "", nil
 	case err != nil:
 		return "", fmt.Errorf("app: bootstrap: %w", err)
-	case u.Role != identity.RoleAdmin || !u.MustChangePassword:
+	case user.Role != identity.RoleAdmin || !user.MustChangePassword:
 		return "", nil
 	}
-	_, _, err = passwords.Get(ctx, u.ID)
+
+	_, _, err = passwords.Get(ctx, user.ID)
 	switch {
 	case err == nil:
 		return "", nil
 	case !errors.Is(err, ErrNotFound):
 		return "", fmt.Errorf("app: bootstrap: %w", err)
 	}
-	return issueBootstrapPassword(ctx, passwords, hasher, u.ID)
+
+	return issueBootstrapPassword(ctx, passwords, hasher, user.ID)
 }
 
 // issueBootstrapPassword stores a fresh password for id and returns its plaintext.
@@ -105,12 +110,15 @@ func issueBootstrapPassword(ctx context.Context, passwords PasswordRepo, hasher 
 	if err != nil {
 		return "", fmt.Errorf("app: bootstrap password: %w", err)
 	}
+
 	hash, err := hasher.Hash(ctx, secret)
 	if err != nil {
 		return "", fmt.Errorf("app: bootstrap password: %w", err)
 	}
+
 	if err := passwords.Set(ctx, id, hash, nil); err != nil {
 		return "", fmt.Errorf("app: bootstrap password: %w", err)
 	}
+
 	return secret, nil
 }

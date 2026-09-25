@@ -1,6 +1,7 @@
 package http
 
 import (
+	"errors"
 	"log/slog"
 	"mime"
 	"net"
@@ -24,31 +25,35 @@ const maxUserAgentBytes = 512
 // connection, and logs it. http.ErrAbortHandler is re-raised: it is the standard
 // library's way of aborting a response on purpose.
 func recoverPanics(log app.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		defer func() {
-			if v := recover(); v != nil {
-				if v == http.ErrAbortHandler {
-					panic(v)
+			if recovered := recover(); recovered != nil {
+				if err, ok := recovered.(error); ok && errors.Is(err, http.ErrAbortHandler) {
+					panic(recovered)
 				}
+
 				log.Warn("panic serving request",
-					slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("panic", v))
-				writeError(w, http.StatusInternalServerError, codeInternal, "internal error")
+					slog.String("method", req.Method), slog.String("path", req.URL.Path), slog.Any("panic", recovered))
+				writeError(rw, http.StatusInternalServerError, codeInternal, "internal error")
 			}
 		}()
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	})
 }
 
 // limitBody refuses a body declared too large up front and caps one that is not
 // declared, so decodeJSON sees the overrun as an *http.MaxBytesError.
 func limitBody(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.ContentLength > maxBodyBytes {
-			writeError(w, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "request body too large")
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.ContentLength > maxBodyBytes {
+			writeError(rw, http.StatusRequestEntityTooLarge, codePayloadTooLarge, "request body too large")
+
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-		next.ServeHTTP(w, r)
+
+		req.Body = http.MaxBytesReader(rw, req.Body, maxBodyBytes)
+		next.ServeHTTP(rw, req)
 	})
 }
 
@@ -62,29 +67,33 @@ func limitBody(next http.Handler) http.Handler {
 // reaches a handler, and the SameSite=Lax session cookie keeps a cross-site fetch
 // that could set the header from being authenticated.
 func requireJSON(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		switch req.Method {
 		case http.MethodPost, http.MethodPut, http.MethodPatch:
-			mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			mt, _, err := mime.ParseMediaType(req.Header.Get("Content-Type"))
 			if err != nil || mt != "application/json" {
-				writeError(w, http.StatusUnsupportedMediaType, codeUnsupportedMediaType,
+				writeError(rw, http.StatusUnsupportedMediaType, codeUnsupportedMediaType,
 					"a POST, PUT or PATCH must send Content-Type: application/json")
+
 				return
 			}
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	})
 }
 
 // rateLimited admits a request only while its client's bucket in l has a token, and
 // hands a refused one to refuse with the time until the next token.
 func rateLimited(l *limiter, refuse func(http.ResponseWriter, *http.Request, time.Duration), next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if ok, wait := l.allow(rateKey(clientIP(r))); !ok {
-			refuse(w, r, wait)
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if ok, wait := l.allow(rateKey(clientIP(req))); !ok {
+			refuse(rw, req, wait)
+
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	})
 }
 
@@ -108,10 +117,12 @@ func rateKey(ip string) string {
 	if err != nil || !a.Is6() {
 		return ip
 	}
+
 	p, err := a.Prefix(64)
 	if err != nil {
 		return ip
 	}
+
 	return p.String()
 }
 
@@ -127,23 +138,26 @@ func rateKey(ip string) string {
 // the one reason the header is trusted here; exposing this listener to clients
 // directly would let each of them pick their own rate-limit key. Without the
 // header, or with one that is not an address, the connection's peer is the client.
-func clientIP(r *http.Request) string {
-	if a, err := netip.ParseAddr(strings.TrimSpace(r.Header.Get("X-Real-IP"))); err == nil {
+func clientIP(req *http.Request) string {
+	if a, err := netip.ParseAddr(strings.TrimSpace(req.Header.Get("X-Real-IP"))); err == nil {
 		return a.Unmap().String()
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return req.RemoteAddr
 	}
+
 	return host
 }
 
 // sessionMeta is what a sign-in records about where it came from. The User-Agent is
 // bounded and made valid UTF-8: it is client-chosen bytes bound for a text column.
-func sessionMeta(r *http.Request) app.SessionMeta {
-	ua := r.UserAgent()
+func sessionMeta(req *http.Request) app.SessionMeta {
+	ua := req.UserAgent()
 	if len(ua) > maxUserAgentBytes {
 		ua = ua[:maxUserAgentBytes]
 	}
-	return app.SessionMeta{IP: clientIP(r), UserAgent: strings.ToValidUTF8(ua, "")}
+
+	return app.SessionMeta{IP: clientIP(req), UserAgent: strings.ToValidUTF8(ua, "")}
 }

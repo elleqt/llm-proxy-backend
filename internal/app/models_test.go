@@ -16,12 +16,15 @@ func (c fakeCatalog) Models() map[string][]string { return c }
 
 func (c fakeCatalog) ProvidersFor(model string) []string {
 	var out []string
+
 	for provider, models := range c {
 		if slices.Contains(models, model) {
 			out = append(out, provider)
 		}
 	}
+
 	slices.Sort(out)
+
 	return out
 }
 

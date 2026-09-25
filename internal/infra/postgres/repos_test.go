@@ -6,30 +6,31 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // TestSupportingRepos covers the four smaller repositories on a single container.
 // They are grouped because none of them needs a database to itself and each pool
 // costs roughly two seconds.
-func TestSupportingRepos(t *testing.T) {
+func TestSupportingRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
 	users := postgres.NewUserRepo(pool)
 
 	newUser := func(t *testing.T, name string) uuid.UUID {
 		t.Helper()
+
 		u := identity.NewService(uuid.New(), name, access.Policy{})
 		if err := users.Create(ctx, u); err != nil {
 			t.Fatalf("create user: %v", err)
 		}
+
 		return u.ID
 	}
 
@@ -47,10 +48,12 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Set(ctx, id, "hash-one", &expiry); err != nil {
 			t.Fatalf("Set: %v", err)
 		}
+
 		hash, gotExpiry, err := repo.Get(ctx, id)
 		if err != nil {
 			t.Fatalf("Get: %v", err)
 		}
+
 		if hash != "hash-one" || gotExpiry == nil || !gotExpiry.Equal(expiry) {
 			t.Fatalf("Get = %q / %v, want %q / %v", hash, gotExpiry, "hash-one", expiry)
 		}
@@ -60,10 +63,12 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Set(ctx, id, "hash-two", nil); err != nil {
 			t.Fatalf("Set again: %v", err)
 		}
+
 		hash, gotExpiry, err = repo.Get(ctx, id)
 		if err != nil {
 			t.Fatalf("Get after replace: %v", err)
 		}
+
 		if hash != "hash-two" || gotExpiry != nil {
 			t.Fatalf("Get = %q / %v, want %q / nil", hash, gotExpiry, "hash-two")
 		}
@@ -89,9 +94,11 @@ func TestSupportingRepos(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ByHash: %v", err)
 		}
+
 		if got.UserID != id || got.IP != live.IP || got.UserAgent != live.UserAgent {
 			t.Fatalf("ByHash = %+v, want %+v", got, live)
 		}
+
 		if !got.CreatedAt.Equal(live.CreatedAt) || !got.ExpiresAt.Equal(live.ExpiresAt) {
 			t.Fatalf("window = %v..%v, want %v..%v",
 				got.CreatedAt, got.ExpiresAt, live.CreatedAt, live.ExpiresAt)
@@ -101,6 +108,7 @@ func TestSupportingRepos(t *testing.T) {
 		if got.ID != "" {
 			t.Fatalf("ByHash returned a plaintext session id %q", got.ID)
 		}
+
 		if got.Restricted {
 			t.Fatal("ByHash reported a restriction: the table has no column for one")
 		}
@@ -122,6 +130,7 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Create(ctx, expired); err != nil {
 			t.Fatalf("Create expired: %v", err)
 		}
+
 		if _, err := repo.ByHash(ctx, expired.IDHash); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("ByHash expired: err = %v, want app.ErrNotFound", err)
 		}
@@ -137,10 +146,12 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Create(ctx, marked); err != nil {
 			t.Fatalf("Create marked: %v", err)
 		}
+
 		back, err := repo.ByHash(ctx, marked.IDHash)
 		if err != nil {
 			t.Fatalf("ByHash marked: %v", err)
 		}
+
 		if back.Restricted {
 			t.Fatal("a restriction survived a round trip through the store")
 		}
@@ -148,6 +159,7 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Delete(ctx, live.IDHash); err != nil {
 			t.Fatalf("Delete: %v", err)
 		}
+
 		if _, err := repo.ByHash(ctx, live.IDHash); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("ByHash after Delete: err = %v, want app.ErrNotFound", err)
 		}
@@ -161,18 +173,22 @@ func TestSupportingRepos(t *testing.T) {
 	t.Run("Identities", func(t *testing.T) {
 		repo := postgres.NewIdentityRepo(pool)
 		id := newUser(t, "federated-person")
+
 		const issuer, subject = "issuer-a", "subject-1"
 
 		if _, err := repo.BySubject(ctx, issuer, subject); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("BySubject before Link: err = %v, want app.ErrNotFound", err)
 		}
+
 		if err := repo.Link(ctx, id, issuer, subject); err != nil {
 			t.Fatalf("Link: %v", err)
 		}
+
 		got, err := repo.BySubject(ctx, issuer, subject)
 		if err != nil {
 			t.Fatalf("BySubject: %v", err)
 		}
+
 		if got != id {
 			t.Fatalf("BySubject = %s, want %s", got, id)
 		}
@@ -200,15 +216,17 @@ func TestSupportingRepos(t *testing.T) {
 		repo := postgres.NewIdentityRepo(pool)
 		invited := newUser(t, "invited-person")
 		expired := newUser(t, "stale-invite")
+
 		const issuer = "issuer-a"
 
-		addPending(t, ctx, pool, invited, issuer, "invited@example.com", time.Hour)
-		addPending(t, ctx, pool, expired, issuer, "stale@example.com", -time.Hour)
+		addPending(ctx, t, pool, invited, issuer, "invited@example.com", time.Hour)
+		addPending(ctx, t, pool, expired, issuer, "stale@example.com", -time.Hour)
 
 		got, err := repo.PendingByEmail(ctx, issuer, "Invited@Example.com")
 		if err != nil {
 			t.Fatalf("PendingByEmail: %v", err)
 		}
+
 		if got != invited {
 			t.Fatalf("PendingByEmail = %s, want %s", got, invited)
 		}
@@ -221,6 +239,7 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.ConsumePending(ctx, invited); err != nil {
 			t.Fatalf("ConsumePending: %v", err)
 		}
+
 		if _, err := repo.PendingByEmail(ctx, issuer, "invited@example.com"); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("after ConsumePending: err = %v, want app.ErrNotFound", err)
 		}
@@ -228,8 +247,12 @@ func TestSupportingRepos(t *testing.T) {
 
 	t.Run("LoginAttempts", func(t *testing.T) {
 		repo := postgres.NewLoginAttemptRepo(pool)
-		const email = "throttled@example.com"
-		const limit = 3
+
+		const (
+			email = "throttled@example.com"
+			limit = 3
+		)
+
 		now := time.Now().UTC().Truncate(time.Second)
 		window := now.Add(15 * time.Minute)
 
@@ -249,6 +272,7 @@ func TestSupportingRepos(t *testing.T) {
 		if err != nil || count != 2 || locked != nil {
 			t.Fatalf("Charge mixed case = %d / %v / %v, want 2 / nil / nil", count, locked, err)
 		}
+
 		count, locked, err = repo.Failures(ctx, email)
 		if err != nil || count != 2 || locked != nil {
 			t.Fatalf("Failures = %d / %v / %v, want 2 / nil / nil", count, locked, err)
@@ -257,6 +281,7 @@ func TestSupportingRepos(t *testing.T) {
 		if err := repo.Clear(ctx, email); err != nil {
 			t.Fatalf("Clear: %v", err)
 		}
+
 		count, locked, err = repo.Failures(ctx, email)
 		if err != nil || count != 0 || locked != nil {
 			t.Fatalf("after Clear = %d / %v / %v, want 0 / nil / nil", count, locked, err)
@@ -269,8 +294,12 @@ func TestSupportingRepos(t *testing.T) {
 	// attempts the same count and let the burst run past the limit.
 	t.Run("LoginAttemptsChargeIsAtomicUnderABurst", func(t *testing.T) {
 		repo := postgres.NewLoginAttemptRepo(pool)
-		const email = "burst@example.com"
-		const burst, limit = 12, 4
+
+		const (
+			email        = "burst@example.com"
+			burst, limit = 12, 4
+		)
+
 		now := time.Now().UTC().Truncate(time.Second)
 		window := now.Add(15 * time.Minute)
 
@@ -279,36 +308,43 @@ func TestSupportingRepos(t *testing.T) {
 			locked *time.Time
 			err    error
 		}
+
 		results := make(chan charged, burst)
 		start := make(chan struct{})
+
 		for range burst {
 			go func() {
 				<-start
+
 				c, l, err := repo.Charge(ctx, email, limit, now, window)
 				results <- charged{c, l, err}
 			}()
 		}
+
 		close(start)
 
 		seen := make(map[int]bool, burst)
 		for range burst {
-			r := <-results
-			if r.err != nil {
-				t.Fatalf("Charge: %v", r.err)
+			result := <-results
+			if result.err != nil {
+				t.Fatalf("Charge: %v", result.err)
 			}
-			if seen[r.count] {
-				t.Fatalf("two charges saw count %d: the increment is not atomic", r.count)
+
+			if seen[result.count] {
+				t.Fatalf("two charges saw count %d: the increment is not atomic", result.count)
 			}
-			seen[r.count] = true
+
+			seen[result.count] = true
 			switch {
-			case r.count < limit && r.locked != nil:
-				t.Fatalf("count %d is under the limit %d but locked until %v", r.count, limit, r.locked)
-			case r.count >= limit && (r.locked == nil || !r.locked.Equal(window)):
+			case result.count < limit && result.locked != nil:
+				t.Fatalf("count %d is under the limit %d but locked until %v", result.count, limit, result.locked)
+			case result.count >= limit && (result.locked == nil || !result.locked.Equal(window)):
 				// Past the limit the window must stay where the limit-th charge put
 				// it: a burst must not push the unlock further away.
-				t.Fatalf("count %d: locked until %v, want %v", r.count, r.locked, window)
+				t.Fatalf("count %d: locked until %v, want %v", result.count, result.locked, window)
 			}
 		}
+
 		for c := 1; c <= burst; c++ {
 			if !seen[c] {
 				t.Fatalf("counts %v are not exactly 1..%d", seen, burst)
@@ -321,9 +357,14 @@ func TestSupportingRepos(t *testing.T) {
 	// again with a new window.
 	t.Run("LoginAttemptsLapsedLockRestartsTheCount", func(t *testing.T) {
 		repo := postgres.NewLoginAttemptRepo(pool)
-		const email = "lapsed@example.com"
-		const limit = 3
+
+		const (
+			email = "lapsed@example.com"
+			limit = 3
+		)
+
 		first := time.Now().UTC().Truncate(time.Second)
+
 		firstWindow := first.Add(time.Minute)
 		for range limit {
 			if _, _, err := repo.Charge(ctx, email, limit, first, firstWindow); err != nil {
@@ -332,6 +373,7 @@ func TestSupportingRepos(t *testing.T) {
 		}
 
 		later := firstWindow
+
 		laterWindow := later.Add(time.Minute)
 		for want := 1; want < limit; want++ {
 			count, locked, err := repo.Charge(ctx, email, limit, later, laterWindow)
@@ -340,6 +382,7 @@ func TestSupportingRepos(t *testing.T) {
 					want, count, locked, err, want)
 			}
 		}
+
 		count, locked, err := repo.Charge(ctx, email, limit, later, laterWindow)
 		if err != nil || count != limit || locked == nil || !locked.Equal(laterWindow) {
 			t.Fatalf("limit-th Charge after the window = %d / %v / %v, want %d / %v / nil",
@@ -351,7 +394,9 @@ func TestSupportingRepos(t *testing.T) {
 	// old: the next charge starts at 1. A second short of that, they still count.
 	t.Run("LoginAttemptsStaleCountRestarts", func(t *testing.T) {
 		repo := postgres.NewLoginAttemptRepo(pool)
+
 		const limit = 3
+
 		first := time.Now().UTC().Truncate(time.Second)
 		for _, tc := range []struct {
 			email string
@@ -366,6 +411,7 @@ func TestSupportingRepos(t *testing.T) {
 					t.Fatalf("Charge: %v", err)
 				}
 			}
+
 			count, _, err := repo.Charge(ctx, tc.email, limit, tc.at, tc.at.Add(time.Minute))
 			if err != nil || count != tc.want {
 				t.Fatalf("%s: Charge %v after the last failure = %d / %v, want %d / nil",
@@ -408,23 +454,29 @@ func TestSupportingRepos(t *testing.T) {
 			"token.revoke").Scan(&gotActor, &gotTarget, &gotDetail, &gotAt); err != nil {
 			t.Fatalf("read back: %v", err)
 		}
+
 		if gotActor == nil || *gotActor != actor {
 			t.Fatalf("actor = %v, want %s", gotActor, actor)
 		}
+
 		if gotTarget != "token/abc" || string(gotDetail) != `{"reason": "rotation"}` {
 			t.Fatalf("target = %q detail = %s", gotTarget, gotDetail)
 		}
+
 		if !gotAt.Equal(at) {
 			t.Fatalf("at = %v, want %v", gotAt, at)
 		}
 
-		var systemActor *uuid.UUID
-		var systemDetail []byte
+		var (
+			systemActor  *uuid.UUID
+			systemDetail []byte
+		)
 		if err := pool.QueryRow(ctx,
 			`SELECT actor_user_id, detail FROM audit_events WHERE action = $1`,
 			"system.startup").Scan(&systemActor, &systemDetail); err != nil {
 			t.Fatalf("read back system event: %v", err)
 		}
+
 		if systemActor != nil {
 			t.Fatalf("system actor = %v, want NULL", systemActor)
 		}
@@ -436,8 +488,9 @@ func TestSupportingRepos(t *testing.T) {
 	})
 }
 
-func addPending(t *testing.T, ctx context.Context, pool *pgxpool.Pool, userID uuid.UUID, issuer, email string, ttl time.Duration) {
+func addPending(ctx context.Context, t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, issuer, email string, ttl time.Duration) {
 	t.Helper()
+
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO pending_identities (user_id, issuer, expected_email, expires_at)
 		 VALUES ($1, $2, $3, $4)`,

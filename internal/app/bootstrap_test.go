@@ -7,14 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
 )
 
 // minBootstrapPasswordLen is 128 bits at the six bits a URL-safe character carries.
@@ -29,6 +28,7 @@ func TestBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
+
 	if len(secret) < minBootstrapPasswordLen {
 		t.Fatalf("bootstrap password has %d characters, want at least %d", len(secret), minBootstrapPasswordLen)
 	}
@@ -37,12 +37,15 @@ func TestBootstrap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ByEmail: %v", err)
 	}
+
 	if admin.Role != identity.RoleAdmin || !admin.CanSignIn() {
 		t.Fatalf("bootstrap user = %+v, want an administrator who can sign in", admin)
 	}
+
 	if !admin.MustChangePassword {
 		t.Fatal("bootstrap admin must be forced to change the password")
 	}
+
 	hash, expiresAt, err := passwords.Get(ctx, admin.ID)
 	if err != nil {
 		t.Fatalf("password: %v", err)
@@ -64,17 +67,21 @@ func TestBootstrap(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Bootstrap(%s) again: %v", email, err)
 		}
+
 		if again != "" {
 			t.Fatalf("Bootstrap(%s) again issued a password", email)
 		}
 	}
+
 	if _, err := users.ByEmail(ctx, "someone-else@example.com"); !errors.Is(err, app.ErrNotFound) {
 		t.Fatalf("a second administrator was created: err = %v", err)
 	}
+
 	after, _, err := passwords.Get(ctx, admin.ID)
 	if err != nil {
 		t.Fatalf("password after restart: %v", err)
 	}
+
 	if after != hash {
 		t.Fatal("a restart replaced the bootstrap administrator's password")
 	}
@@ -85,24 +92,33 @@ func TestBootstrapPasswordIsFreshEachTime(t *testing.T) {
 	issue := func() string {
 		users := mocks.NewUserRepo(t)
 		passwords := mocks.NewPasswordRepo(t)
+
 		users.EXPECT().AdminExists(mock.Anything).Return(false, nil)
 		users.EXPECT().Create(mock.Anything, mock.Anything).Return(nil)
+
 		var stored string
+
 		passwords.EXPECT().Set(mock.Anything, mock.Anything, mock.Anything, (*time.Time)(nil)).
 			RunAndReturn(func(_ context.Context, _ uuid.UUID, hash string, _ *time.Time) error {
 				stored = hash
+
 				return nil
 			})
+
 		secret, err := app.Bootstrap(context.Background(), users, passwords, testHasher(), "admin@example.com")
 		if err != nil {
 			t.Fatalf("Bootstrap: %v", err)
 		}
+
 		if !identity.VerifyPassword(stored, secret) {
 			t.Fatal("the returned password does not match the stored hash")
 		}
+
 		return secret
 	}
-	if issue() == issue() {
+
+	first, second := issue(), issue()
+	if first == second {
 		t.Fatal("two bootstraps issued the same password")
 	}
 }
@@ -120,10 +136,13 @@ func TestBootstrapFinishesAnAdministratorWhosePasswordNeverLanded(t *testing.T) 
 	users.EXPECT().AdminExists(mock.Anything).Return(true, nil)
 	users.EXPECT().ByEmail(mock.Anything, "admin@example.com").Return(admin, nil)
 	passwords.EXPECT().Get(mock.Anything, admin.ID).Return("", nil, app.ErrNotFound)
+
 	var stored string
+
 	passwords.EXPECT().Set(mock.Anything, admin.ID, mock.Anything, (*time.Time)(nil)).
 		RunAndReturn(func(_ context.Context, _ uuid.UUID, hash string, _ *time.Time) error {
 			stored = hash
+
 			return nil
 		})
 
@@ -131,6 +150,7 @@ func TestBootstrapFinishesAnAdministratorWhosePasswordNeverLanded(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Bootstrap: %v", err)
 	}
+
 	if secret == "" || !identity.VerifyPassword(stored, secret) {
 		t.Fatal("the stranded administrator was not given a working password")
 	}
@@ -153,16 +173,17 @@ func TestBootstrapNeverIssuesToAnAccountItDidNotStrand(t *testing.T) {
 	flaggedUser := humanUser("admin@example.com")
 	flaggedUser.MustChangePassword = true
 
-	for name, u := range map[string]identity.User{
+	for name, user := range map[string]identity.User{
 		"working federated admin":            federatedAdmin,
 		"non-admin who must change password": flaggedUser,
 	} {
 		t.Run(name, func(t *testing.T) {
 			users := mocks.NewUserRepo(t)
 			passwords := mocks.NewPasswordRepo(t)
+
 			users.EXPECT().AdminExists(mock.Anything).Return(true, nil)
-			users.EXPECT().ByEmail(mock.Anything, "admin@example.com").Return(u, nil)
-			passwords.EXPECT().Get(mock.Anything, u.ID).Return("", nil, app.ErrNotFound).Maybe()
+			users.EXPECT().ByEmail(mock.Anything, "admin@example.com").Return(user, nil)
+			passwords.EXPECT().Get(mock.Anything, user.ID).Return("", nil, app.ErrNotFound).Maybe()
 
 			secret, err := app.Bootstrap(context.Background(), users, passwords, testHasher(), "admin@example.com")
 			if err != nil || secret != "" {
@@ -184,6 +205,7 @@ func TestBootstrapDoesNotPromoteAnExistingAccount(t *testing.T) {
 	if !errors.Is(err, app.ErrConflict) {
 		t.Fatalf("err = %v, want app.ErrConflict", err)
 	}
+
 	if secret != "" {
 		t.Fatal("a password was issued for an account that was not created")
 	}

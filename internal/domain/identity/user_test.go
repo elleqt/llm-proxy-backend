@@ -19,6 +19,7 @@ func TestServiceAccountPolicyIsAlwaysLocal(t *testing.T) {
 	if u.PolicySource != PolicyLocal {
 		t.Fatalf("PolicySource = %v, want local", u.PolicySource)
 	}
+
 	if !u.PolicyEditableByAdmin() {
 		t.Fatal("service account policy must stay admin-editable")
 	}
@@ -58,15 +59,16 @@ func TestActiveUsersCanUseAPI(t *testing.T) {
 
 func TestBlockedOrUnknownUsersCannotUseAPI(t *testing.T) {
 	blockedService := NewService(uuid.New(), "chat-panel", access.Policy{})
+
 	blockedService.Status = StatusBlocked
-	for name, u := range map[string]User{
+	for name, user := range map[string]User{
 		"blocked human":   {Kind: KindHuman, Status: StatusBlocked},
 		"blocked service": blockedService,
 		"unknown status":  {Kind: KindHuman, Status: "suspended"},
 		"unknown kind":    {Kind: "robot", Status: StatusActive},
 		"zero value":      {},
 	} {
-		if u.CanUseAPI() {
+		if user.CanUseAPI() {
 			t.Errorf("%s must not be able to use the API", name)
 		}
 	}

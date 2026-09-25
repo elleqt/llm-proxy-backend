@@ -27,6 +27,10 @@ const oidcChallengeTTL = 10 * time.Minute
 // and none of them is worth a different answer.
 var errChallenge = errors.New("web: unusable oidc challenge cookie")
 
+// errShortSessionKey refuses a session key below minSessionKeyLen; the caller adds
+// the floor, so the message reads "... at least 32 bytes".
+var errShortSessionKey = errors.New("web: the session key must be at least")
+
 // challengeSealer keeps the OpenID Connect challenge in the browser, authenticated and
 // encrypted.
 //
@@ -57,20 +61,24 @@ type sealedChallenge struct {
 // independent key under another label.
 func newChallengeSealer(key []byte, clock app.Clock) (*challengeSealer, error) {
 	if len(key) < minSessionKeyLen {
-		return nil, fmt.Errorf("web: the session key must be at least %d bytes", minSessionKeyLen)
+		return nil, fmt.Errorf("%w %d bytes", errShortSessionKey, minSessionKeyLen)
 	}
+
 	k, err := hkdf.Key(sha256.New, key, nil, "llmproxy oidc challenge cookie v1", 32)
 	if err != nil {
 		return nil, fmt.Errorf("web: derive challenge key: %w", err)
 	}
+
 	block, err := aes.NewCipher(k)
 	if err != nil {
 		return nil, fmt.Errorf("web: challenge cipher: %w", err)
 	}
+
 	aead, err := cipher.NewGCM(block)
 	if err != nil {
 		return nil, fmt.Errorf("web: challenge cipher: %w", err)
 	}
+
 	return &challengeSealer{aead: aead, clock: clock}, nil
 }
 
@@ -82,12 +90,14 @@ func (s *challengeSealer) seal(ch app.Challenge) (string, error) {
 		Expires: s.clock.Now().Add(oidcChallengeTTL).Unix(),
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("web: encode challenge: %w", err)
 	}
+
 	nonce := make([]byte, s.aead.NonceSize(), s.aead.NonceSize()+len(plain)+s.aead.Overhead())
 	if _, err := rand.Read(nonce); err != nil {
 		return "", fmt.Errorf("web: challenge nonce: %w", err)
 	}
+
 	return base64.RawURLEncoding.EncodeToString(s.aead.Seal(nonce, nonce, plain, []byte(oidcCookieName))), nil
 }
 
@@ -97,17 +107,22 @@ func (s *challengeSealer) open(value string) (app.Challenge, error) {
 	if err != nil || len(raw) < s.aead.NonceSize() {
 		return app.Challenge{}, errChallenge
 	}
+
 	n := s.aead.NonceSize()
+
 	plain, err := s.aead.Open(nil, raw[:n], raw[n:], []byte(oidcCookieName))
 	if err != nil {
 		return app.Challenge{}, errChallenge
 	}
+
 	var sc sealedChallenge
 	if err := json.Unmarshal(plain, &sc); err != nil {
 		return app.Challenge{}, errChallenge
 	}
+
 	if !s.clock.Now().Before(time.Unix(sc.Expires, 0)) {
 		return app.Challenge{}, errChallenge
 	}
+
 	return app.Challenge{State: sc.State, Nonce: sc.Nonce, Verifier: sc.Verifier}, nil
 }

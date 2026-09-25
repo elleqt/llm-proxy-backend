@@ -8,15 +8,20 @@ import (
 	"fmt"
 	"io/fs"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 
-	"github.com/elleqt/llm-proxy-backend/internal/app"
+	// Registers the "pgx" database/sql driver that withProvider opens: goose drives
+	// migrations through database/sql, not through a pgxpool.
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed migrations/*.sql
 var migrations embed.FS
+
+// errInvalidConnString replaces a DSN parse failure wholesale; see report.
+var errInvalidConnString = errors.New("invalid connection string")
 
 // withProvider opens dsn and hands the database and a goose provider over it to fn.
 //
@@ -39,10 +44,12 @@ func withProvider(dsn string, fn func(*sql.DB, *goose.Provider) error) error {
 	if err != nil {
 		return fmt.Errorf("postgres: migrations fs: %w", err)
 	}
+
 	provider, err := goose.NewProvider(goose.DialectPostgres, db, dir)
 	if err != nil {
 		return fmt.Errorf("postgres: provider: %w", err)
 	}
+
 	return fn(db, provider)
 }
 
@@ -55,10 +62,10 @@ func withProvider(dsn string, fn func(*sql.DB, *goose.Provider) error) error {
 // goose, SQL, a failed dial — carries SQLSTATE, the failing statement or the
 // user/database pair and no password, which is exactly what an operator needs.
 func report(op string, err error) error {
-	var parseErr *pgconn.ParseConfigError
-	if errors.As(err, &parseErr) {
-		return errors.New("postgres: " + op + ": invalid connection string")
+	if _, ok := errors.AsType[*pgconn.ParseConfigError](err); ok {
+		return fmt.Errorf("postgres: %s: %w", op, errInvalidConnString)
 	}
+
 	return fmt.Errorf("postgres: %s: %w", op, err)
 }
 
@@ -77,15 +84,17 @@ func asConflict(err error) error {
 	if errors.As(err, &pgErr) && pgErr.Code == uniqueViolation {
 		return fmt.Errorf("%w: %s", app.ErrConflict, pgErr.ConstraintName)
 	}
+
 	return err
 }
 
 // Migrate applies every pending migration to the database at dsn.
 func Migrate(ctx context.Context, dsn string) error {
-	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
-		if _, err := p.Up(ctx); err != nil {
+	return withProvider(dsn, func(_ *sql.DB, provider *goose.Provider) error {
+		if _, err := provider.Up(ctx); err != nil {
 			return report("migrate", err)
 		}
+
 		return nil
 	})
 }
@@ -96,23 +105,29 @@ func Migrate(ctx context.Context, dsn string) error {
 // has started on yet is not migrated.
 func Migrated(ctx context.Context, dsn string) (bool, error) {
 	var migrated bool
-	err := withProvider(dsn, func(db *sql.DB, p *goose.Provider) error {
+
+	err := withProvider(dsn, func(db *sql.DB, provider *goose.Provider) error {
 		// HasPending creates goose's version table where there is none. This check
 		// is what keeps a database no server has started on untouched.
 		var table *string
 		if err := db.QueryRowContext(ctx, `SELECT to_regclass('goose_db_version')::text`).Scan(&table); err != nil {
 			return report("migration status", err)
 		}
+
 		if table == nil {
 			return nil
 		}
-		pending, err := p.HasPending(ctx)
+
+		pending, err := provider.HasPending(ctx)
 		if err != nil {
 			return report("migration status", err)
 		}
+
 		migrated = !pending
+
 		return nil
 	})
+
 	return migrated, err
 }
 
@@ -120,10 +135,11 @@ func Migrated(ctx context.Context, dsn string) (bool, error) {
 // in it. Unexported on purpose — nothing in production may reach it; the test binary
 // gets at it through export_test.go.
 func migrateDown(ctx context.Context, dsn string) error {
-	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
-		if _, err := p.DownTo(ctx, 0); err != nil {
+	return withProvider(dsn, func(_ *sql.DB, provider *goose.Provider) error {
+		if _, err := provider.DownTo(ctx, 0); err != nil {
 			return report("migrate down", err)
 		}
+
 		return nil
 	})
 }
@@ -131,10 +147,11 @@ func migrateDown(ctx context.Context, dsn string) error {
 // migrateTo applies the pending migrations up to version and no further. Like
 // migrateDown, only the test binary reaches it (export_test.go).
 func migrateTo(ctx context.Context, dsn string, version int64) error {
-	return withProvider(dsn, func(_ *sql.DB, p *goose.Provider) error {
-		if _, err := p.UpTo(ctx, version); err != nil {
+	return withProvider(dsn, func(_ *sql.DB, provider *goose.Provider) error {
+		if _, err := provider.UpTo(ctx, version); err != nil {
 			return report("migrate to", err)
 		}
+
 		return nil
 	})
 }

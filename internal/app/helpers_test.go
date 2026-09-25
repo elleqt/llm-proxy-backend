@@ -27,15 +27,27 @@ func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 func mustPolicy(t *testing.T, rules ...string) access.Policy {
 	t.Helper()
-	var p access.Policy
+
+	policy := make(access.Policy, 0, len(rules))
+
 	for _, raw := range rules {
-		r, err := access.ParseRule(raw)
+		rule, err := access.ParseRule(raw)
 		if err != nil {
 			t.Fatalf("ParseRule(%q): %v", raw, err)
 		}
-		p = append(p, r)
+
+		policy = append(policy, rule)
 	}
-	return p
+
+	return policy
+}
+
+// isExactly reports whether err is target itself rather than something wrapping it.
+// Refusal tests compare this way on purpose: fmt.Errorf("no such user: %w",
+// ErrInvalidCredentials) satisfies errors.Is while putting the reason back in the
+// message, which is the oracle those tests exist to close.
+func isExactly(err, target error) bool {
+	return err == target //nolint:errorlint // identity, not errors.Is, is the assertion
 }
 
 type discardLogger struct{}

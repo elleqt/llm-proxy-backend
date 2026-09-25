@@ -6,26 +6,28 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
 )
 
 func mustPolicy(t *testing.T, rules ...string) access.Policy {
 	t.Helper()
-	p := make(access.Policy, 0, len(rules))
+
+	policy := make(access.Policy, 0, len(rules))
 	for _, raw := range rules {
 		r, err := access.ParseRule(raw)
 		if err != nil {
 			t.Fatalf("ParseRule(%q): %v", raw, err)
 		}
-		p = append(p, r)
+
+		policy = append(policy, r)
 	}
-	return p
+
+	return policy
 }
 
 func ruleStrings(p access.Policy) []string {
@@ -33,10 +35,11 @@ func ruleStrings(p access.Policy) []string {
 	for _, r := range p {
 		out = append(out, r.String())
 	}
+
 	return out
 }
 
-func TestUserRepo(t *testing.T) {
+func TestUserRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
 	users := postgres.NewUserRepo(pool)
@@ -47,6 +50,7 @@ func TestUserRepo(t *testing.T) {
 		if err != nil || exists {
 			t.Fatalf("AdminExists on an empty database = %v, %v; want false, nil", exists, err)
 		}
+
 		person := identity.User{
 			ID: uuid.New(), Kind: identity.KindHuman, Email: "plain@example.com",
 			Role: identity.RoleUser, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
@@ -54,6 +58,7 @@ func TestUserRepo(t *testing.T) {
 		if err := users.Create(ctx, person); err != nil {
 			t.Fatalf("create user: %v", err)
 		}
+
 		if exists, err := users.AdminExists(ctx); err != nil || exists {
 			t.Fatalf("AdminExists with only an ordinary user = %v, %v; want false, nil", exists, err)
 		}
@@ -61,10 +66,12 @@ func TestUserRepo(t *testing.T) {
 		// decision, and a restart must not answer it by minting a new one.
 		admin := person
 		admin.ID, admin.Email = uuid.New(), "blocked-admin@example.com"
+
 		admin.Role, admin.Status = identity.RoleAdmin, identity.StatusBlocked
 		if err := users.Create(ctx, admin); err != nil {
 			t.Fatalf("create admin: %v", err)
 		}
+
 		if exists, err := users.AdminExists(ctx); err != nil || !exists {
 			t.Fatalf("AdminExists with a blocked administrator = %v, %v; want true, nil", exists, err)
 		}
@@ -78,9 +85,11 @@ func TestUserRepo(t *testing.T) {
 		// a column neither caller touched.
 		first := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 		second := identity.NewService(uuid.New(), "batch-runner", access.Policy{})
+
 		if err := users.Create(ctx, first); err != nil {
 			t.Fatalf("create first service account: %v", err)
 		}
+
 		if err := users.Create(ctx, second); err != nil {
 			t.Fatalf("create second service account: %v", err)
 		}
@@ -94,6 +103,7 @@ func TestUserRepo(t *testing.T) {
 		if got.Email != "" {
 			t.Fatalf("Email = %q, want empty", got.Email)
 		}
+
 		if got.Kind != identity.KindService || got.DisplayName != "batch-runner" {
 			t.Fatalf("round trip lost fields: %+v", got)
 		}
@@ -110,7 +120,9 @@ func TestUserRepo(t *testing.T) {
 		if err := users.Create(ctx, emailless); err != nil {
 			t.Fatalf("create emailless human: %v", err)
 		}
+
 		owner := emailless
+
 		owner.ID, owner.Email = uuid.New(), "address-owner@example.com"
 		if err := users.Create(ctx, owner); err != nil {
 			t.Fatalf("create the address owner: %v", err)
@@ -127,6 +139,7 @@ func TestUserRepo(t *testing.T) {
 			"openrouter:openai/gpt-4o",
 			"chatgpt:*",
 		)
+
 		u := identity.NewService(uuid.New(), "policy-holder", want)
 		if err := users.Create(ctx, u); err != nil {
 			t.Fatalf("create: %v", err)
@@ -136,10 +149,12 @@ func TestUserRepo(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		gotRules, wantRules := ruleStrings(got.Policy), ruleStrings(want)
 		if len(gotRules) != len(wantRules) {
 			t.Fatalf("policy = %v, want %v", gotRules, wantRules)
 		}
+
 		for i := range wantRules {
 			if gotRules[i] != wantRules[i] {
 				t.Fatalf("policy = %v, want %v", gotRules, wantRules)
@@ -149,15 +164,16 @@ func TestUserRepo(t *testing.T) {
 		// access.ParseRule, which matches nothing until its pattern is compiled.
 		// Asking the loaded policy to authorise proves the read path went through
 		// ParseRule.
-		for _, c := range []struct{ provider, model string }{
+		for _, entry := range []struct{ provider, model string }{
 			{"ollama", "llama3:70b"},
 			{"openrouter", "openai/gpt-4o"},
 			{"chatgpt", "anything-at-all"},
 		} {
-			if !got.Policy.Allows(c.provider, c.model) {
-				t.Fatalf("loaded policy denies %s/%s", c.provider, c.model)
+			if !got.Policy.Allows(entry.provider, entry.model) {
+				t.Fatalf("loaded policy denies %s/%s", entry.provider, entry.model)
 			}
 		}
+
 		if got.Policy.Allows("ollama", "llama3:8b") {
 			t.Fatalf("loaded policy allows a model no rule grants")
 		}
@@ -167,21 +183,23 @@ func TestUserRepo(t *testing.T) {
 		// A rule the parser rejects is a grant the operator made that we can no longer
 		// honour. Dropping it would silently narrow the allow-list, so the read fails
 		// instead and the caller sees a broken row rather than a shrunken policy.
-		u := identity.NewService(uuid.New(), "corrupt-policy", access.Policy{})
-		if err := users.Create(ctx, u); err != nil {
+		user := identity.NewService(uuid.New(), "corrupt-policy", access.Policy{})
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
+
 		if _, err := pool.Exec(ctx,
-			`UPDATE users SET policy = '["no-colon-here"]'::jsonb WHERE id = $1`, u.ID); err != nil {
+			`UPDATE users SET policy = '["no-colon-here"]'::jsonb WHERE id = $1`, user.ID); err != nil {
 			t.Fatalf("corrupt policy: %v", err)
 		}
-		if _, err := users.ByID(ctx, u.ID); !errors.Is(err, access.ErrMalformedRule) {
+
+		if _, err := users.ByID(ctx, user.ID); !errors.Is(err, access.ErrMalformedRule) {
 			t.Fatalf("err = %v, want access.ErrMalformedRule", err)
 		}
 	})
 
 	t.Run("ByEmailIsCaseInsensitive", func(t *testing.T) {
-		u := identity.User{
+		user := identity.User{
 			ID:           uuid.New(),
 			Kind:         identity.KindHuman,
 			Email:        "person@example.com",
@@ -191,15 +209,17 @@ func TestUserRepo(t *testing.T) {
 			PolicySource: identity.PolicyLocal,
 			CreatedAt:    time.Now().UTC(),
 		}
-		if err := users.Create(ctx, u); err != nil {
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
+
 		got, err := users.ByEmail(ctx, "Person@Example.COM")
 		if err != nil {
 			t.Fatalf("ByEmail: %v", err)
 		}
-		if got.ID != u.ID {
-			t.Fatalf("ByEmail returned %s, want %s", got.ID, u.ID)
+
+		if got.ID != user.ID {
+			t.Fatalf("ByEmail returned %s, want %s", got.ID, user.ID)
 		}
 	})
 
@@ -227,6 +247,7 @@ func TestUserRepo(t *testing.T) {
 		second.ID = uuid.New()
 		second.Email = "collide@example.com"
 		second.DisplayName = "Second"
+
 		second.Role = identity.RoleUser
 		if err := users.Create(ctx, second); !errors.Is(err, app.ErrConflict) {
 			t.Fatalf("create second: err = %v, want app.ErrConflict", err)
@@ -238,6 +259,7 @@ func TestUserRepo(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ByEmail: %v", err)
 		}
+
 		if got.ID != first.ID || got.Email != "Collide@Example.com" {
 			t.Fatalf("got %s / %q, want %s / %q",
 				got.ID, got.Email, first.ID, "Collide@Example.com")
@@ -248,26 +270,31 @@ func TestUserRepo(t *testing.T) {
 		if _, err := users.ByID(ctx, uuid.New()); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("ByID err = %v, want app.ErrNotFound", err)
 		}
+
 		if _, err := users.ByEmail(ctx, "absent@example.com"); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("ByEmail err = %v, want app.ErrNotFound", err)
 		}
 	})
 
 	t.Run("UpdatePolicyReplacesTheAllowList", func(t *testing.T) {
-		u := identity.NewService(uuid.New(), "editable", mustPolicy(t, "chatgpt:*"))
-		if err := users.Create(ctx, u); err != nil {
+		user := identity.NewService(uuid.New(), "editable", mustPolicy(t, "chatgpt:*"))
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if err := users.UpdatePolicy(ctx, u.ID, mustPolicy(t, "claude:*")); err != nil {
+
+		if err := users.UpdatePolicy(ctx, user.ID, mustPolicy(t, "claude:*")); err != nil {
 			t.Fatalf("UpdatePolicy: %v", err)
 		}
-		got, err := users.ByID(ctx, u.ID)
+
+		got, err := users.ByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		if got.Policy.Allows("chatgpt", "gpt-4o") {
 			t.Fatalf("replaced rule still grants access: %v", ruleStrings(got.Policy))
 		}
+
 		if !got.Policy.Allows("claude", "opus") {
 			t.Fatalf("new rule not stored: %v", ruleStrings(got.Policy))
 		}
@@ -283,49 +310,55 @@ func TestUserRepo(t *testing.T) {
 	})
 
 	t.Run("TouchLastSeenPersists", func(t *testing.T) {
-		u := identity.NewService(uuid.New(), "seen", access.Policy{})
-		if err := users.Create(ctx, u); err != nil {
+		user := identity.NewService(uuid.New(), "seen", access.Policy{})
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		if got, err := users.ByID(ctx, u.ID); err != nil || got.LastSeenAt != nil {
+
+		if got, err := users.ByID(ctx, user.ID); err != nil || got.LastSeenAt != nil {
 			t.Fatalf("fresh user has last seen %v (err %v)", got.LastSeenAt, err)
 		}
 
 		when := time.Now().UTC().Truncate(time.Second)
-		if err := users.TouchLastSeen(ctx, u.ID, when); err != nil {
+		if err := users.TouchLastSeen(ctx, user.ID, when); err != nil {
 			t.Fatalf("TouchLastSeen: %v", err)
 		}
-		got, err := users.ByID(ctx, u.ID)
+
+		got, err := users.ByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		if got.LastSeenAt == nil || !got.LastSeenAt.Equal(when) {
 			t.Fatalf("last seen = %v, want %v", got.LastSeenAt, when)
 		}
 	})
 
 	t.Run("TouchLastSeenNeverMovesBackwards", func(t *testing.T) {
-		u := identity.NewService(uuid.New(), "seen-late", access.Policy{})
-		if err := users.Create(ctx, u); err != nil {
+		user := identity.NewService(uuid.New(), "seen-late", access.Policy{})
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
+
 		later := time.Now().UTC().Truncate(time.Second)
 		for _, at := range []time.Time{later, later.Add(-5 * time.Minute)} {
-			if err := users.TouchLastSeen(ctx, u.ID, at); err != nil {
+			if err := users.TouchLastSeen(ctx, user.ID, at); err != nil {
 				t.Fatalf("TouchLastSeen(%v): %v", at, err)
 			}
 		}
-		got, err := users.ByID(ctx, u.ID)
+
+		got, err := users.ByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		if got.LastSeenAt == nil || !got.LastSeenAt.Equal(later) {
 			t.Fatalf("last seen = %v, want %v: an older stamp moved it back", got.LastSeenAt, later)
 		}
 	})
 
 	t.Run("SaveIdentityStateWritesBackIdPOwnedFields", func(t *testing.T) {
-		u := identity.User{
+		user := identity.User{
 			ID:                 uuid.New(),
 			Kind:               identity.KindHuman,
 			Email:              "before@example.com",
@@ -337,28 +370,30 @@ func TestUserRepo(t *testing.T) {
 			MustChangePassword: true,
 			CreatedAt:          time.Now().UTC(),
 		}
-		if err := users.Create(ctx, u); err != nil {
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 
 		// Everything the IdP owns changes, and everything it does not own is set to
 		// the opposite of the stored value. A widened UPDATE therefore fails here
 		// instead of silently un-blocking, demoting or renaming a federated account.
-		u.Email = "after@example.com"
-		u.DisplayName = "After"
-		u.Policy = mustPolicy(t, "claude:*", "openrouter:openai/gpt-4o")
-		u.PolicySource = identity.PolicyIDP
-		u.Role = identity.RoleUser
-		u.Status = identity.StatusActive
-		u.MustChangePassword = false
-		if err := users.SaveIdentityState(ctx, u); err != nil {
+		user.Email = "after@example.com"
+		user.DisplayName = "After"
+		user.Policy = mustPolicy(t, "claude:*", "openrouter:openai/gpt-4o")
+		user.PolicySource = identity.PolicyIDP
+		user.Role = identity.RoleUser
+		user.Status = identity.StatusActive
+
+		user.MustChangePassword = false
+		if err := users.SaveIdentityState(ctx, user); err != nil {
 			t.Fatalf("SaveIdentityState: %v", err)
 		}
 
-		got, err := users.ByID(ctx, u.ID)
+		got, err := users.ByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		if got.Email != "after@example.com" {
 			t.Fatalf("email = %q, want the address the provider asserted", got.Email)
 		}
@@ -367,6 +402,7 @@ func TestUserRepo(t *testing.T) {
 		if got.DisplayName != "Before" {
 			t.Fatalf("display name = %q, want the stored \"Before\"", got.DisplayName)
 		}
+
 		if !got.Policy.Allows("openrouter", "openai/gpt-4o") || got.Policy.Allows("chatgpt", "gpt-4o") {
 			t.Fatalf("recomputed policy not stored: %v", ruleStrings(got.Policy))
 		}
@@ -381,16 +417,18 @@ func TestUserRepo(t *testing.T) {
 		if got.Role != identity.RoleAdmin {
 			t.Fatalf("role = %q, want the administrator's value %q", got.Role, identity.RoleAdmin)
 		}
+
 		if got.Status != identity.StatusBlocked {
 			t.Fatalf("status = %q, want the administrator's value %q", got.Status, identity.StatusBlocked)
 		}
+
 		if !got.MustChangePassword {
 			t.Fatalf("must_change_password was cleared by an IdP login")
 		}
 	})
 
 	t.Run("SetMustChangePasswordWritesOnlyThatColumn", func(t *testing.T) {
-		u := identity.User{
+		user := identity.User{
 			ID:                 uuid.New(),
 			Kind:               identity.KindHuman,
 			Email:              "flagged@example.com",
@@ -402,17 +440,19 @@ func TestUserRepo(t *testing.T) {
 			MustChangePassword: true,
 			CreatedAt:          time.Now().UTC(),
 		}
-		if err := users.Create(ctx, u); err != nil {
+		if err := users.Create(ctx, user); err != nil {
 			t.Fatalf("create: %v", err)
 		}
 
-		if err := users.SetMustChangePassword(ctx, u.ID, false); err != nil {
+		if err := users.SetMustChangePassword(ctx, user.ID, false); err != nil {
 			t.Fatalf("SetMustChangePassword: %v", err)
 		}
-		got, err := users.ByID(ctx, u.ID)
+
+		got, err := users.ByID(ctx, user.ID)
 		if err != nil {
 			t.Fatalf("ByID: %v", err)
 		}
+
 		if got.MustChangePassword {
 			t.Fatal("the restriction was not lifted")
 		}
@@ -451,6 +491,7 @@ func TestUserRepo(t *testing.T) {
 		federated := holder
 		federated.ID = uuid.New()
 		federated.Email = "federated-claimant@example.com"
+
 		federated.DisplayName = "Federated person"
 		for _, u := range []identity.User{holder, federated} {
 			if err := users.Create(ctx, u); err != nil {
@@ -461,6 +502,7 @@ func TestUserRepo(t *testing.T) {
 		// The provider asserts the address the local account already holds, differing
 		// only in case.
 		federated.Email = "taken@example.com"
+
 		federated.PolicySource = identity.PolicyIDP
 		if err := users.SaveIdentityState(ctx, federated); !errors.Is(err, app.ErrConflict) {
 			t.Fatalf("err = %v, want app.ErrConflict", err)
@@ -474,13 +516,15 @@ func TestUserRepo(t *testing.T) {
 			CreatedAt: time.Now().UTC(),
 		}
 		named := unnamed
+
 		named.ID, named.Email, named.DisplayName = uuid.New(), "named@example.com", "Set By An Admin"
 		for _, u := range []identity.User{unnamed, named} {
 			if err := users.Create(ctx, u); err != nil {
 				t.Fatalf("create: %v", err)
 			}
 		}
-		for _, c := range []struct {
+
+		for _, tc := range []struct {
 			id         uuid.UUID
 			name       string
 			wantFilled bool
@@ -491,15 +535,17 @@ func TestUserRepo(t *testing.T) {
 			// Filled once, the name is no longer empty: a second fill changes nothing.
 			{unnamed.ID, "Another Name", false, "From The IdP"},
 		} {
-			filled, err := users.FillDisplayName(ctx, c.id, c.name)
-			if err != nil || filled != c.wantFilled {
-				t.Fatalf("FillDisplayName = %t, %v; want %t", filled, err, c.wantFilled)
+			filled, err := users.FillDisplayName(ctx, tc.id, tc.name)
+			if err != nil || filled != tc.wantFilled {
+				t.Fatalf("FillDisplayName = %t, %v; want %t", filled, err, tc.wantFilled)
 			}
-			got, err := users.ByID(ctx, c.id)
-			if err != nil || got.DisplayName != c.wantName {
-				t.Fatalf("display name = %q (%v), want %q", got.DisplayName, err, c.wantName)
+
+			got, err := users.ByID(ctx, tc.id)
+			if err != nil || got.DisplayName != tc.wantName {
+				t.Fatalf("display name = %q (%v), want %q", got.DisplayName, err, tc.wantName)
 			}
 		}
+
 		if _, err := users.FillDisplayName(ctx, uuid.New(), "x"); !errors.Is(err, app.ErrNotFound) {
 			t.Fatalf("unknown user: err = %v, want app.ErrNotFound", err)
 		}
@@ -535,15 +581,18 @@ func TestUserRepo(t *testing.T) {
 				CreatedAt:    createdAt,
 			}
 		}
-		store := func(t *testing.T, u identity.User) time.Time {
+		store := func(t *testing.T, user identity.User) time.Time {
 			t.Helper()
-			if err := users.Create(ctx, u); err != nil {
-				t.Fatalf("create %s: %v", u.DisplayName, err)
+
+			if err := users.Create(ctx, user); err != nil {
+				t.Fatalf("create %s: %v", user.DisplayName, err)
 			}
-			got, err := users.ByID(ctx, u.ID)
+
+			got, err := users.ByID(ctx, user.ID)
 			if err != nil {
-				t.Fatalf("ByID %s: %v", u.DisplayName, err)
+				t.Fatalf("ByID %s: %v", user.DisplayName, err)
 			}
+
 			return got.CreatedAt
 		}
 

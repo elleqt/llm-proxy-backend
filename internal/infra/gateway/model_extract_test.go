@@ -16,29 +16,40 @@ import (
 // extractOn runs source the way the gate does — inside a handler on the route
 // pattern it serves, given the whole body, which is put back for the handler
 // — and returns what it read.
-func extractOn(t *testing.T, source modelSource, pattern string, req *http.Request) (model string, ok bool) {
+func extractOn(t *testing.T, source modelSource, pattern string, req *http.Request) (string, bool) {
 	t.Helper()
+
+	var (
+		model string
+		ok    bool
+	)
+
 	engine := gin.New()
-	engine.Handle(req.Method, pattern, func(c *gin.Context) {
-		raw, err := io.ReadAll(c.Request.Body)
+	engine.Handle(req.Method, pattern, func(ginCtx *gin.Context) {
+		raw, err := io.ReadAll(ginCtx.Request.Body)
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-		model, ok = source(c, raw)
+
+		ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		model, ok = source(ginCtx, raw)
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
+
 	return model, ok
 }
 
-func zstdCompress(t *testing.T, s string) string {
+func zstdCompress(t *testing.T, plain string) string {
 	t.Helper()
+
 	enc, err := zstd.NewWriter(nil)
 	if err != nil {
 		t.Fatalf("zstd writer: %v", err)
 	}
+
 	defer func() { _ = enc.Close() }()
-	return string(enc.EncodeAll([]byte(s), nil))
+
+	return string(enc.EncodeAll([]byte(plain), nil))
 }
 
 // TestModelIsReadWhereTheHandlerReadsIt: each source names the model upstream
@@ -53,32 +64,53 @@ func TestModelIsReadWhereTheHandlerReadsIt(t *testing.T) {
 		contentType string
 		want        string
 	}{
-		{"chat body", bodyModel, "/v1/chat/completions", "/v1/chat/completions",
-			`{"model":"gpt-5.6","messages":[]}`, "", "gpt-5.6"},
-		{"anthropic body", claudeModel, "/v1/messages", "/v1/messages",
-			`{"model":"claude-sonnet-5","messages":[]}`, "", "claude-sonnet-5"},
-		{"anthropic cloaked name, routed as the model it encodes", claudeModel, "/v1/messages", "/v1/messages",
-			`{"model":"claude-fable-5-dd-6.5-tpg(high)"}`, "", "gpt-5.6(high)"},
-		{"gemini path", geminiActionModel, "/v1beta/models/*action", "/v1beta/models/gemini-3-pro:streamGenerateContent",
-			`{"contents":[]}`, "", "gemini-3-pro"},
-		{"interactions resource name", interactionsModel, "/v1beta/interactions", "/v1beta/interactions",
-			`{"model":"models/gemini-3-pro","input":"hi"}`, "", "gemini-3-pro"},
-		{"image generation", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
-			`{"model":" gpt-image-2.5 ","prompt":"a cat"}`, "", "gpt-image-2.5"},
-		{"image generation without a model, upstream's default", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
-			`{"prompt":"a cat"}`, "", "gpt-image-2"},
-		{"xAI image model, canonical as upstream routes it", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
-			`{"model":"Grok/Grok-Imagine-Image-Quality","prompt":"a cat"}`, "", "grok-imagine-image-quality"},
-		{"a name that only ends like an xAI model", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
-			`{"model":"acme/grok-imagine-image","prompt":"a cat"}`, "", "acme/grok-imagine-image"},
-		{"image edit as JSON", imageEditModel, "/v1/images/edits", "/v1/images/edits",
-			`{"model":"gpt-image-1.5","prompt":"a cat","images":[]}`, "application/json; charset=utf-8", "gpt-image-1.5"},
+		{
+			"chat body", bodyModel, "/v1/chat/completions", "/v1/chat/completions",
+			`{"model":"gpt-5.6","messages":[]}`, "", "gpt-5.6",
+		},
+		{
+			"anthropic body", claudeModel, "/v1/messages", "/v1/messages",
+			`{"model":"claude-sonnet-5","messages":[]}`, "", "claude-sonnet-5",
+		},
+		{
+			"anthropic cloaked name, routed as the model it encodes", claudeModel, "/v1/messages", "/v1/messages",
+			`{"model":"claude-fable-5-dd-6.5-tpg(high)"}`, "", "gpt-5.6(high)",
+		},
+		{
+			"gemini path", geminiActionModel, "/v1beta/models/*action", "/v1beta/models/gemini-3-pro:streamGenerateContent",
+			`{"contents":[]}`, "", "gemini-3-pro",
+		},
+		{
+			"interactions resource name", interactionsModel, "/v1beta/interactions", "/v1beta/interactions",
+			`{"model":"models/gemini-3-pro","input":"hi"}`, "", "gemini-3-pro",
+		},
+		{
+			"image generation", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
+			`{"model":" gpt-image-2.5 ","prompt":"a cat"}`, "", "gpt-image-2.5",
+		},
+		{
+			"image generation without a model, upstream's default", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
+			`{"prompt":"a cat"}`, "", "gpt-image-2",
+		},
+		{
+			"xAI image model, canonical as upstream routes it", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
+			`{"model":"Grok/Grok-Imagine-Image-Quality","prompt":"a cat"}`, "", "grok-imagine-image-quality",
+		},
+		{
+			"a name that only ends like an xAI model", imageGenerationModel, "/v1/images/generations", "/v1/images/generations",
+			`{"model":"acme/grok-imagine-image","prompt":"a cat"}`, "", "acme/grok-imagine-image",
+		},
+		{
+			"image edit as JSON", imageEditModel, "/v1/images/edits", "/v1/images/edits",
+			`{"model":"gpt-image-1.5","prompt":"a cat","images":[]}`, "application/json; charset=utf-8", "gpt-image-1.5",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
+
 			model, ok := extractOn(t, tc.source, tc.pattern, req)
 			if !ok || model != tc.want {
 				t.Fatalf("model = %q, %t; want %q", model, ok, tc.want)
@@ -116,10 +148,11 @@ func TestUnreadableRequestsNameNoModel(t *testing.T) {
 		{"image edit, neither JSON nor a form", imageEditModel, "/v1/images/edits", "/v1/images/edits", `{"model":"gpt-image-2"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/images/edits" {
 				req.Header.Set("Content-Type", "text/plain")
 			}
+
 			if model, ok := extractOn(t, tc.source, tc.pattern, req); ok {
 				t.Fatalf("model = %q, want none", model)
 			}
@@ -127,25 +160,32 @@ func TestUnreadableRequestsNameNoModel(t *testing.T) {
 	}
 }
 
-// imageForm is a multipart image edit naming models as its "model" fields.
-func imageForm(t *testing.T, fields [][2]string) (body, contentType string) {
+// imageForm is a multipart image edit naming models as its "model" fields. It
+// returns the form body and its content type.
+func imageForm(t *testing.T, fields [][2]string) (string, string) {
 	t.Helper()
+
 	var buf bytes.Buffer
-	w := multipart.NewWriter(&buf)
+
+	mw := multipart.NewWriter(&buf)
 	for _, f := range fields {
-		if err := w.WriteField(f[0], f[1]); err != nil {
+		if err := mw.WriteField(f[0], f[1]); err != nil {
 			t.Fatalf("write field: %v", err)
 		}
 	}
-	part, err := w.CreateFormFile("image", "cat.png")
+
+	part, err := mw.CreateFormFile("image", "cat.png")
 	if err != nil {
 		t.Fatalf("create file: %v", err)
 	}
+
 	_, _ = part.Write([]byte("png bytes"))
-	if err := w.Close(); err != nil {
+
+	if err := mw.Close(); err != nil {
 		t.Fatalf("close form: %v", err)
 	}
-	return buf.String(), w.FormDataContentType()
+
+	return buf.String(), mw.FormDataContentType()
 }
 
 // TestImageEditFormModel: a multipart edit is decided on its "model" field,
@@ -153,26 +193,34 @@ func imageForm(t *testing.T, fields [][2]string) (body, contentType string) {
 // any letter case, is refused.
 func TestImageEditFormModel(t *testing.T) {
 	body, contentType := imageForm(t, [][2]string{{"model", "grok-imagine-image"}, {"prompt", "a cat"}})
-	req := httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(body))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/images/edits", strings.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
+
 	engine := gin.New()
-	var model string
-	var ok bool
+
+	var (
+		model string
+		ok    bool
+	)
+
 	engine.POST("/v1/images/edits", func(c *gin.Context) {
 		model, ok = imageEditModel(c, nil)
+
 		form, err := c.MultipartForm()
 		if err != nil || len(form.File["image"]) != 1 || c.PostForm("prompt") != "a cat" {
 			t.Errorf("the handler's form after extraction = %v, %v; want the image and the prompt", form, err)
 		}
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
+
 	if !ok || model != "grok-imagine-image" {
 		t.Fatalf("model = %q, %t; want grok-imagine-image", model, ok)
 	}
 
 	body, contentType = imageForm(t, [][2]string{{"model", "gpt-image-2"}, {"Model", "grok-imagine-image"}})
-	req = httptest.NewRequest(http.MethodPost, "/v1/images/edits", strings.NewReader(body))
+	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/images/edits", strings.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
+
 	if model, ok := extractOn(t, imageEditModel, "/v1/images/edits", req); ok {
 		t.Fatalf("a form naming model twice gave %q, want none", model)
 	}

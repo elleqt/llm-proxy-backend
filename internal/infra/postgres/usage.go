@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 // UsageRepo is the consumption ledger.
@@ -39,19 +38,22 @@ func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) er
 	if len(events) == 0 {
 		return nil
 	}
-	b := &pgx.Batch{}
-	for _, e := range events {
-		b.Queue(appendUsage,
-			e.At.UTC(), nullUUID(e.UserID), nullUUID(e.TokenID), e.Provider, e.Model, e.Alias,
-			e.Stream, e.ServiceTier, e.TokensInput, e.TokensOutput, e.TokensReasoning,
-			e.TokensCacheRead, e.TokensCacheWrite, e.TokensTotal, e.BreakdownQuality,
-			e.LatencyMS, e.TTFTMS, e.StatusCode, e.Failed, e.VendorAccountID,
-			e.Cost.InputUSD, e.Cost.OutputUSD, e.Cost.CacheReadUSD, e.Cost.CacheWriteUSD,
-			e.Cost.CacheSavingsUSD, e.Cost.UnpricedTokens, e.Cost.Priced)
+
+	batch := &pgx.Batch{}
+	for _, event := range events {
+		batch.Queue(appendUsage,
+			event.At.UTC(), nullUUID(event.UserID), nullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
+			event.Stream, event.ServiceTier, event.TokensInput, event.TokensOutput, event.TokensReasoning,
+			event.TokensCacheRead, event.TokensCacheWrite, event.TokensTotal, event.BreakdownQuality,
+			event.LatencyMS, event.TTFTMS, event.StatusCode, event.Failed, event.VendorAccountID,
+			event.Cost.InputUSD, event.Cost.OutputUSD, event.Cost.CacheReadUSD, event.Cost.CacheWriteUSD,
+			event.Cost.CacheSavingsUSD, event.Cost.UnpricedTokens, event.Cost.Priced)
 	}
-	if err := r.pool.SendBatch(ctx, b).Close(); err != nil {
+
+	if err := r.pool.SendBatch(ctx, batch).Close(); err != nil {
 		return fmt.Errorf("postgres: append %d usage events: %w", len(events), err)
 	}
+
 	return nil
 }
 
@@ -78,30 +80,35 @@ ORDER BY bucket, model`
 // bucket width is app.UsageBucketFor(from, to). Totals cover the same points.
 func (r *UsageRepo) SeriesForUser(ctx context.Context, userID uuid.UUID, from, to time.Time) (app.UsageSeries, error) {
 	series := app.UsageSeries{Bucket: app.UsageBucketFor(from, to)}
+
 	rows, err := r.pool.Query(ctx, seriesForUser, userID, from.UTC(), to.UTC(), string(series.Bucket))
 	if err != nil {
 		return app.UsageSeries{}, fmt.Errorf("postgres: usage series: %w", err)
 	}
 	defer rows.Close()
+
 	for rows.Next() {
 		var (
-			p    app.UsagePoint
-			cost app.UsageCost
+			point app.UsagePoint
+			cost  app.UsageCost
 		)
-		if err := rows.Scan(&p.At, &p.Model, &p.Requests, &p.TokensTotal,
+		if err := rows.Scan(&point.At, &point.Model, &point.Requests, &point.TokensTotal,
 			&cost.InputUSD, &cost.OutputUSD, &cost.CacheReadUSD, &cost.CacheWriteUSD,
 			&cost.CacheSavingsUSD, &cost.UnpricedTokens, &cost.Priced); err != nil {
 			return app.UsageSeries{}, fmt.Errorf("postgres: usage series: %w", err)
 		}
-		p.At = p.At.UTC()
-		p.CostUSD = cost.TotalUSD()
-		series.Points = append(series.Points, p)
-		series.Totals.Requests += p.Requests
-		series.Totals.TokensTotal += p.TokensTotal
+
+		point.At = point.At.UTC()
+		point.CostUSD = cost.TotalUSD()
+		series.Points = append(series.Points, point)
+		series.Totals.Requests += point.Requests
+		series.Totals.TokensTotal += point.TokensTotal
 		series.Totals.Cost.Add(cost)
 	}
+
 	if err := rows.Err(); err != nil {
 		return app.UsageSeries{}, fmt.Errorf("postgres: usage series: %w", err)
 	}
+
 	return series, nil
 }

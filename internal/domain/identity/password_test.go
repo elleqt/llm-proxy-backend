@@ -14,9 +14,11 @@ func TestPasswordRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+
 	if !VerifyPassword(hash, "correct horse battery staple") {
 		t.Fatal("correct password rejected")
 	}
+
 	if VerifyPassword(hash, "wrong") {
 		t.Fatal("wrong password accepted")
 	}
@@ -24,6 +26,7 @@ func TestPasswordRoundTrip(t *testing.T) {
 
 func TestHashesAreSalted(t *testing.T) {
 	a, _ := HashPassword("same")
+
 	b, _ := HashPassword("same")
 	if a == b {
 		t.Fatal("identical hashes for the same password: salt is missing")
@@ -38,17 +41,20 @@ func TestVerifyUsesTheParametersInTheHash(t *testing.T) {
 	if _, err := rand.Read(salt); err != nil {
 		t.Fatalf("read salt: %v", err)
 	}
+
 	const (
 		otherMemory  uint32 = 12288
 		otherTime    uint32 = 3
 		otherThreads uint8  = 1
 	)
+
 	key := argon2.IDKey([]byte("legacy secret"), salt, otherTime, otherMemory, otherThreads, argonKeyLen)
 	hash := encodeHash(otherMemory, otherTime, otherThreads, salt, key)
 
 	if !VerifyPassword(hash, "legacy secret") {
 		t.Fatal("hash written with other cost parameters rejected")
 	}
+
 	if VerifyPassword(hash, "not it") {
 		t.Fatal("wrong password accepted against a hash with other cost parameters")
 	}
@@ -61,6 +67,7 @@ func TestCurrentHashRecordsTheRecommendedParameters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+
 	if !strings.HasPrefix(hash, "$argon2id$v=19$m=19456,t=2,p=1$") {
 		t.Fatalf("hash = %q, want the OWASP m=19456,t=2,p=1 argon2id encoding", hash)
 	}
@@ -72,6 +79,7 @@ func TestVerifyRejectsUnusableHashes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HashPassword: %v", err)
 	}
+
 	for name, hash := range map[string]string{
 		"empty":            "",
 		"not phc":          "secret",

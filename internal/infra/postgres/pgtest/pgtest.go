@@ -10,12 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 )
 
 // NewTestPool starts a disposable Postgres container, applies migrations and returns
@@ -46,6 +45,7 @@ func NewTestPool(t *testing.T) *pgxpool.Pool {
 	// Run can return a live container alongside an error; register cleanup before
 	// the error check or a started-but-unhealthy container leaks until session end.
 	testcontainers.CleanupContainer(t, container)
+
 	if err != nil {
 		t.Fatalf("start postgres: %v", err)
 	}
@@ -54,13 +54,17 @@ func NewTestPool(t *testing.T) *pgxpool.Pool {
 	if err != nil {
 		t.Fatalf("connection string: %v", err)
 	}
+
 	if err := postgres.Migrate(ctx, dsn); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		t.Fatalf("pool: %v", err)
 	}
+
 	t.Cleanup(pool.Close)
+
 	return pool
 }

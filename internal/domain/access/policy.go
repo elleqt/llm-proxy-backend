@@ -38,14 +38,15 @@ var ErrMalformedRule = errors.New("access: malformed rule")
 // ParseRule splits on the FIRST colon only. The provider half is an operator-chosen
 // name and never contains a colon; the model half frequently does, so splitting on
 // every colon would make whole providers inexpressible.
-func ParseRule(s string) (Rule, error) {
-	provider, pattern, found := strings.Cut(strings.TrimSpace(s), ":")
+func ParseRule(raw string) (Rule, error) {
+	provider, pattern, found := strings.Cut(strings.TrimSpace(raw), ":")
 	if !found {
-		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
+		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, raw)
 	}
+
 	provider, pattern = strings.TrimSpace(provider), strings.TrimSpace(pattern)
 	if provider == "" || pattern == "" {
-		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, s)
+		return Rule{}, fmt.Errorf("%w: %q", ErrMalformedRule, raw)
 	}
 	// Every pattern compiles by construction: compileGlob quotes everything that is
 	// not "*" or "?", so unlike path.Match there is no such thing as a malformed model
@@ -53,8 +54,10 @@ func ParseRule(s string) (Rule, error) {
 	// named "[opus" — predictable rather than silently unmatchable.
 	re, err := compileGlob(strings.ToLower(pattern))
 	if err != nil {
-		return Rule{}, fmt.Errorf("%w: %q: %v", ErrMalformedRule, s, err)
+		//nolint:errorlint // The parser's error is detail: ErrMalformedRule is the only matchable error.
+		return Rule{}, fmt.Errorf("%w: %q: %v", ErrMalformedRule, raw, err)
 	}
+
 	return Rule{
 		Provider:     strings.ToLower(provider),
 		ModelPattern: strings.ToLower(pattern),
@@ -71,30 +74,41 @@ func (r Rule) String() string { return r.Provider + ":" + r.ModelPattern }
 // It returns an error only for a pattern that cannot compile, which is why ParseRule
 // can use it as a validator.
 func compileGlob(pattern string) (*regexp.Regexp, error) {
-	var b strings.Builder
-	b.WriteByte('^')
-	for _, r := range pattern {
-		switch r {
+	var expr strings.Builder
+	expr.WriteByte('^')
+
+	for _, char := range pattern {
+		switch char {
 		case '*':
-			b.WriteString(".*")
+			expr.WriteString(".*")
 		case '?':
-			b.WriteByte('.')
+			expr.WriteByte('.')
 		default:
-			b.WriteString(regexp.QuoteMeta(string(r)))
+			expr.WriteString(regexp.QuoteMeta(string(char)))
 		}
 	}
-	b.WriteByte('$')
-	return regexp.Compile(b.String())
+
+	expr.WriteByte('$')
+
+	re, err := regexp.Compile(expr.String())
+	if err != nil {
+		return nil, fmt.Errorf("access: compile glob: %w", err)
+	}
+
+	return re, nil
 }
 
 func (r Rule) matches(provider, model string) bool {
-	if r.Provider != "*" && r.Provider != strings.ToLower(provider) {
+	// Rules store providers lowercased. EqualFold would also fold non-ASCII runes
+	// (U+017F matches "s"), widening an allow-list that must match exactly.
+	if r.Provider != "*" && r.Provider != strings.ToLower(provider) { //nolint:gocritic // EqualFold would widen the match
 		return false
 	}
 	// The common grant. Short-circuits before any matching work.
 	if r.ModelPattern == "*" {
 		return true
 	}
+
 	re := r.re
 	if re == nil { // hand-built Rule, not produced by ParseRule
 		var err error
@@ -102,6 +116,7 @@ func (r Rule) matches(provider, model string) bool {
 			return false
 		}
 	}
+
 	return re.MatchString(strings.ToLower(model))
 }
 
@@ -111,6 +126,7 @@ func (p Policy) Allows(provider, model string) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -122,11 +138,13 @@ func (p Policy) Covers(model string, providers []string) bool {
 	if len(providers) == 0 {
 		return false
 	}
+
 	for _, provider := range providers {
 		if !p.Allows(provider, model) {
 			return false
 		}
 	}
+
 	return true
 }
 
@@ -143,6 +161,7 @@ type Catalog interface {
 // filters every model listing by, and the cabinet lists a user's models by.
 func (p Policy) Admits(catalog Catalog, requested string) bool {
 	model, providers := Routed(catalog, requested)
+
 	return p.Covers(model, providers)
 }
 
@@ -151,18 +170,21 @@ func (p Policy) Admits(catalog Catalog, requested string) bool {
 // without its thinking suffix first, then the full name. It returns the
 // registered model the providers were found for. "auto" names whichever model
 // upstream finds available first, so it is never resolved.
-func Routed(catalog Catalog, requested string) (model string, providers []string) {
+func Routed(catalog Catalog, requested string) (string, []string) {
 	base := thinkingBase(requested)
 	if requested == "auto" || base == "auto" {
 		return "", nil
 	}
+
 	trimmed := strings.TrimSpace(base)
 	if providers := catalog.ProvidersFor(trimmed); len(providers) > 0 {
 		return trimmed, providers
 	}
+
 	if trimmed != requested {
 		return requested, catalog.ProvidersFor(requested)
 	}
+
 	return trimmed, nil
 }
 
@@ -173,5 +195,6 @@ func thinkingBase(model string) string {
 	if open == -1 || !strings.HasSuffix(model, ")") {
 		return model
 	}
+
 	return model[:open]
 }

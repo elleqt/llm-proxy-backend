@@ -15,15 +15,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
-	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/stretchr/testify/mock"
 )
 
 // discardLog drops warnings, for tests that do not assert on them.
@@ -46,6 +45,7 @@ func (l *recordingLog) Warn(msg string, attrs ...slog.Attr) {
 func (l *recordingLog) logged() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return append([]string(nil), l.lines...)
 }
 
@@ -63,6 +63,7 @@ type manualClock struct {
 func (c *manualClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	return c.now
 }
 
@@ -81,11 +82,14 @@ var (
 // ledger is a UsageRepo mock that keeps every event appended, in order.
 type ledger struct {
 	*mocks.UsageRepo
+
 	mu     sync.Mutex
 	events []app.UsageEvent
 }
 
 func newLedger(t *testing.T) *ledger {
+	t.Helper()
+
 	return &ledger{UsageRepo: mocks.NewUsageRepo(t)}
 }
 
@@ -104,6 +108,7 @@ func (l *ledger) accept() {
 func (l *ledger) written() []app.UsageEvent {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
 	return append([]app.UsageEvent(nil), l.events...)
 }
 
@@ -120,6 +125,7 @@ func knownPrincipal(users *mocks.UserRepo, tokens *mocks.TokenRepo) {
 func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, log app.Logger) (*UsageSink, *metrics.Metrics, *prometheus.Registry) {
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
+
 	return NewUsageSink(events, tokens, users, &app.PriceTable{}, m, wallClock{}, log), m, reg
 }
 
@@ -128,8 +134,10 @@ func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRe
 // (FailNow), which no recover can catch.
 func flushed(t *testing.T, sink *UsageSink) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+
 	if err := sink.sync(ctx); err != nil {
 		t.Fatalf("the sink's worker never caught up: %v", err)
 	}
@@ -139,6 +147,7 @@ func TestSinkAttributesRecordToPrincipal(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
 	users.EXPECT().ByID(mock.Anything, sinkUser).Return(identity.User{ID: sinkUser, Email: "alice@example.com"}, nil)
+
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
 	// Stamped when the response completed, not when the request started.
 	done := at.Add(1500 * time.Millisecond)
@@ -171,12 +180,14 @@ func TestSinkAttributesRecordToPrincipal(t *testing.T) {
 // token, counted as "unknown", stamps nobody, and its APIKey is never logged.
 func TestSinkStoresUnattributedRecord(t *testing.T) {
 	const apiKey = "sk-upstream-internal-credential"
+
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
+
 	log := &recordingLog{}
 	// No ByID, TouchLastUsed or TouchLastSeen expectations: any call fails the test.
 
-	sink, m, _ := newMeteredSink(events, tokens, users, log)
+	sink, meter, _ := newMeteredSink(events, tokens, users, log)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "claude-sonnet-5", APIKey: apiKey})
 	flushed(t, sink)
 
@@ -184,9 +195,11 @@ func TestSinkStoresUnattributedRecord(t *testing.T) {
 	if len(got) != 1 || got[0].UserID != uuid.Nil || got[0].TokenID != uuid.Nil || got[0].Model != "claude-sonnet-5" {
 		t.Fatalf("ledger = %+v, want one row with no user and no token", got)
 	}
-	if body := scrape(t, m); !strings.Contains(body, `llmproxy_requests_total{model="claude-sonnet-5",provider="claude",status="ok",stream="false",user="unknown"} 1`) {
+
+	if body := scrape(t, meter); !strings.Contains(body, `llmproxy_requests_total{model="claude-sonnet-5",provider="claude",status="ok",stream="false",user="unknown"} 1`) {
 		t.Fatalf("unattributed request not counted as unknown:\n%s", body)
 	}
+
 	if logged := log.logged(); len(logged) != 1 || strings.Contains(logged[0], apiKey) {
 		t.Fatalf("warnings = %q, want one that does not carry the APIKey", logged)
 	}
@@ -197,7 +210,7 @@ func TestSinkRecordsFailures(t *testing.T) {
 	events.accept()
 	knownPrincipal(users, tokens)
 
-	sink, m, _ := newMeteredSink(events, tokens, users, discardLog{})
+	sink, meter, _ := newMeteredSink(events, tokens, users, discardLog{})
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{
 		Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey, AuthID: "claude-1.json",
 		Failed: true, Fail: cliproxyusage.Failure{StatusCode: 429, Body: "rate limited"},
@@ -208,10 +221,11 @@ func TestSinkRecordsFailures(t *testing.T) {
 	flushed(t, sink)
 
 	got := events.written()
-	if len(got) != 2 || !got[0].Failed || got[0].StatusCode != 429 || got[1].Failed {
+	if len(got) != 2 || !got[0].Failed || got[0].StatusCode != http.StatusTooManyRequests || got[1].Failed {
 		t.Fatalf("ledger = %+v, want the 429 failure then a success", got)
 	}
-	if body := scrape(t, m); !strings.Contains(body, `llmproxy_account_failures_total{account="claude-1.json",provider="claude"} 1`) {
+
+	if body := scrape(t, meter); !strings.Contains(body, `llmproxy_account_failures_total{account="claude-1.json",provider="claude"} 1`) {
 		t.Fatalf("account failure not counted exactly once:\n%s", body)
 	}
 }
@@ -224,7 +238,7 @@ func TestSinkNamesProvidersAsPolicyDoes(t *testing.T) {
 	events.accept()
 	knownPrincipal(users, tokens)
 
-	sink, m, _ := newMeteredSink(events, tokens, users, discardLog{})
+	sink, meter, _ := newMeteredSink(events, tokens, users, discardLog{})
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{
 		Provider: "codex", Model: "gpt-6", APIKey: sinkKey, AuthID: "codex-1.json",
 		Failed: true, Fail: cliproxyusage.Failure{StatusCode: 429},
@@ -236,10 +250,12 @@ func TestSinkNamesProvidersAsPolicyDoes(t *testing.T) {
 	if got := events.written(); len(got) != 1 || got[0].Provider != "chatgpt" {
 		t.Fatalf("ledger = %+v, want provider chatgpt", got)
 	}
+
 	if got := sink.QuotaSignals(); len(got) != 1 || got[0].Provider != "chatgpt" || got[0].Window != "5h" {
 		t.Fatalf("QuotaSignals() = %+v, want one chatgpt 5h signal", got)
 	}
-	body := scrape(t, m)
+
+	body := scrape(t, meter)
 	for _, family := range []string{
 		"llmproxy_requests_total", "llmproxy_tokens_total",
 		"llmproxy_account_failures_total", "llmproxy_vendor_quota_used_ratio",
@@ -248,6 +264,7 @@ func TestSinkNamesProvidersAsPolicyDoes(t *testing.T) {
 			t.Errorf("%s has no provider=\"chatgpt\" series:\n%s", family, body)
 		}
 	}
+
 	if strings.Contains(body, `provider="codex"`) {
 		t.Fatalf("the upstream key reached a label:\n%s", body)
 	}
@@ -255,11 +272,12 @@ func TestSinkNamesProvidersAsPolicyDoes(t *testing.T) {
 
 // hasSeries reports whether an exposition line of family carries label.
 func hasSeries(body, family, label string) bool {
-	for _, line := range strings.Split(body, "\n") {
+	for line := range strings.SplitSeq(body, "\n") {
 		if strings.HasPrefix(line, family+"{") && strings.Contains(line, label) {
 			return true
 		}
 	}
+
 	return false
 }
 
@@ -270,7 +288,7 @@ func TestSinkPrefersServedTier(t *testing.T) {
 	events.accept()
 	knownPrincipal(users, tokens)
 
-	sink, m, _ := newMeteredSink(events, tokens, users, discardLog{})
+	sink, meter, _ := newMeteredSink(events, tokens, users, discardLog{})
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{
 		Provider: "codex", Model: "gpt-6", APIKey: sinkKey, ServiceTier: "priority", ResponseServiceTier: "flex",
 		Detail: cliproxyusage.Detail{InputTokens: 1},
@@ -285,7 +303,8 @@ func TestSinkPrefersServedTier(t *testing.T) {
 	if len(got) != 2 || got[0].ServiceTier != "flex" || got[1].ServiceTier != "priority" {
 		t.Fatalf("tiers = %+v, want flex (served) then priority (requested, none served)", got)
 	}
-	body := scrape(t, m)
+
+	body := scrape(t, meter)
 	for _, tier := range []string{"flex", "priority"} {
 		if !strings.Contains(body, `kind="input",model="gpt-6",provider="chatgpt",service_tier="`+tier+`",user="alice@example.com"} 1`) {
 			t.Fatalf("no %s tokens series:\n%s", tier, body)
@@ -314,6 +333,7 @@ func TestSinkPrefersCanonicalBreakdown(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("ledger = %+v", got)
 	}
+
 	e := got[0]
 	if e.TokensInput != 60 || e.TokensCacheRead != 40 || e.TokensOutput != 15 || e.TokensReasoning != 5 ||
 		e.TokensTotal != 120 || e.BreakdownQuality != "complete" {
@@ -332,6 +352,7 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
 	knownPrincipal(users, tokens)
+
 	prices := &app.PriceTable{}
 	prices.SetPrices([]app.ModelPrice{
 		{Provider: "chatgpt", Model: "gpt-6", Input: 2, Output: 10, CacheRead: 0.5},
@@ -341,36 +362,43 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 	})
 	sink := NewUsageSink(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
 
-	for _, r := range []cliproxyusage.Record{
+	for _, rec := range []cliproxyusage.Record{
 		{Provider: "codex", Model: "gpt-6", Detail: cliproxyusage.Detail{
-			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120}},
+			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 120,
+		}},
 		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{
-			InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10, OutputTokens: 50, ReasoningTokens: 30, TotalTokens: 200}},
+			InputTokens: 100, CacheReadTokens: 40, CacheCreationTokens: 10, OutputTokens: 50, ReasoningTokens: 30, TotalTokens: 200,
+		}},
 		// No reads: upstream copies the cache creation into the cached count.
 		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{
-			InputTokens: 100, CacheCreationTokens: 10, CachedTokens: 10, OutputTokens: 20}},
+			InputTokens: 100, CacheCreationTokens: 10, CachedTokens: 10, OutputTokens: 20,
+		}},
 		{Provider: "gemini", Model: "gemini-3", Detail: cliproxyusage.Detail{
-			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 125}},
+			InputTokens: 100, CachedTokens: 40, OutputTokens: 20, ReasoningTokens: 5, TotalTokens: 125,
+		}},
 		{Provider: "mystery", Model: "m", Detail: cliproxyusage.Detail{InputTokens: 100, OutputTokens: 20, TotalTokens: 120}},
 		// Claude counts adding up to more than the reported total.
 		{Provider: "claude", Model: "claude-sonnet-5", Detail: cliproxyusage.Detail{InputTokens: 100, OutputTokens: 50, TotalTokens: 120}},
 	} {
-		r.APIKey = sinkKey
-		sink.HandleUsage(context.Background(), r)
+		rec.APIKey = sinkKey
+		sink.HandleUsage(context.Background(), rec)
 	}
+
 	flushed(t, sink)
 
 	got := events.written()
 	if len(got) != 6 {
 		t.Fatalf("ledger = %+v", got)
 	}
+
 	type kinds struct {
 		in, out, reasoning, read, write, total int64
 		quality                                string
 		usd                                    float64
 		unpriced                               int64
 	}
-	for i, want := range []kinds{
+
+	for idx, want := range []kinds{
 		{60, 15, 5, 40, 0, 120, "reconstructed", (60*2 + 40*0.5 + 20*10) / 1e6, 0},
 		{100, 20, 30, 40, 10, 200, "reconstructed", (100*3 + 50*15 + 40*0.3 + 10*3.75) / 1e6, 0},
 		{100, 20, 0, 0, 10, 130, "reconstructed", (100*3 + 20*15 + 10*3.75) / 1e6, 0},
@@ -378,15 +406,19 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 		{0, 0, 0, 0, 0, 120, "unclassified", 0, 120},
 		{0, 0, 0, 0, 0, 120, "inconsistent", 0, 120},
 	} {
-		e := got[i]
-		have := kinds{e.TokensInput, e.TokensOutput, e.TokensReasoning, e.TokensCacheRead, e.TokensCacheWrite, e.TokensTotal,
-			e.BreakdownQuality, e.Cost.TotalUSD(), e.Cost.UnpricedTokens}
-		if math.Abs(have.usd-want.usd) > 1e-15 {
-			t.Errorf("%s record %d: cost $%v, want $%v", e.Provider, i, have.usd, want.usd)
+		event := got[idx]
+
+		have := kinds{
+			event.TokensInput, event.TokensOutput, event.TokensReasoning, event.TokensCacheRead, event.TokensCacheWrite, event.TokensTotal,
+			event.BreakdownQuality, event.Cost.TotalUSD(), event.Cost.UnpricedTokens,
 		}
+		if math.Abs(have.usd-want.usd) > 1e-15 {
+			t.Errorf("%s record %d: cost $%v, want $%v", event.Provider, idx, have.usd, want.usd)
+		}
+
 		have.usd = want.usd
 		if have != want {
-			t.Errorf("%s record %d: %+v\nwant %+v", e.Provider, i, have, want)
+			t.Errorf("%s record %d: %+v\nwant %+v", event.Provider, idx, have, want)
 		}
 	}
 }
@@ -397,9 +429,10 @@ func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
 	knownPrincipal(users, tokens)
+
 	prices := &app.PriceTable{}
-	m := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(events, tokens, users, prices, m, wallClock{}, discardLog{})
+	meter := metrics.New(prometheus.NewRegistry())
+	sink := NewUsageSink(events, tokens, users, prices, meter, wallClock{}, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{
 			Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
@@ -418,13 +451,16 @@ func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("ledger = %+v", got)
 	}
+
 	if got[0].Cost.Priced || got[0].Cost.UnpricedTokens != 1_000_000 {
 		t.Errorf("row before any price: %+v, want unpriced", got[0].Cost)
 	}
+
 	if !got[1].Cost.Priced || got[1].Cost.InputUSD != 3 || got[2].Cost.InputUSD != 5 {
 		t.Errorf("priced rows = %+v then %+v, want $3 then $5", got[1].Cost, got[2].Cost)
 	}
-	if body := scrape(t, m); !strings.Contains(body,
+
+	if body := scrape(t, meter); !strings.Contains(body,
 		`llmproxy_cost_usd_total{kind="input",model="claude-sonnet-5",provider="claude",user="alice@example.com"} 8`) {
 		t.Fatalf("want the metrics to count the rows' $3 + $5:\n%s", body)
 	}
@@ -441,14 +477,15 @@ func TestSinkLabelsMetricsWithEmail(t *testing.T) {
 	users.EXPECT().TouchLastSeen(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	tokens.EXPECT().TouchLastUsed(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	sink, m, _ := newMeteredSink(events, tokens, users, discardLog{})
+	sink, meter, _ := newMeteredSink(events, tokens, users, discardLog{})
+
 	serviceKey := app.Principal{UserID: service, TokenID: serviceToken}.String()
 	for _, key := range []string{sinkKey, sinkKey, serviceKey} {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: key})
 		flushed(t, sink) // separate batches: the second alice record must hit the cache
 	}
 
-	body := scrape(t, m)
+	body := scrape(t, meter)
 	for _, series := range []string{
 		`user="alice@example.com"} 2`,
 		`user="chat-panel"} 1`,
@@ -457,6 +494,7 @@ func TestSinkLabelsMetricsWithEmail(t *testing.T) {
 			t.Fatalf("no requests_total series ending %s:\n%s", series, body)
 		}
 	}
+
 	for _, id := range []uuid.UUID{sinkUser, sinkToken, service, serviceToken} {
 		if strings.Contains(body, id.String()) {
 			t.Fatalf("an id reached the metrics: %s\n%s", id, body)
@@ -475,8 +513,8 @@ func TestSinkLabelCacheExpires(t *testing.T) {
 	tokens.EXPECT().TouchLastUsed(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
 	clock := &manualClock{now: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)}
-	m := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, m, clock, discardLog{})
+	meter := metrics.New(prometheus.NewRegistry())
+	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, meter, clock, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey})
 		flushed(t, sink)
@@ -488,7 +526,7 @@ func TestSinkLabelCacheExpires(t *testing.T) {
 	clock.advance(2 * time.Second)
 	send() // expired: looked up again
 
-	body := scrape(t, m)
+	body := scrape(t, meter)
 	if !strings.Contains(body, `user="alice@example.com"} 2`) || !strings.Contains(body, `user="alice@new.example.com"} 1`) {
 		t.Fatalf("want 2 requests under the old email then 1 under the new one:\n%s", body)
 	}
@@ -504,13 +542,13 @@ func TestSinkDoesNotCacheFailedLookup(t *testing.T) {
 	users.EXPECT().TouchLastSeen(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	tokens.EXPECT().TouchLastUsed(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	sink, m, _ := newMeteredSink(events, tokens, users, discardLog{})
+	sink, meter, _ := newMeteredSink(events, tokens, users, discardLog{})
 	for range 2 {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey})
 		flushed(t, sink)
 	}
 
-	body := scrape(t, m)
+	body := scrape(t, meter)
 	if !strings.Contains(body, `user="unknown"} 1`) || !strings.Contains(body, `user="alice@example.com"} 1`) {
 		t.Fatalf("want one request as unknown, then one as alice:\n%s", body)
 	}
@@ -534,6 +572,7 @@ func TestSinkSurvivesPanic(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()
 	knownPrincipal(users, tokens)
+
 	log := &recordingLog{}
 
 	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, panickyObserver{}, wallClock{}, log)
@@ -546,13 +585,16 @@ func TestSinkSurvivesPanic(t *testing.T) {
 	if len(got) == 0 || got[len(got)-1].Model != "fine" {
 		t.Fatalf("ledger = %+v, want the record after the panic written", got)
 	}
+
 	if n := sink.Panics(); n != 1 {
 		t.Fatalf("Panics() = %d, want 1", n)
 	}
+
 	logged := log.logged()
 	if len(logged) != 1 || !strings.Contains(logged[0], "observer exploded") {
 		t.Fatalf("warnings = %q, want the recovered panic reported", logged)
 	}
+
 	for _, secret := range []string{sinkKey, sinkUser.String(), sinkToken.String()} {
 		if strings.Contains(logged[0], secret) {
 			t.Fatalf("warning %q carries the principal", logged[0])
@@ -566,7 +608,9 @@ func TestSinkSurvivesPanic(t *testing.T) {
 func TestSinkNeverBlocksAndCountsDrops(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	release, entered := make(chan struct{}), make(chan struct{}, 1)
+
 	var releaseOnce sync.Once
+
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	users.EXPECT().ByID(mock.Anything, sinkUser).RunAndReturn(func(context.Context, uuid.UUID) (identity.User, error) {
@@ -574,7 +618,9 @@ func TestSinkNeverBlocksAndCountsDrops(t *testing.T) {
 		case entered <- struct{}{}:
 		default:
 		}
+
 		<-release
+
 		return identity.User{ID: sinkUser, Email: "alice@example.com"}, nil
 	})
 	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).
@@ -589,23 +635,28 @@ func TestSinkNeverBlocksAndCountsDrops(t *testing.T) {
 	record := cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey}
 
 	returnsWithin(t, time.Second, "the first HandleUsage", func() { sink.HandleUsage(context.Background(), record) })
+
 	select {
 	case <-entered: // the worker holds the first record and is stuck
 	case <-time.After(5 * time.Second):
 		t.Fatal("the worker never picked the first record up")
 	}
+
 	const overflow = 7
+
 	returnsWithin(t, time.Second, "HandleUsage on a full queue", func() {
 		for range usageQueueSize + overflow {
 			sink.HandleUsage(context.Background(), record)
 		}
 	})
+
 	if got := sink.Dropped(); got != overflow {
 		t.Fatalf("Dropped() = %d, want %d", got, overflow)
 	}
 
 	unblock()
 	flushed(t, sink)
+
 	if got := len(events.written()); got != usageQueueSize+1 {
 		t.Fatalf("ledger holds %d rows, want the %d that were queued", got, usageQueueSize+1)
 	}
@@ -617,8 +668,11 @@ func TestSinkNeverBlocksAndCountsDrops(t *testing.T) {
 func TestSinkDrainStopsIntakeAndHonoursDeadline(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	knownPrincipal(users, tokens)
+
 	release, entered := make(chan struct{}), make(chan struct{}, 1)
+
 	var releaseOnce sync.Once
+
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).
@@ -627,12 +681,14 @@ func TestSinkDrainStopsIntakeAndHonoursDeadline(t *testing.T) {
 			case entered <- struct{}{}:
 			default:
 			}
+
 			<-release
 			events.keep(evs)
 		}).Return(nil)
 
 	sink, _, _ := newMeteredSink(events, tokens, users, discardLog{})
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "before", APIKey: sinkKey})
+
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
@@ -640,21 +696,27 @@ func TestSinkDrainStopsIntakeAndHonoursDeadline(t *testing.T) {
 	}
 
 	var err error
+
 	returnsWithin(t, 2*time.Second, "Drain with a stuck repository and a 100ms deadline", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 		defer cancel()
+
 		err = sink.Drain(ctx)
 	})
+
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Drain() = %v, want context.DeadlineExceeded", err)
 	}
 
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "after", APIKey: sinkKey})
+
 	if got := sink.Dropped(); got != 1 {
 		t.Fatalf("Dropped() = %d, want the record handed over after Drain", got)
 	}
+
 	unblock()
 	flushed(t, sink)
+
 	if got := events.written(); len(got) != 1 || got[0].Model != "before" {
 		t.Fatalf("ledger = %+v, want only the record accepted before Drain", got)
 	}
@@ -665,22 +727,30 @@ func TestSinkDrainStopsIntakeAndHonoursDeadline(t *testing.T) {
 func TestSinkStampsLatestCompletionPerID(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, sinkUser).Return(identity.User{Email: "alice@example.com"}, nil)
+
 	release, entered := make(chan struct{}), make(chan struct{}, 1)
+
 	var releaseOnce sync.Once
+
 	unblock := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, evs []app.UsageEvent) {
 			if evs[0].Model == "blocker" {
 				entered <- struct{}{}
+
 				<-release
 			}
+
 			events.keep(evs)
 		}).Return(nil)
+
 	var mu sync.Mutex
+
 	stamps := map[uuid.UUID][]time.Time{}
 	stamp := func(_ context.Context, id uuid.UUID, at time.Time) {
 		mu.Lock()
+
 		stamps[id] = append(stamps[id], at)
 		mu.Unlock()
 	}
@@ -693,27 +763,32 @@ func TestSinkStampsLatestCompletionPerID(t *testing.T) {
 	// Hold the worker on another principal's batch so the next three queue
 	// up and are written as one batch.
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "blocker", APIKey: other.String()})
+
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the worker never reached the repository")
 	}
+
 	start := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
-	for _, r := range []struct{ started, took time.Duration }{
+	for _, tc := range []struct{ started, took time.Duration }{
 		{0, 2 * time.Minute},               // completes 10:02
 		{time.Minute, 4 * time.Minute},     // completes 10:05: the latest
 		{3 * time.Minute, 0 * time.Minute}, // completes 10:03
 	} {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{
-			Provider: "claude", Model: "m", APIKey: sinkKey, RequestedAt: start.Add(r.started), Latency: r.took,
+			Provider: "claude", Model: "m", APIKey: sinkKey, RequestedAt: start.Add(tc.started), Latency: tc.took,
 		})
 	}
+
 	unblock()
 	flushed(t, sink)
 
 	latest := start.Add(5 * time.Minute)
+
 	mu.Lock()
 	defer mu.Unlock()
+
 	for _, id := range []uuid.UUID{sinkToken, sinkUser} {
 		if got := stamps[id]; len(got) != 1 || !got[0].Equal(latest) {
 			t.Fatalf("stamps of %s = %v, want exactly one at %v", id, got, latest)
@@ -722,17 +797,20 @@ func TestSinkStampsLatestCompletionPerID(t *testing.T) {
 }
 
 // returnsWithin fails the test if fn has not returned after d.
-func returnsWithin(t *testing.T, d time.Duration, what string, fn func()) {
+func returnsWithin(t *testing.T, limit time.Duration, what string, fn func()) {
 	t.Helper()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+
 		fn()
 	}()
+
 	select {
 	case <-done:
-	case <-time.After(d):
-		t.Fatalf("%s blocked for %s", what, d)
+	case <-time.After(limit):
+		t.Fatalf("%s blocked for %s", what, limit)
 	}
 }
 
@@ -743,6 +821,7 @@ func TestSinkSurvivesRepositoryError(t *testing.T) {
 	knownPrincipal(users, tokens)
 	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).Return(errors.New("connection refused")).Once()
 	events.accept()
+
 	log := &recordingLog{}
 
 	sink, _, _ := newMeteredSink(events, tokens, users, log)
@@ -754,6 +833,7 @@ func TestSinkSurvivesRepositoryError(t *testing.T) {
 	if got := events.written(); len(got) != 1 || got[0].Model != "kept" {
 		t.Fatalf("ledger = %+v, want only the batch after the failure", got)
 	}
+
 	if logged := log.logged(); len(logged) != 1 || !strings.Contains(logged[0], "connection refused") {
 		t.Fatalf("warnings = %q, want the failed write reported", logged)
 	}
@@ -765,30 +845,37 @@ type quotaSeries struct{ account, provider, window string }
 // quotaGauge returns the values of a vendor quota gauge family by series.
 func quotaGauge(t *testing.T, reg *prometheus.Registry, family string) map[quotaSeries]float64 {
 	t.Helper()
+
 	fams, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}
+
 	out := map[quotaSeries]float64{}
+
 	for _, f := range fams {
 		if f.GetName() != family {
 			continue
 		}
-		for _, m := range f.GetMetric() {
-			var s quotaSeries
-			for _, l := range m.GetLabel() {
-				switch l.GetName() {
+
+		for _, metric := range f.GetMetric() {
+			var series quotaSeries
+
+			for _, label := range metric.GetLabel() {
+				switch label.GetName() {
 				case "account":
-					s.account = l.GetValue()
+					series.account = label.GetValue()
 				case "provider":
-					s.provider = l.GetValue()
+					series.provider = label.GetValue()
 				case "window":
-					s.window = l.GetValue()
+					series.window = label.GetValue()
 				}
 			}
-			out[s] = m.GetGauge().GetValue()
+
+			out[series] = metric.GetGauge().GetValue()
 		}
 	}
+
 	return out
 }
 
@@ -798,6 +885,7 @@ func quotaSink(t *testing.T) (*UsageSink, *prometheus.Registry) {
 	events.accept()
 	knownPrincipal(users, tokens)
 	sink, _, reg := newMeteredSink(events, tokens, users, discardLog{})
+
 	return sink, reg
 }
 
@@ -806,6 +894,7 @@ func headers(kv ...string) http.Header {
 	for i := 0; i < len(kv); i += 2 {
 		h.Set(kv[i], kv[i+1])
 	}
+
 	return h
 }
 
@@ -816,10 +905,12 @@ func headers(kv ...string) http.Header {
 func TestSinkReadsVendorQuotaHeaders(t *testing.T) {
 	sink, reg := quotaSink(t)
 	at := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+
 	const latency = 2 * time.Second
+
 	arrived := at.Add(latency)
 
-	for _, r := range []cliproxyusage.Record{
+	for _, rec := range []cliproxyusage.Record{
 		{Provider: "claude", AuthID: "claude-1.json", ResponseHeaders: headers(
 			"Anthropic-Ratelimit-Unified-5h-Utilization", "0.42",
 			"Anthropic-Ratelimit-Unified-5h-Reset", "1788256800",
@@ -840,9 +931,10 @@ func TestSinkReadsVendorQuotaHeaders(t *testing.T) {
 			"X-Codex-Primary-Reset-At", "1788800000",
 		)},
 	} {
-		r.Model, r.APIKey, r.RequestedAt, r.Latency = "m", sinkKey, at, latency
-		sink.HandleUsage(context.Background(), r)
+		rec.Model, rec.APIKey, rec.RequestedAt, rec.Latency = "m", sinkKey, at, latency
+		sink.HandleUsage(context.Background(), rec)
 	}
+
 	flushed(t, sink)
 
 	want := []app.QuotaSignal{
@@ -857,17 +949,20 @@ func TestSinkReadsVendorQuotaHeaders(t *testing.T) {
 	}
 
 	used := quotaGauge(t, reg, "llmproxy_vendor_quota_used_ratio")
+
 	reset := quotaGauge(t, reg, "llmproxy_vendor_quota_reset_timestamp_seconds")
 	if len(used) != len(want) || len(reset) != len(want) {
 		t.Fatalf("used ratio series %v, reset series %v; want %d of each", used, reset, len(want))
 	}
-	for _, w := range want {
-		s := quotaSeries{w.Account, w.Provider, w.Window}
-		if used[s] != w.UsedRatio {
-			t.Errorf("used ratio %v = %v, want %v", s, used[s], w.UsedRatio)
+
+	for _, row := range want {
+		series := quotaSeries{row.Account, row.Provider, row.Window}
+		if used[series] != row.UsedRatio {
+			t.Errorf("used ratio %v = %v, want %v", series, used[series], row.UsedRatio)
 		}
-		if reset[s] != float64(w.ResetAt.Unix()) {
-			t.Errorf("reset %v = %v, want %v", s, reset[s], w.ResetAt.Unix())
+
+		if reset[series] != float64(row.ResetAt.Unix()) {
+			t.Errorf("reset %v = %v, want %v", series, reset[series], row.ResetAt.Unix())
 		}
 	}
 }
@@ -876,6 +971,7 @@ func TestSinkReadsVendorQuotaHeaders(t *testing.T) {
 // more, reads 1 in the store and on the gauge.
 func TestSinkClampsQuotaRatio(t *testing.T) {
 	sink, reg := quotaSink(t)
+
 	for _, r := range []cliproxyusage.Record{
 		{Provider: "claude", AuthID: "claude-1.json", ResponseHeaders: headers("Anthropic-Ratelimit-Unified-5h-Utilization", "1.02")},
 		{Provider: "codex", AuthID: "codex-1.json", ResponseHeaders: headers("X-Codex-Primary-Used-Percent", "104", "X-Codex-Primary-Window-Minutes", "300")},
@@ -883,6 +979,7 @@ func TestSinkClampsQuotaRatio(t *testing.T) {
 		r.Model, r.APIKey = "m", sinkKey
 		sink.HandleUsage(context.Background(), r)
 	}
+
 	flushed(t, sink)
 
 	for _, q := range sink.QuotaSignals() {
@@ -890,6 +987,7 @@ func TestSinkClampsQuotaRatio(t *testing.T) {
 			t.Errorf("%s %s used ratio = %v, want 1", q.Account, q.Window, q.UsedRatio)
 		}
 	}
+
 	want := map[quotaSeries]float64{{"claude-1.json", "claude", "5h"}: 1, {"codex-1.json", "chatgpt", "5h"}: 1}
 	if used := quotaGauge(t, reg, "llmproxy_vendor_quota_used_ratio"); !reflect.DeepEqual(used, want) {
 		t.Fatalf("used ratio series = %v, want %v", used, want)
@@ -928,6 +1026,7 @@ func TestSinkQuotaSnapshotReplacesWindows(t *testing.T) {
 	}
 
 	sink.ForgetAccount("codex-1.json")
+
 	if got := sink.QuotaSignals(); !reflect.DeepEqual(got, want[:1]) {
 		t.Fatalf("after ForgetAccount, QuotaSignals() = %+v, want only %+v", got, want[:1])
 	}
@@ -970,9 +1069,11 @@ func TestSinkIgnoresMalformedQuotaHeaders(t *testing.T) {
 	if used := quotaGauge(t, reg, "llmproxy_vendor_quota_used_ratio"); !reflect.DeepEqual(used, want) {
 		t.Fatalf("used ratio series = %v, want %v", used, want)
 	}
+
 	if reset := quotaGauge(t, reg, "llmproxy_vendor_quota_reset_timestamp_seconds"); len(reset) != 0 {
 		t.Fatalf("reset series = %v, want none: no reset header parsed", reset)
 	}
+
 	got := sink.QuotaSignals()
 	if len(got) != 2 || got[0].UsedRatio != 0.42 || !got[0].ResetAt.IsZero() || !got[1].ResetAt.IsZero() {
 		t.Fatalf("QuotaSignals() = %+v, want the two readable signals and no reset", got)
@@ -981,11 +1082,14 @@ func TestSinkIgnoresMalformedQuotaHeaders(t *testing.T) {
 
 func scrape(t *testing.T, m *metrics.Metrics) string {
 	t.Helper()
+
 	rec := httptest.NewRecorder()
-	m.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
+
 	b, err := io.ReadAll(rec.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
+
 	return string(b)
 }

@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -13,13 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/gin-gonic/gin"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	log "github.com/sirupsen/logrus"
-
-	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 )
 
 // running is a started gateway plus the handles a test needs to talk to it.
@@ -34,12 +34,13 @@ type running struct {
 // requests. Stopping is idempotent and always happens before the test ends.
 func start(t *testing.T, cfg *cliproxyconfig.Config) *running {
 	t.Helper()
+
 	return startWith(t, Params{Config: cfg})
 }
 
 // startWith is start for tests that need to exercise other Params seams. A
 // gateway without a Resolver gets wireResolver.
-func startWith(t *testing.T, p Params) *running {
+func startWith(t *testing.T, params Params) *running {
 	t.Helper()
 	// A non-empty MANAGEMENT_PASSWORD makes New refuse to build, because it
 	// would enable upstream's management surface; pin it so no test depends on
@@ -47,45 +48,56 @@ func startWith(t *testing.T, p Params) *running {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	port := freePort(t)
-	p.Config.Port = port
-	if p.Config.AuthDir == "" {
-		p.Config.AuthDir = t.TempDir()
+
+	params.Config.Port = port
+	if params.Config.AuthDir == "" {
+		params.Config.AuthDir = t.TempDir()
 	}
-	if p.Resolver == nil {
-		p.Resolver = wireResolver
+
+	if params.Resolver == nil {
+		params.Resolver = wireResolver
 	}
 	// The path is required by the upstream builder but must never be created:
 	// configuration arrives through PushConfig, not from disk.
-	p.ConfigPath = filepath.Join(t.TempDir(), "unused.yaml")
+	params.ConfigPath = filepath.Join(t.TempDir(), "unused.yaml")
 
 	booted := watchWatcherStarted(t)
-	g, err := New(p)
+
+	gw, err := New(params)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	runErr := make(chan error, 1)
-	go func() { runErr <- g.Run(ctx) }()
 
-	var once sync.Once
-	var stopErr error
+	runErr := make(chan error, 1)
+	go func() { runErr <- gw.Run(ctx) }()
+
+	var (
+		once    sync.Once
+		stopErr error
+	)
+
 	stop := func() error {
 		once.Do(func() {
 			cancel()
+
 			select {
 			case stopErr = <-runErr:
 			case <-time.After(30 * time.Second):
 				stopErr = errors.New("gateway did not stop within 30s")
 			}
 		})
+
 		return stopErr
 	}
+
 	t.Cleanup(func() { _ = stop() })
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelWait()
-	if err := g.WaitReload(waitCtx); err != nil {
+
+	if err := gw.WaitReload(waitCtx); err != nil {
 		t.Fatalf("watcher was never created: %v", err)
 	}
 	// WaitReload returns as the watcher is created; Run then reads the
@@ -99,14 +111,15 @@ func startWith(t *testing.T, p Params) *running {
 		t.Fatal("upstream never logged that it started the watcher")
 	}
 
-	r := &running{
-		gateway:    g,
+	srv := &running{
+		gateway:    gw,
 		baseURL:    "http://" + net.JoinHostPort("", strconv.Itoa(port)),
-		configPath: p.ConfigPath,
+		configPath: params.ConfigPath,
 		stop:       stop,
 	}
-	waitHealthy(t, r.baseURL)
-	return r
+	waitHealthy(t, srv.baseURL)
+
+	return srv
 }
 
 // watcherStarted is what upstream logs right after handing the watcher its
@@ -119,16 +132,21 @@ const watcherStarted = "file watcher started for config and auth directory chang
 // gateway the caller starts.
 func watchWatcherStarted(t *testing.T) <-chan struct{} {
 	t.Helper()
-	h := &logHook{message: watcherStarted, seen: make(chan struct{})}
+
+	hook := &logHook{message: watcherStarted, seen: make(chan struct{})}
 	logger := log.StandardLogger()
+
 	hooks := make(log.LevelHooks)
 	for level, hs := range logger.Hooks {
 		hooks[level] = append([]log.Hook(nil), hs...)
 	}
-	hooks.Add(h)
+
+	hooks.Add(hook)
 	old := logger.ReplaceHooks(hooks)
+
 	t.Cleanup(func() { logger.ReplaceHooks(old) })
-	return h.seen
+
+	return hook.seen
 }
 
 // logHook closes seen the first time message is logged.
@@ -144,34 +162,48 @@ func (h *logHook) Fire(e *log.Entry) error {
 	if e.Message == h.message {
 		h.once.Do(func() { close(h.seen) })
 	}
+
 	return nil
 }
 
 // freePort reserves and releases a port so the gateway can bind it.
 func freePort(t *testing.T) int {
 	t.Helper()
-	l, err := net.Listen("tcp", ":0")
+
+	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", ":0")
 	if err != nil {
 		t.Fatalf("reserve port: %v", err)
 	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
+
+	addr, ok := listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("reserved address %v is not TCP", listener.Addr())
+	}
+
+	port := addr.Port
+
+	if err := listener.Close(); err != nil {
 		t.Fatalf("release port: %v", err)
 	}
+
 	return port
 }
 
 func waitHealthy(t *testing.T, baseURL string) {
 	t.Helper()
+
 	deadline := time.Now().Add(20 * time.Second)
+
 	for {
 		code, _ := get(t, baseURL+"/healthz")
 		if code == http.StatusOK {
 			return
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("gateway never became healthy, last status %d", code)
 		}
+
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -179,41 +211,49 @@ func waitHealthy(t *testing.T, baseURL string) {
 // get returns the status code, or 0 when the request could not be made.
 func get(t *testing.T, url string) (int, string) {
 	t.Helper()
+
 	return do(t, http.MethodGet, url)
 }
 
 func do(t *testing.T, method, url string) (int, string) {
 	t.Helper()
-	req, err := http.NewRequest(method, url, nil)
+
+	req, err := http.NewRequestWithContext(t.Context(), method, url, http.NoBody)
 	if err != nil {
 		t.Fatalf("build request %s %s: %v", method, url, err)
 	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, ""
 	}
+
 	defer func() { _ = resp.Body.Close() }()
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read body of %s %s: %v", method, url, err)
 	}
+
 	return resp.StatusCode, string(body)
 }
 
 func TestGatewayStartsAndStopsCleanly(t *testing.T) {
-	r := start(t, &cliproxyconfig.Config{})
+	srv := start(t, &cliproxyconfig.Config{})
 
-	if code, _ := get(t, r.baseURL+"/healthz"); code != http.StatusOK {
+	if code, _ := get(t, srv.baseURL+"/healthz"); code != http.StatusOK {
 		t.Fatalf("GET /healthz = %d, want %d", code, http.StatusOK)
 	}
 
-	if err := r.stop(); !errors.Is(err, context.Canceled) {
+	if err := srv.stop(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run returned %v, want context.Canceled", err)
 	}
-	if code, _ := get(t, r.baseURL+"/healthz"); code != 0 {
+
+	if code, _ := get(t, srv.baseURL+"/healthz"); code != 0 {
 		t.Fatalf("GET /healthz after stop = %d, want a connection failure", code)
 	}
-	if err := r.gateway.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
+
+	if err := srv.gateway.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("PushConfig after Run returned = %v, want ErrNotRunning", err)
 	}
 }
@@ -222,23 +262,26 @@ func TestGatewayStartsAndStopsCleanly(t *testing.T) {
 // That the pushed value reaches the running server is
 // TestPushedConfigReachesTheServer's job.
 func TestPushConfigAppliesWithoutAFile(t *testing.T) {
-	r := start(t, &cliproxyconfig.Config{})
+	srv := start(t, &cliproxyconfig.Config{})
 
-	updated := &cliproxyconfig.Config{AuthDir: t.TempDir(), Port: r.gateway.CurrentConfig().Port}
-	if err := r.gateway.PushConfig(updated); err != nil {
+	updated := &cliproxyconfig.Config{AuthDir: t.TempDir(), Port: srv.gateway.CurrentConfig().Port}
+	if err := srv.gateway.PushConfig(updated); err != nil {
 		t.Fatalf("PushConfig: %v", err)
 	}
-	if got := r.gateway.CurrentConfig(); got != updated {
+
+	if got := srv.gateway.CurrentConfig(); got != updated {
 		t.Fatalf("CurrentConfig did not return the pushed configuration")
 	}
-	if _, err := os.Stat(r.configPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("os.Stat(%q) = %v, want the config file never to exist", r.configPath, err)
+
+	if _, err := os.Stat(srv.configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("os.Stat(%q) = %v, want the config file never to exist", srv.configPath, err)
 	}
 }
 
 func TestPushConfigBeforeRunReportsNotRunning(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
-	g, err := New(Params{
+
+	gw, err := New(Params{
 		Config:     &cliproxyconfig.Config{AuthDir: t.TempDir()},
 		ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 		Resolver:   wireResolver,
@@ -246,7 +289,8 @@ func TestPushConfigBeforeRunReportsNotRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := g.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
+
+	if err := gw.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("PushConfig before Run = %v, want ErrNotRunning", err)
 	}
 }
@@ -263,6 +307,7 @@ func TestManagementRoutesAreNotRouted(t *testing.T) {
 
 func assertManagementUnrouted(t *testing.T, baseURL string) {
 	t.Helper()
+
 	for _, probe := range []struct {
 		method string
 		path   string
@@ -297,19 +342,22 @@ func TestControlPanelIsNotServed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(static, "management.html"), []byte("<html>panel</html>"), 0o600); err != nil {
 		t.Fatalf("plant panel asset: %v", err)
 	}
+
 	t.Setenv("MANAGEMENT_STATIC_PATH", static)
 
-	r := start(t, &cliproxyconfig.Config{})
-	if code, body := get(t, r.baseURL+"/management.html"); code != http.StatusNotFound {
+	srv := start(t, &cliproxyconfig.Config{})
+	if code, body := get(t, srv.baseURL+"/management.html"); code != http.StatusNotFound {
 		t.Fatalf("GET /management.html at boot = %d (%q), want %d", code, body, http.StatusNotFound)
 	}
 
-	reenable := &cliproxyconfig.Config{AuthDir: r.gateway.CurrentConfig().AuthDir, Port: r.gateway.CurrentConfig().Port}
+	reenable := &cliproxyconfig.Config{AuthDir: srv.gateway.CurrentConfig().AuthDir, Port: srv.gateway.CurrentConfig().Port}
+
 	reenable.RemoteManagement.DisableControlPanel = false
-	if err := r.gateway.PushConfig(reenable); err != nil {
+	if err := srv.gateway.PushConfig(reenable); err != nil {
 		t.Fatalf("PushConfig: %v", err)
 	}
-	if code, body := get(t, r.baseURL+"/management.html"); code != http.StatusNotFound {
+
+	if code, body := get(t, srv.baseURL+"/management.html"); code != http.StatusNotFound {
 		t.Fatalf("GET /management.html after a push re-enabling it = %d (%q), want %d", code, body, http.StatusNotFound)
 	}
 }
@@ -325,9 +373,11 @@ func TestControlPanelIsNotServed(t *testing.T) {
 // imported. An empty route model makes the conductor select purely on provider.
 func fakeVendor(t *testing.T, exec *faketest.Executor) *coreauth.Manager {
 	t.Helper()
-	m := coreauth.NewManager(nil, nil, nil)
-	m.RegisterExecutor(exec)
-	if _, err := m.Register(context.Background(), &coreauth.Auth{
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(exec)
+
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
 		ID:         "fake-credential",
 		Provider:   exec.Provider,
 		Status:     coreauth.StatusActive,
@@ -335,7 +385,8 @@ func fakeVendor(t *testing.T, exec *faketest.Executor) *coreauth.Manager {
 	}); err != nil {
 		t.Fatalf("register fake credential: %v", err)
 	}
-	return m
+
+	return manager
 }
 
 func TestFakeExecutorServesNonStreamingResponse(t *testing.T) {
@@ -352,7 +403,8 @@ func TestFakeExecutorServesNonStreamingResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if string(resp.Payload) != string(exec.Payload) {
+
+	if !bytes.Equal(resp.Payload, exec.Payload) {
 		t.Fatalf("payload = %q, want %q", resp.Payload, exec.Payload)
 	}
 }
@@ -373,15 +425,19 @@ func TestFakeExecutorServesStreamingResponse(t *testing.T) {
 	}
 
 	var got []string
+
 	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
 			t.Fatalf("stream chunk error: %v", chunk.Err)
 		}
+
 		got = append(got, string(chunk.Payload))
 	}
+
 	if len(got) != len(exec.Chunks) {
 		t.Fatalf("received %d chunks (%q), want %d", len(got), got, len(exec.Chunks))
 	}
+
 	for i, want := range exec.Chunks {
 		if got[i] != string(want) {
 			t.Fatalf("chunk %d = %q, want %q", i, got[i], want)
@@ -406,23 +462,31 @@ func TestFakeExecutorReproducesFailures(t *testing.T) {
 		StreamErr: midStream,
 	}
 	sm := fakeVendor(t, streaming)
+
 	stream, err := sm.ExecuteStream(context.Background(), []string{streaming.Provider},
 		cliproxyexecutor.Request{}, cliproxyexecutor.Options{Stream: true})
 	if err != nil {
 		t.Fatalf("ExecuteStream: %v", err)
 	}
+
 	var last error
+
 	chunks := 0
+
 	for chunk := range stream.Chunks {
 		if chunk.Err != nil {
 			last = chunk.Err
+
 			continue
 		}
+
 		chunks++
 	}
+
 	if chunks != 1 {
 		t.Fatalf("received %d payload chunks, want 1", chunks)
 	}
+
 	if !errors.Is(last, midStream) {
 		t.Fatalf("terminal chunk error = %v, want %v", last, midStream)
 	}
@@ -440,24 +504,31 @@ func TestFakeExecutorStopsStreamingWhenContextIsCancelled(t *testing.T) {
 		Latency:  time.Hour,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+
 	stream, err := exec.ExecuteStream(ctx, nil, cliproxyexecutor.Request{}, cliproxyexecutor.Options{Stream: true})
 	if err != nil {
 		t.Fatalf("ExecuteStream: %v", err)
 	}
+
 	cancel()
 
 	var got []cliproxyexecutor.StreamChunk
+
 	deadline := time.After(10 * time.Second)
+
 	for {
 		select {
 		case chunk, ok := <-stream.Chunks:
 			if ok {
 				got = append(got, chunk)
+
 				continue
 			}
+
 			if len(got) != 1 || !errors.Is(got[0].Err, context.Canceled) || got[0].Payload != nil {
 				t.Fatalf("stream delivered %+v before closing, want exactly one context.Canceled chunk", got)
 			}
+
 			return
 		case <-deadline:
 			t.Fatalf("producer did not close the stream after cancellation; received %+v", got)
@@ -469,14 +540,14 @@ func TestFakeExecutorStopsStreamingWhenContextIsCancelled(t *testing.T) {
 // the embedded service: on start-up the service registers its baseline provider
 // executors into whichever manager it owns, so they land in ours.
 func TestSuppliedCoreAuthManagerIsUsedByTheService(t *testing.T) {
-	m := coreauth.NewManager(nil, nil, nil)
-	if _, ok := m.Executor("claude"); ok {
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, ok := manager.Executor("claude"); ok {
 		t.Fatal("fresh manager already carries a baseline executor")
 	}
 
-	startWith(t, Params{Config: &cliproxyconfig.Config{}, CoreAuth: m})
+	startWith(t, Params{Config: &cliproxyconfig.Config{}, CoreAuth: manager})
 
-	if _, ok := m.Executor("claude"); !ok {
+	if _, ok := manager.Executor("claude"); !ok {
 		t.Fatal("supplied core auth manager received no executors; the service built its own")
 	}
 }
@@ -484,7 +555,7 @@ func TestSuppliedCoreAuthManagerIsUsedByTheService(t *testing.T) {
 // TestMiddlewareIsAppliedToRequests: Params.Middleware runs on requests the
 // policy gate admits.
 func TestMiddlewareIsAppliedToRequests(t *testing.T) {
-	r := startWith(t, Params{
+	srv := startWith(t, Params{
 		Config: &cliproxyconfig.Config{},
 		Middleware: []gin.HandlerFunc{func(c *gin.Context) {
 			c.Header("X-Gateway-Middleware", "applied")
@@ -492,11 +563,17 @@ func TestMiddlewareIsAppliedToRequests(t *testing.T) {
 		}},
 	})
 
-	resp, err := http.Get(r.baseURL + "/healthz")
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.baseURL+"/healthz", http.NoBody)
+	if err != nil {
+		t.Fatalf("build GET /healthz: %v", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
 	if got := resp.Header.Get("X-Gateway-Middleware"); got != "applied" {
 		t.Fatalf("X-Gateway-Middleware = %q, want %q", got, "applied")
 	}
@@ -509,6 +586,7 @@ func TestMiddlewareIsAppliedToRequests(t *testing.T) {
 // coreauth.CooldownStateStoreProvider — the upstream default path gets nil too.
 func TestNewCoreAuthManagerUsesTheAuthDirectory(t *testing.T) {
 	authDir := t.TempDir()
+
 	m, _, _ := NewCoreAuthManager(&cliproxyconfig.Config{AuthDir: authDir})
 	if m == nil {
 		t.Fatal("NewCoreAuthManager returned no manager")
@@ -528,6 +606,7 @@ func TestNewCoreAuthManagerUsesTheAuthDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read auth dir: %v", err)
 	}
+
 	if len(entries) == 0 {
 		t.Fatalf("no credential was written to %q; the auth directory was not applied", authDir)
 	}
@@ -537,20 +616,24 @@ func TestNewCoreAuthManagerUsesTheAuthDirectory(t *testing.T) {
 // makes upstream register /v0/management on reload, and in later tasks the
 // pushed configuration is built from operator-editable rows.
 func TestPushConfigCannotEnableManagement(t *testing.T) {
-	r := start(t, &cliproxyconfig.Config{})
-	before := r.gateway.CurrentConfig()
+	srv := start(t, &cliproxyconfig.Config{})
+	before := srv.gateway.CurrentConfig()
 
 	withSecret := &cliproxyconfig.Config{AuthDir: t.TempDir(), Port: before.Port}
+
 	withSecret.RemoteManagement.SecretKey = "operator-supplied-secret"
-	if err := r.gateway.PushConfig(withSecret); !errors.Is(err, ErrManagementSecret) {
+	if err := srv.gateway.PushConfig(withSecret); !errors.Is(err, ErrManagementSecret) {
 		t.Fatalf("PushConfig with a secret key = %v, want ErrManagementSecret", err)
 	}
-	if r.gateway.CurrentConfig() != before {
+
+	if srv.gateway.CurrentConfig() != before {
 		t.Fatal("CurrentConfig reports the rejected configuration")
 	}
-	assertManagementUnrouted(t, r.baseURL)
+
+	assertManagementUnrouted(t, srv.baseURL)
 
 	initial := &cliproxyconfig.Config{AuthDir: t.TempDir()}
+
 	initial.RemoteManagement.SecretKey = "operator-supplied-secret"
 	if _, err := New(Params{Config: initial, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml")}); !errors.Is(err, ErrManagementSecret) {
 		t.Fatalf("New with a secret key = %v, want ErrManagementSecret", err)
@@ -562,11 +645,13 @@ func TestPushConfigCannotEnableManagement(t *testing.T) {
 // arrives. WaitReload must hand back Run's error rather than wait out ctx.
 func TestWaitReloadReportsABootFailure(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
+
 	notADir := filepath.Join(t.TempDir(), "auth-file")
 	if err := os.WriteFile(notADir, nil, 0o600); err != nil {
 		t.Fatalf("create file: %v", err)
 	}
-	g, err := New(Params{
+
+	gw, err := New(Params{
 		Config:     &cliproxyconfig.Config{Port: freePort(t), AuthDir: notADir},
 		ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 		Resolver:   wireResolver,
@@ -575,14 +660,15 @@ func TestWaitReloadReportsABootFailure(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
+
 	runErr := make(chan error, 1)
-	go func() { runErr <- g.Run(ctx) }()
+	go func() { runErr <- gw.Run(ctx) }()
 
 	waitCtx, cancelWait := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelWait()
-	waitErr := g.WaitReload(waitCtx)
+
+	waitErr := gw.WaitReload(waitCtx)
 
 	var ran error
 	select {
@@ -590,13 +676,16 @@ func TestWaitReloadReportsABootFailure(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("Run did not return on an unusable auth directory")
 	}
+
 	if ran == nil {
 		t.Fatal("Run returned nil on an unusable auth directory")
 	}
+
 	if !errors.Is(waitErr, ran) {
 		t.Fatalf("WaitReload = %v, want Run's error %v", waitErr, ran)
 	}
-	if err := g.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
+
+	if err := gw.PushConfig(&cliproxyconfig.Config{}); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("PushConfig after a failed boot = %v, want ErrNotRunning", err)
 	}
 }

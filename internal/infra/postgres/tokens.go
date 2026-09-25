@@ -3,16 +3,20 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// tokenColumns is the SELECT projection of api_tokens; it holds column names, not a
+// credential.
+//
+//nolint:gosec // G101 false positive: a column list that merely mentions "hash".
 const tokenColumns = `id, user_id, label, hash, prefix, created_at, last_used_at,
 	revoked_at, revoked_by`
 
@@ -27,30 +31,43 @@ func NewTokenRepo(pool *pgxpool.Pool) *TokenRepo { return &TokenRepo{pool: pool}
 // what committed before it began, so the count that follows the lock includes every
 // token a create that held the lock before this one wrote. An unknown owner is
 // app.ErrNotFound.
-func (r *TokenRepo) Create(ctx context.Context, t credentials.Token) error {
-	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+func (r *TokenRepo) Create(ctx context.Context, token credentials.Token) error {
+	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var owner uuid.UUID
-		err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, t.UserID).Scan(&owner)
+
+		err := tx.QueryRow(ctx, `SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, token.UserID).Scan(&owner)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return app.ErrNotFound
 		}
+
 		if err != nil {
-			return err
+			return fmt.Errorf("postgres: lock token owner: %w", err)
 		}
+
 		var live int
 		if err := tx.QueryRow(ctx,
-			`SELECT count(*) FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL`, t.UserID).Scan(&live); err != nil {
-			return err
+			`SELECT count(*) FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL`, token.UserID).Scan(&live); err != nil {
+			return fmt.Errorf("postgres: count live tokens: %w", err)
 		}
+
 		if live >= app.MaxLiveTokensPerOwner {
 			return app.ErrTokenLimit
 		}
-		_, err = tx.Exec(ctx,
+
+		if _, err := tx.Exec(ctx,
 			`INSERT INTO api_tokens (id, user_id, label, hash, prefix, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6)`,
-			t.ID, t.UserID, t.Label, t.Hash, t.Prefix, t.CreatedAt.UTC())
-		return err
+			token.ID, token.UserID, token.Label, token.Hash, token.Prefix, token.CreatedAt.UTC()); err != nil {
+			return fmt.Errorf("postgres: insert token: %w", err)
+		}
+
+		return nil
 	})
+	if err != nil {
+		return fmt.Errorf("postgres: create token: %w", err)
+	}
+
+	return nil
 }
 
 // ByID loads a token the caller already knows the identity of — the revoke path,
@@ -72,16 +89,19 @@ func (r *TokenRepo) ByHash(ctx context.Context, hash string) (credentials.Token,
 // scanToken is the single reader of tokenColumns, so the projection and the scan
 // cannot drift apart between the two lookups.
 func scanToken(row pgx.Row) (credentials.Token, error) {
-	var t credentials.Token
-	err := row.Scan(&t.ID, &t.UserID, &t.Label, &t.Hash, &t.Prefix, &t.CreatedAt,
-		&t.LastUsedAt, &t.RevokedAt, &t.RevokedBy)
+	var token credentials.Token
+
+	err := row.Scan(&token.ID, &token.UserID, &token.Label, &token.Hash, &token.Prefix, &token.CreatedAt,
+		&token.LastUsedAt, &token.RevokedAt, &token.RevokedBy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return credentials.Token{}, app.ErrNotFound
 	}
+
 	if err != nil {
-		return credentials.Token{}, err
+		return credentials.Token{}, fmt.Errorf("postgres: scan token: %w", err)
 	}
-	return t, nil
+
+	return token, nil
 }
 
 func (r *TokenRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]credentials.Token, error) {
@@ -89,34 +109,43 @@ func (r *TokenRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]credent
 		`SELECT `+tokenColumns+` FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
 		userID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("postgres: list tokens: %w", err)
 	}
 	defer rows.Close()
 
 	var out []credentials.Token
+
 	for rows.Next() {
-		var t credentials.Token
-		if err := rows.Scan(&t.ID, &t.UserID, &t.Label, &t.Hash, &t.Prefix, &t.CreatedAt,
-			&t.LastUsedAt, &t.RevokedAt, &t.RevokedBy); err != nil {
-			return nil, err
+		var token credentials.Token
+		if err := rows.Scan(&token.ID, &token.UserID, &token.Label, &token.Hash, &token.Prefix, &token.CreatedAt,
+			&token.LastUsedAt, &token.RevokedAt, &token.RevokedBy); err != nil {
+			return nil, fmt.Errorf("postgres: scan token: %w", err)
 		}
-		out = append(out, t)
+
+		out = append(out, token)
 	}
-	return out, rows.Err()
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("postgres: list tokens: %w", err)
+	}
+
+	return out, nil
 }
 
 // Save persists the mutable half of a token: its label and its revocation. The hash,
 // prefix and owner are fixed at creation and are deliberately not updatable.
-func (r *TokenRepo) Save(ctx context.Context, t credentials.Token) error {
+func (r *TokenRepo) Save(ctx context.Context, token credentials.Token) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE api_tokens SET label = $2, revoked_at = $3, revoked_by = $4 WHERE id = $1`,
-		t.ID, t.Label, t.RevokedAt, t.RevokedBy)
+		token.ID, token.Label, token.RevokedAt, token.RevokedBy)
 	if err != nil {
-		return err
+		return fmt.Errorf("postgres: save token: %w", err)
 	}
+
 	if tag.RowsAffected() == 0 {
 		return app.ErrNotFound
 	}
+
 	return nil
 }
 
@@ -125,7 +154,10 @@ func (r *TokenRepo) Save(ctx context.Context, t credentials.Token) error {
 // The stamp never moves backwards: stamps can arrive out of order, and GREATEST
 // ignores a NULL.
 func (r *TokenRepo) TouchLastUsed(ctx context.Context, id uuid.UUID, at time.Time) error {
-	_, err := r.pool.Exec(ctx,
-		`UPDATE api_tokens SET last_used_at = GREATEST(last_used_at, $2) WHERE id = $1`, id, at.UTC())
-	return err
+	if _, err := r.pool.Exec(ctx,
+		`UPDATE api_tokens SET last_used_at = GREATEST(last_used_at, $2) WHERE id = $1`, id, at.UTC()); err != nil {
+		return fmt.Errorf("postgres: touch token last used: %w", err)
+	}
+
+	return nil
 }

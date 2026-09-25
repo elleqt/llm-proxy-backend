@@ -34,33 +34,41 @@ func (rt *router) registerAdminProviders(routes map[string]http.HandlerFunc) {
 	routes["DELETE /api/admin/providers/{accountId}"] = rt.removeProviderAccount
 }
 
-func (rt *router) listProviderAccounts(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	accounts, err := rt.Providers.List(r.Context(), c.user)
+func (rt *router) listProviderAccounts(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+
+	accounts, err := rt.Providers.List(req.Context(), c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := make([]api.ProviderAccount, 0, len(accounts))
 	for _, a := range accounts {
 		out = append(out, providerAccountOf(a))
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // startProviderLogin is the one response that carries the login's authorisation URL.
-func (rt *router) startProviderLogin(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) startProviderLogin(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.ProviderLoginStartRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	login, err := rt.Providers.StartLogin(r.Context(), c.user, string(body.Provider))
+
+	login, err := rt.Providers.StartLogin(req.Context(), actor.user, string(body.Provider))
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusCreated, api.ProviderLoginSession{
+
+	writeJSON(rw, http.StatusCreated, api.ProviderLoginSession{
 		SessionId: login.SessionID, AuthURL: login.AuthURL, ExpiresAt: login.ExpiresAt.UTC(),
 	})
 }
@@ -68,70 +76,83 @@ func (rt *router) startProviderLogin(w http.ResponseWriter, r *http.Request) {
 // completeProviderLogin hands the pasted callback URL, which carries the vendor's
 // authorisation code, to the gateway. It never appears in a response or a log line
 // written here: every refusal is a fixed message.
-func (rt *router) completeProviderLogin(w http.ResponseWriter, r *http.Request) {
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(completeLoginWriteTime)); err != nil &&
+func (rt *router) completeProviderLogin(rw http.ResponseWriter, req *http.Request) {
+	if err := http.NewResponseController(rw).SetWriteDeadline(time.Now().Add(completeLoginWriteTime)); err != nil &&
 		!errors.Is(err, http.ErrNotSupported) {
 		rt.Log.Warn("extending the write deadline failed",
-			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("err", err))
+			slog.String("method", req.Method), slog.String("path", req.URL.Path), slog.Any("err", err))
 	}
-	c, _ := callerFrom(r.Context())
+
+	actor, _ := callerFrom(req.Context())
+
 	var body api.ProviderLoginCompleteRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	account, err := rt.Providers.CompleteLogin(r.Context(), c.user, body.SessionId, body.CallbackURL)
+
+	account, err := rt.Providers.CompleteLogin(req.Context(), actor.user, body.SessionId, body.CallbackURL)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusCreated, providerAccountOf(account))
+
+	writeJSON(rw, http.StatusCreated, providerAccountOf(account))
 }
 
 // updateProviderAccount requires `disabled`: a body without it (or with null) must
 // not read as "enable".
-func (rt *router) updateProviderAccount(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) updateProviderAccount(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var raw map[string]json.RawMessage
-	if !decodeJSON(w, r, &raw) {
+	if !decodeJSON(rw, req, &raw) {
 		return
 	}
+
 	var body api.UpdateProviderAccountJSONBody
 	if v, ok := raw["disabled"]; !ok || string(v) == "null" || json.Unmarshal(v, &body.Disabled) != nil {
-		writeFieldError(w, http.StatusUnprocessableEntity, codeInvalidInput, "disabled", "disabled must be true or false")
+		writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "disabled", "disabled must be true or false")
+
 		return
 	}
-	account, err := rt.Providers.SetDisabled(r.Context(), c.user, r.PathValue("accountId"), body.Disabled)
+
+	account, err := rt.Providers.SetDisabled(req.Context(), actor.user, req.PathValue("accountId"), body.Disabled)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, providerAccountOf(account))
+
+	writeJSON(rw, http.StatusOK, providerAccountOf(account))
 }
 
-func (rt *router) removeProviderAccount(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	if err := rt.Providers.Remove(r.Context(), c.user, r.PathValue("accountId")); err != nil {
-		rt.adminFailure(w, r, err)
+func (rt *router) removeProviderAccount(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+	if err := rt.Providers.Remove(req.Context(), c.user, req.PathValue("accountId")); err != nil {
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+
+	rw.WriteHeader(http.StatusNoContent)
 }
 
 // providerAccountOf describes a vendor account as the contract's ProviderAccount. It
 // carries no credential: the gateway hands over none.
-func providerAccountOf(a app.VendorAccount) api.ProviderAccount {
+func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 	out := api.ProviderAccount{
-		Id:              a.ID,
-		Provider:        a.Provider,
-		Status:          a.Status,
-		Disabled:        a.Disabled,
-		Label:           nonEmpty(a.Label),
-		Email:           nonEmpty(a.Email),
-		LastError:       nonEmpty(a.LastError),
-		LastRefreshedAt: nonZero(a.LastRefreshedAt),
-		Quota:           make([]quotaSignal, 0, len(a.Quota)),
+		Id:              account.ID,
+		Provider:        account.Provider,
+		Status:          account.Status,
+		Disabled:        account.Disabled,
+		Label:           nonEmpty(account.Label),
+		Email:           nonEmpty(account.Email),
+		LastError:       nonEmpty(account.LastError),
+		LastRefreshedAt: nonZero(account.LastRefreshedAt),
+		Quota:           make([]quotaSignal, 0, len(account.Quota)),
 	}
-	for _, q := range a.Quota {
+	for _, q := range account.Quota {
 		out.Quota = append(out.Quota, quotaSignal{
 			Window:     q.Window,
 			UsedRatio:  float32(q.UsedRatio),
@@ -139,6 +160,7 @@ func providerAccountOf(a app.VendorAccount) api.ProviderAccount {
 			ObservedAt: nonZero(q.ObservedAt),
 		})
 	}
+
 	return out
 }
 
@@ -146,14 +168,17 @@ func nonEmpty(s string) *string {
 	if s == "" {
 		return nil
 	}
+
 	return &s
 }
 
 // nonZero is t in UTC, or nil for the zero time, which the gateway uses for "never".
-func nonZero(t time.Time) *time.Time {
-	if t.IsZero() {
+func nonZero(at time.Time) *time.Time {
+	if at.IsZero() {
 		return nil
 	}
-	t = t.UTC()
-	return &t
+
+	at = at.UTC()
+
+	return &at
 }
