@@ -179,6 +179,8 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		"LLMPROXY_SESSION_KEY":   "",
 		"LLMPROXY_OIDC_ISSUER":   "",
 		"LLMPROXY_LOCAL_LOGIN":   "",
+		// The default text log, whatever format the caller's environment set.
+		"LLMPROXY_LOG_FORMAT": "",
 		// Never the network: a test that wants a catalog serves one and sets these.
 		"LLMPROXY_PRICES_CATALOG_URL":      config.PriceCatalogOff,
 		"LLMPROXY_PRICES_CATALOG_INTERVAL": "",

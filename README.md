@@ -648,6 +648,7 @@ All settings are environment variables, set in the backend's `environment` in th
 | `LLMPROXY_RUNTIME_DIR` | `/var/lib/llmproxy/runtime` | CLIProxyAPI's working directory (its request logs). No config file is read from it |
 | `LLMPROXY_AUTH_DIR` | `/var/lib/llmproxy/auths` | Vendor OAuth grants. Must be persistent (`grants` volume) |
 | `LLMPROXY_PASSWORD_HASH_CONCURRENCY` | CPU count | How many argon2 password hashes (about 19 MiB each) may run at once |
+| `LLMPROXY_LOG_FORMAT` | `text` | Process log format (on stderr): `text` (one `key=value` line per record) or `json` (one JSON object per record). Every record carries `version` and `component` (`llmproxy`, or `cliproxyapi` for CLIProxyAPI's own lines, which also carry `cliproxy_version`) |
 
 **Listeners**
 

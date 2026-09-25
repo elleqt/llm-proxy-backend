@@ -198,6 +198,29 @@ func TestModelCatalogUpdatesAreOnUnlessTurnedOff(t *testing.T) {
 	}
 }
 
+// The log format is text unless the operator asks for json; a misspelt value
+// stops the start rather than silently choosing either way.
+func TestLogFormatIsTextUnlessJSON(t *testing.T) {
+	setWebEnv(t, nil)
+	t.Setenv("LLMPROXY_DATABASE_URL", "postgres://u:p@localhost:5432/db")
+	for raw, want := range map[string]string{"": LogFormatText, LogFormatText: LogFormatText, LogFormatJSON: LogFormatJSON} {
+		t.Setenv("LLMPROXY_LOG_FORMAT", raw)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if cfg.LogFormat != want {
+			t.Fatalf("%q: LogFormat = %q, want %q", raw, cfg.LogFormat, want)
+		}
+	}
+	for _, raw := range []string{"JSON", "logfmt", "yaml"} {
+		t.Setenv("LLMPROXY_LOG_FORMAT", raw)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_LOG_FORMAT") {
+			t.Fatalf("%q: err = %v, want one naming LLMPROXY_LOG_FORMAT", raw, err)
+		}
+	}
+}
+
 // A listen address the server cannot bind as given is refused at start, naming the
 // variable, rather than failing later inside upstream or binding a random port.
 func TestLoadRejectsAMalformedListenAddress(t *testing.T) {

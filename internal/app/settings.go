@@ -78,6 +78,11 @@ func invalid(field, reason string) error {
 //   - debug: upstream's debug logging, switched on for the whole process by a
 //     reload (internal/api/server_reload.go util.SetLogLevel), logs request
 //     details; the composition root keeps it off.
+//   - logging-to-file, logs-max-total-size-mb: a change to either makes upstream's
+//     reload call logging.ConfigureLogOutput, which re-points the global logrus
+//     at stdout or at rotating files behind the process log's slog bridge. They
+//     stay at their zero values, and every upstream record reaches the process
+//     log through the bridge.
 //   - auth-dir: the credential store, which upstream never re-points on reload.
 //   - remote-management, api-keys, plugins, ws-auth: what the gateway refuses or
 //     forces (gateway.admit) — management stays off, access is by user token only,
@@ -88,6 +93,7 @@ func invalid(field, reason string) error {
 //     credentials PushConfig cannot add, so they are boot-only.
 var ownedKeys = []string{
 	"host", "port", "tls", "trusted-proxies", "pprof", "discovery", "debug", "auth-dir",
+	"logging-to-file", "logs-max-total-size-mb",
 	"remote-management", "api-keys", "plugins", "ws-auth", "openai-compatibility",
 }
 

@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -104,7 +105,8 @@ const refreshWriteTime = 2*app.CatalogFetchTimeout + time.Minute
 func (rt *router) refreshPriceCatalog(w http.ResponseWriter, r *http.Request) {
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(refreshWriteTime)); err != nil &&
 		!errors.Is(err, http.ErrNotSupported) {
-		rt.Log.Warnf("web: %s %s: extend the write deadline: %v", r.Method, r.URL.Path, err)
+		rt.Log.Warn("extending the write deadline failed",
+			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("err", err))
 	}
 	c, _ := callerFrom(r.Context())
 	list, err := rt.Prices.Refresh(r.Context(), c.user)

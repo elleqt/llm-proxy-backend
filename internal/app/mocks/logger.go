@@ -5,6 +5,8 @@
 package mocks
 
 import (
+	"log/slog"
+
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -44,40 +46,40 @@ func (_m *Logger) EXPECT() *Logger_Expecter {
 	return &Logger_Expecter{mock: &_m.Mock}
 }
 
-// Warnf provides a mock function for the type Logger
-func (_mock *Logger) Warnf(format string, args ...any) {
-	if len(args) > 0 {
-		_mock.Called(format, args)
+// Warn provides a mock function for the type Logger
+func (_mock *Logger) Warn(msg string, attrs ...slog.Attr) {
+	if len(attrs) > 0 {
+		_mock.Called(msg, attrs)
 	} else {
-		_mock.Called(format)
+		_mock.Called(msg)
 	}
 
 	return
 }
 
-// Logger_Warnf_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Warnf'
-type Logger_Warnf_Call struct {
+// Logger_Warn_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Warn'
+type Logger_Warn_Call struct {
 	*mock.Call
 }
 
-// Warnf is a helper method to define mock.On call
-//   - format string
-//   - args ...any
-func (_e *Logger_Expecter) Warnf(format any, args ...any) *Logger_Warnf_Call {
-	return &Logger_Warnf_Call{Call: _e.mock.On("Warnf",
-		append([]any{format}, args...)...)}
+// Warn is a helper method to define mock.On call
+//   - msg string
+//   - attrs ...slog.Attr
+func (_e *Logger_Expecter) Warn(msg any, attrs ...any) *Logger_Warn_Call {
+	return &Logger_Warn_Call{Call: _e.mock.On("Warn",
+		append([]any{msg}, attrs...)...)}
 }
 
-func (_c *Logger_Warnf_Call) Run(run func(format string, args ...any)) *Logger_Warnf_Call {
+func (_c *Logger_Warn_Call) Run(run func(msg string, attrs ...slog.Attr)) *Logger_Warn_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 string
 		if args[0] != nil {
 			arg0 = args[0].(string)
 		}
-		var arg1 []any
-		var variadicArgs []any
+		var arg1 []slog.Attr
+		var variadicArgs []slog.Attr
 		if len(args) > 1 {
-			variadicArgs = args[1].([]any)
+			variadicArgs = args[1].([]slog.Attr)
 		}
 		arg1 = variadicArgs
 		run(
@@ -88,12 +90,12 @@ func (_c *Logger_Warnf_Call) Run(run func(format string, args ...any)) *Logger_W
 	return _c
 }
 
-func (_c *Logger_Warnf_Call) Return() *Logger_Warnf_Call {
+func (_c *Logger_Warn_Call) Return() *Logger_Warn_Call {
 	_c.Call.Return()
 	return _c
 }
 
-func (_c *Logger_Warnf_Call) RunAndReturn(run func(format string, args ...any)) *Logger_Warnf_Call {
+func (_c *Logger_Warn_Call) RunAndReturn(run func(msg string, attrs ...slog.Attr)) *Logger_Warn_Call {
 	_c.Run(run)
 	return _c
 }

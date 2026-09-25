@@ -3,6 +3,7 @@ package http
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -154,6 +155,7 @@ func requireAdmin(next http.Handler) http.Handler {
 // internalError logs err and answers the contract's 500. The error text goes to the
 // log only: it may name internals, and the client has no use for them.
 func internalError(w http.ResponseWriter, r *http.Request, log app.Logger, err error) {
-	log.Warnf("web: %s %s: %v", r.Method, r.URL.Path, err)
+	log.Warn("internal error serving request",
+		slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("err", err))
 	writeError(w, http.StatusInternalServerError, codeInternal, "internal error")
 }

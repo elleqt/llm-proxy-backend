@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -179,8 +180,8 @@ func TestIssueErrorNamesBothFailuresWhenTheRetractionAlsoFails(t *testing.T) {
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(saveDown)
 
 	var warned string
-	logger.EXPECT().Warnf(mock.Anything, mock.Anything).Run(func(format string, args ...any) {
-		warned = fmt.Sprintf(format, args...)
+	logger.EXPECT().Warn(mock.Anything, mock.Anything).Run(func(msg string, attrs ...slog.Attr) {
+		warned = fmt.Sprint(msg, attrs)
 	})
 
 	_, secret, err := svc.Issue(context.Background(), owner, owner.ID, "laptop")
@@ -410,8 +411,8 @@ func TestRevokeSucceedsAndLogsWhenTheAuditRecordFails(t *testing.T) {
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(sinkDown)
 
 	var warned string
-	logger.EXPECT().Warnf(mock.Anything, mock.Anything).Run(func(format string, args ...any) {
-		warned = fmt.Sprintf(format, args...)
+	logger.EXPECT().Warn(mock.Anything, mock.Anything).Run(func(msg string, attrs ...slog.Attr) {
+		warned = fmt.Sprint(msg, attrs)
 	})
 
 	if err := svc.Revoke(context.Background(), owner, tok.ID); err != nil {

@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"sort"
 	"strconv"
@@ -207,7 +208,8 @@ func (s *UsageSink) process(records []cliproxyusage.Record) {
 	events := make([]app.UsageEvent, 0, len(records))
 	for _, r := range records {
 		s.guard(func(p any) {
-			s.log.Warnf("usage: recovered a panic handling a %s/%s record: %v", policyProvider(r.Provider), r.Model, p)
+			s.log.Warn("recovered a panic handling a usage record",
+				slog.String("provider", policyProvider(r.Provider)), slog.String("model", r.Model), slog.Any("panic", p))
 		}, func() {
 			ev := s.eventOf(r)
 			events = append(events, ev)
@@ -215,12 +217,12 @@ func (s *UsageSink) process(records []cliproxyusage.Record) {
 		})
 	}
 	s.guard(func(p any) {
-		s.log.Warnf("usage: recovered a panic writing %d ledger rows: %v", len(events), p)
+		s.log.Warn("recovered a panic writing usage ledger rows", slog.Int("rows", len(events)), slog.Any("panic", p))
 	}, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), usageWriteTimeout)
 		defer cancel()
 		if err := s.events.AppendBatch(ctx, events); err != nil {
-			s.log.Warnf("usage: %d ledger rows lost: %v", len(events), err)
+			s.log.Warn("usage ledger rows lost", slog.Int("rows", len(events)), slog.Any("err", err))
 		}
 		s.touch(ctx, events)
 	})
@@ -281,7 +283,8 @@ func (s *UsageSink) eventOf(r cliproxyusage.Record) app.UsageEvent {
 		ev.UserID, ev.TokenID = p.UserID, p.TokenID
 	} else {
 		// The value is not logged: it may be a credential upstream recorded.
-		s.log.Warnf("usage: %s/%s record carries no principal; stored unattributed", ev.Provider, r.Model)
+		s.log.Warn("usage record carries no principal; stored unattributed",
+			slog.String("provider", ev.Provider), slog.String("model", r.Model))
 	}
 
 	// Upstream's canonical breakdown partitions the total without double
@@ -412,12 +415,12 @@ func (s *UsageSink) touch(ctx context.Context, events []app.UsageEvent) {
 	}
 	for id, at := range tokens {
 		if err := s.tokens.TouchLastUsed(ctx, id, at); err != nil {
-			s.log.Warnf("usage: stamp token last use: %v", err)
+			s.log.Warn("stamping token last use failed", slog.Any("err", err))
 		}
 	}
 	for id, at := range users {
 		if err := s.users.TouchLastSeen(ctx, id, at); err != nil {
-			s.log.Warnf("usage: stamp user last seen: %v", err)
+			s.log.Warn("stamping user last seen failed", slog.Any("err", err))
 		}
 	}
 }

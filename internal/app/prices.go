@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"slices"
 	"strings"
@@ -222,7 +223,7 @@ func (p *Prices) RunCatalog(ctx context.Context, interval time.Duration) {
 	defer tick.Stop()
 	for {
 		if _, err := p.check(ctx); err != nil && ctx.Err() == nil {
-			p.log.Warnf("price catalog: %v", err)
+			p.log.Warn("price catalog check failed", slog.Any("err", err))
 		}
 		select {
 		case <-ctx.Done():
@@ -315,7 +316,8 @@ func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, er
 	defer p.mu.Unlock()
 	p.state.LastError = why
 	res := checkResult{outcome: catalogFailed, models: len(p.catalogPrices), failure: why}
-	p.log.Warnf("price catalog check failed: %s; the %d catalog prices in force are kept", why, res.models)
+	p.log.Warn("price catalog check failed; catalog prices in force are kept",
+		slog.String("reason", why), slog.Int("prices", res.models))
 	if err := p.catalog.SetState(ctx, p.state); err != nil {
 		return res, fmt.Errorf("app: record the price catalog failure: %w", err)
 	}
@@ -346,7 +348,7 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 			// Stopped while storing, not failed: nothing was stored.
 			return checkResult{}, ctx.Err()
 		}
-		p.log.Warnf("price catalog: store the check: %v", err)
+		p.log.Warn("price catalog: storing the check failed", slog.Any("err", err))
 		return p.recordFailure(ctx, "the catalog could not be stored")
 	}
 	defer p.mu.Unlock()
@@ -354,14 +356,14 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 
 	if !changed {
 		p.metrics.SetPriceCatalog(len(p.catalogPrices), now)
-		p.log.Infof("price catalog checked: unchanged, %d prices", len(p.catalogPrices))
+		p.log.Info("price catalog checked: unchanged", slog.Int("prices", len(p.catalogPrices)))
 		return checkResult{outcome: catalogUnchanged, models: len(p.catalogPrices)}, nil
 	}
 	// As in Replace: what was stored goes to the sink before the read-back.
 	p.catalogPrices = fetched.Prices
 	p.publish()
 	p.metrics.SetPriceCatalog(len(fetched.Prices), now)
-	p.log.Infof("price catalog updated: %d prices", len(fetched.Prices))
+	p.log.Info("price catalog updated", slog.Int("prices", len(fetched.Prices)))
 	res := checkResult{outcome: catalogChanged, models: len(fetched.Prices)}
 	stored, err := p.catalog.List(ctx)
 	if err != nil {

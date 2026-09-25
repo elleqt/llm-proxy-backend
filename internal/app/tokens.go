@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -116,10 +117,9 @@ func (s *TokenService) retract(ctx context.Context, tok credentials.Token, by uu
 // that no audit record describes. The caller's error string would otherwise be the only
 // trace of it, and the caller is not who fixes this.
 func (s *TokenService) stranded(tok credentials.Token, cause, failure error, what string) error {
-	s.logger.Warnf(
-		"app: token %s for owner %s is live but unaudited: audit failed (%v) and %s (%v) — revoke it by hand",
-		tok.ID, tok.UserID, cause, what, failure,
-	)
+	s.logger.Warn("token is live but unaudited — revoke it by hand",
+		slog.String("token", tok.ID.String()), slog.String("owner", tok.UserID.String()),
+		slog.Any("audit_err", cause), slog.String("cleanup", what), slog.Any("cleanup_err", failure))
 	return fmt.Errorf("app: issued token not audited (%w); %s: %v", cause, what, failure)
 }
 
@@ -155,7 +155,7 @@ func (s *TokenService) Revoke(ctx context.Context, actor identity.User, tokenID 
 		Target:  "token/" + tok.ID.String(),
 		Detail:  map[string]any{"token_id": tok.ID.String(), "owner_id": tok.UserID.String(), "label": tok.Label},
 	}); err != nil {
-		s.logger.Warnf("app: token %s revoked but the audit record failed: %v", tok.ID, err)
+		s.logger.Warn("token revoked but the audit record failed", slog.String("token", tok.ID.String()), slog.Any("err", err))
 	}
 	return nil
 }

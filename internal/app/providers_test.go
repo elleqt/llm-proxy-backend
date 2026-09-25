@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -268,8 +269,8 @@ func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(auditDown)
 	accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(errors.New("credential not deleted"))
 	var warned string
-	logger.EXPECT().Warnf(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
-		Run(func(format string, args ...any) { warned = fmt.Sprintf(format, args...) })
+	logger.EXPECT().Warn(mock.Anything, mock.Anything).
+		Run(func(msg string, attrs ...slog.Attr) { warned = fmt.Sprint(msg, attrs) })
 
 	if _, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, auditDown) {
 		t.Fatalf("CompleteLogin = %v, want the audit error", err)

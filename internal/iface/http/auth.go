@@ -2,6 +2,7 @@ package http
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
@@ -164,7 +165,7 @@ func (rt *router) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(err, app.ErrInvalidCredentials) {
 			// Not a verdict on the person: the IdP or the database failed, and
 			// an operator needs to know.
-			rt.Log.Warnf("web: oidc callback: %v", err)
+			rt.Log.Warn("oidc callback failed", slog.Any("err", err))
 		}
 		http.Redirect(w, r, oidcFailed, http.StatusFound)
 		return

@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -81,6 +82,8 @@ type Params struct {
 	Resolver Resolver
 	// Observer is told what the policy gate refuses. Nil observes nothing.
 	Observer GateObserver
+	// Log receives the policy gate's own failures. Nil discards them.
+	Log *slog.Logger
 }
 
 // Gateway owns the embedded upstream service and the configuration pushed into it.
@@ -364,7 +367,7 @@ func New(p Params) (*Gateway, error) {
 		}).
 		WithServerOptions(
 			sdkapi.WithEngineConfigurator(g.configureEngine),
-			sdkapi.WithMiddleware(policyGate(p.Resolver, catalog, p.Observer)),
+			sdkapi.WithMiddleware(policyGate(p.Resolver, catalog, p.Observer, p.Log)),
 		)
 	if len(p.Middleware) > 0 {
 		builder = builder.WithServerOptions(sdkapi.WithMiddleware(p.Middleware...))

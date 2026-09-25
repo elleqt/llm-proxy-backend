@@ -1,6 +1,7 @@
 package http
 
 import (
+	"log/slog"
 	"mime"
 	"net"
 	"net/http"
@@ -29,7 +30,8 @@ func recoverPanics(log app.Logger, next http.Handler) http.Handler {
 				if v == http.ErrAbortHandler {
 					panic(v)
 				}
-				log.Warnf("web: panic serving %s %s: %v", r.Method, r.URL.Path, v)
+				log.Warn("panic serving request",
+					slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("panic", v))
 				writeError(w, http.StatusInternalServerError, codeInternal, "internal error")
 			}
 		}()
