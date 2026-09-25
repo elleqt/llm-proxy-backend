@@ -22,6 +22,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -238,8 +239,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 	tokenService := apptokens.New(users, tokens, audit, clock, logs)
 
 	router, err := webapi.NewRouter(webapi.Deps{
-		Auth: app.NewAuthService(users, passwords,
-			app.NewThrottle(postgres.NewLoginAttemptRepo(pool), signInFailures, signInLockout, clock),
+		Auth: auth.New(users, passwords,
+			auth.NewThrottle(postgres.NewLoginAttemptRepo(pool), signInFailures, signInLockout, clock),
 			hasher, sessions, audit, clock),
 		Tokens:          tokenService,
 		OIDC:            oidcService,
@@ -316,7 +317,7 @@ func bootstrapAdmin(ctx context.Context, cfg config.Config, out io.Writer, users
 // the federated sign-in on it; it returns nil while OIDC is off.
 func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, idents app.IdentityRepo,
 	sessions app.SessionRepo, audit app.AuditSink, clock app.Clock,
-) (*app.OIDCService, error) {
+) (*auth.OIDC, error) {
 	if !cfg.Enabled() {
 		return nil, nil //nolint:nilnil // OIDC off is no service and no error
 	}
@@ -332,7 +333,7 @@ func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, id
 		return nil, fmt.Errorf("identity provider: %w", err)
 	}
 
-	service, err := app.NewOIDCService(users, idents, sessions, idp, audit, clock, app.OIDCConfig{
+	service, err := auth.NewOIDC(users, idents, sessions, idp, audit, clock, auth.OIDCConfig{
 		RequiredGroup: cfg.RequiredGroup,
 		AllowSignUp:   cfg.AllowSignUp,
 		DefaultPolicy: cfg.DefaultPolicy,

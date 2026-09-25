@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
@@ -110,7 +111,7 @@ func TestAnExpiredSessionDoesNotAuthenticate(t *testing.T) {
 	sessions := mocks.NewSessionRepo(t)
 	users := mocks.NewUserRepo(t)
 
-	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
+	sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).
 		Return(app.Session{}, app.ErrNotFound)
 
 	rec := httptest.NewRecorder()
@@ -128,10 +129,10 @@ func TestLoadSessionResolvesTheCookieByItsHash(t *testing.T) {
 	const id = "a-session-id"
 
 	owner := uuid.New()
-	stored := app.Session{IDHash: app.HashSessionID(id), UserID: owner}
+	stored := app.Session{IDHash: auth.HashSessionID(id), UserID: owner}
 
 	sessions := mocks.NewSessionRepo(t)
-	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+	sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).Return(stored, nil)
 
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(activeUser(owner), nil)
@@ -166,13 +167,13 @@ func TestARestrictionIssuedAfterSignInBindsTheLiveSession(t *testing.T) {
 	owner := uuid.New()
 	// The row is exactly what SignIn wrote before the administrator acted: it
 	// carries no restriction, and there is nowhere for one to have been recorded.
-	stored := app.Session{IDHash: app.HashSessionID(id), UserID: owner}
+	stored := app.Session{IDHash: auth.HashSessionID(id), UserID: owner}
 
 	user := activeUser(owner)
 	user.MustChangePassword = true
 
 	sessions := mocks.NewSessionRepo(t)
-	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+	sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).Return(stored, nil)
 
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(user, nil)
@@ -193,13 +194,13 @@ func TestBlockingAUserEndsTheirLiveSession(t *testing.T) {
 	const id = "a-session-id"
 
 	owner := uuid.New()
-	stored := app.Session{IDHash: app.HashSessionID(id), UserID: owner}
+	stored := app.Session{IDHash: auth.HashSessionID(id), UserID: owner}
 
 	blocked := activeUser(owner)
 	blocked.Status = identity.StatusBlocked
 
 	sessions := mocks.NewSessionRepo(t)
-	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).Return(stored, nil)
+	sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).Return(stored, nil)
 
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, owner).Return(blocked, nil)
@@ -238,7 +239,7 @@ func TestLoadSessionFailsLoudlyWhenAStoreIsUnreachable(t *testing.T) {
 	t.Run("the user store", func(t *testing.T) {
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().ByHash(mock.Anything, mock.Anything).
-			Return(app.Session{IDHash: app.HashSessionID(id), UserID: owner}, nil)
+			Return(app.Session{IDHash: auth.HashSessionID(id), UserID: owner}, nil)
 
 		users := mocks.NewUserRepo(t)
 		users.EXPECT().ByID(mock.Anything, owner).Return(identity.User{}, down)
@@ -273,6 +274,6 @@ func TestLoadSessionPassesAnAnonymousRequestThrough(t *testing.T) {
 }
 
 // resolverOver is an AuthService that can resolve sessions and nothing else.
-func resolverOver(users app.UserRepo, sessions app.SessionRepo) *app.AuthService {
-	return app.NewAuthService(users, nil, nil, nil, sessions, nil, nil)
+func resolverOver(users app.UserRepo, sessions app.SessionRepo) *auth.Service {
+	return auth.New(users, nil, nil, nil, sessions, nil, nil)
 }

@@ -1,4 +1,4 @@
-package app_test
+package auth_test
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
@@ -29,7 +30,7 @@ func TestThrottle(t *testing.T) {
 
 	start := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
 
-	charge := func(t *testing.T, th *app.Throttle, email string, times int) {
+	charge := func(t *testing.T, th *auth.Throttle, email string, times int) {
 		t.Helper()
 
 		for range times {
@@ -47,7 +48,7 @@ func TestThrottle(t *testing.T) {
 
 	t.Run("LocksAtTheLimitUntilTheWindowCloses", func(t *testing.T) {
 		clock := &fixedClock{now: start}
-		th := app.NewThrottle(attempts, limit, window, clock)
+		th := auth.NewThrottle(attempts, limit, window, clock)
 
 		const email = "limit@example.com"
 
@@ -86,7 +87,7 @@ func TestThrottle(t *testing.T) {
 	// a window old starts over rather than leaving the address one guess from a lock.
 	t.Run("OldFailuresDoNotCount", func(t *testing.T) {
 		clock := &fixedClock{now: start}
-		th := app.NewThrottle(attempts, limit, window, clock)
+		th := auth.NewThrottle(attempts, limit, window, clock)
 
 		const email = "forgetful@example.com"
 
@@ -103,7 +104,7 @@ func TestThrottle(t *testing.T) {
 	})
 
 	t.Run("ResetClearsTheCount", func(t *testing.T) {
-		th := app.NewThrottle(attempts, limit, window, &fixedClock{now: start})
+		th := auth.NewThrottle(attempts, limit, window, &fixedClock{now: start})
 
 		const email = "cleared@example.com"
 
@@ -115,7 +116,7 @@ func TestThrottle(t *testing.T) {
 	})
 
 	t.Run("ResetLiftsALock", func(t *testing.T) {
-		th := app.NewThrottle(attempts, limit, window, &fixedClock{now: start})
+		th := auth.NewThrottle(attempts, limit, window, &fixedClock{now: start})
 
 		const email = "lifted@example.com"
 
@@ -162,8 +163,8 @@ func TestSignInBurstGetsExactlyTheLimitOfDerivations(t *testing.T) {
 
 		return false
 	})
-	svc := app.NewAuthService(users, nil,
-		app.NewThrottle(attempts, limit, time.Hour, systemClock{}), hasher, nil, nil, systemClock{})
+	svc := auth.New(users, nil,
+		auth.NewThrottle(attempts, limit, time.Hour, systemClock{}), hasher, nil, nil, systemClock{})
 
 	results := make(chan error, burst)
 	for range burst {

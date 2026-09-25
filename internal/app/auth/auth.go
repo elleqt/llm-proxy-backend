@@ -1,4 +1,4 @@
-package app
+package auth
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
@@ -24,25 +25,25 @@ const SessionTTL = 12 * time.Hour
 // is unauthenticated random rather than a signed token.
 const sessionIDLen = 32
 
-// AuthService authenticates people against a local password and owns the browser
+// Service authenticates people against a local password and owns the browser
 // session that results.
 //
 // It is the only place that turns a plaintext password into a session, and the only
 // place that mints a session id. Both secrets leave through the return value and
 // through nothing else: no audit detail, no error string, no log line.
-type AuthService struct {
+type Service struct {
 	sessionOpener
 
-	users     UserRepo
-	passwords PasswordRepo
+	users     app.UserRepo
+	passwords app.PasswordRepo
 	throttle  *Throttle
-	hasher    *PasswordHasher
+	hasher    *app.PasswordHasher
 }
 
-func NewAuthService(
-	users UserRepo, passwords PasswordRepo, throttle *Throttle, hasher *PasswordHasher, sessions SessionRepo, audit AuditSink, clock Clock,
-) *AuthService {
-	return &AuthService{
+func New(
+	users app.UserRepo, passwords app.PasswordRepo, throttle *Throttle, hasher *app.PasswordHasher, sessions app.SessionRepo, audit app.AuditSink, clock app.Clock,
+) *Service {
+	return &Service{
 		users:     users,
 		passwords: passwords,
 		throttle:  throttle,
@@ -108,36 +109,36 @@ func HashSessionID(id string) string {
 // statement about the account. The returned session carries the plaintext id for the
 // caller to put in a cookie. The stored copy does not. The user returned is the one
 // the password was checked against, so the caller need not load them again.
-func (s *AuthService) SignIn(ctx context.Context, email, password string, meta SessionMeta) (Session, identity.User, error) {
+func (s *Service) SignIn(ctx context.Context, email, password string, meta app.SessionMeta) (app.Session, identity.User, error) {
 	if err := s.throttle.Check(ctx, email); err != nil {
-		return Session{}, identity.User{}, err
+		return app.Session{}, identity.User{}, err
 	}
 
 	if err := s.throttle.Charge(ctx, email); err != nil {
-		return Session{}, identity.User{}, err
+		return app.Session{}, identity.User{}, err
 	}
 
 	attempt, err := s.resolve(ctx, email)
 	if err != nil {
-		return Session{}, identity.User{}, err
+		return app.Session{}, identity.User{}, err
 	}
 
 	ok, err := attempt.verify(ctx, s.hasher, password)
 	if err != nil {
-		return Session{}, identity.User{}, err
+		return app.Session{}, identity.User{}, err
 	}
 
 	if !ok {
-		return Session{}, identity.User{}, ErrInvalidCredentials
+		return app.Session{}, identity.User{}, app.ErrInvalidCredentials
 	}
 
 	if err := s.throttle.Reset(ctx, email); err != nil {
-		return Session{}, identity.User{}, fmt.Errorf("app: clear sign-in attempts: %w", err)
+		return app.Session{}, identity.User{}, fmt.Errorf("app: clear sign-in attempts: %w", err)
 	}
 
 	sess, err := s.open(ctx, attempt.user, "auth.signin", meta)
 	if err != nil {
-		return Session{}, identity.User{}, err
+		return app.Session{}, identity.User{}, err
 	}
 
 	return sess, attempt.user, nil
@@ -163,19 +164,19 @@ func (s *AuthService) SignIn(ctx context.Context, email, password string, meta S
 //
 // The plaintext id is hashed before it is used as a lookup key and is not kept: the
 // session returned carries only the hash.
-func (s *AuthService) ResolveSession(ctx context.Context, id string) (Session, identity.User, error) {
+func (s *Service) ResolveSession(ctx context.Context, id string) (app.Session, identity.User, error) {
 	sess, err := s.sessions.ByHash(ctx, HashSessionID(id))
 	if err != nil {
-		return Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
+		return app.Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
 	}
 
 	user, err := s.users.ByID(ctx, sess.UserID)
 	if err != nil {
-		return Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
+		return app.Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
 	}
 
 	if !user.CanSignIn() {
-		return Session{}, identity.User{}, ErrNotFound
+		return app.Session{}, identity.User{}, app.ErrNotFound
 	}
 
 	sess.Restricted = user.MustChangePassword
@@ -187,23 +188,23 @@ func (s *AuthService) ResolveSession(ctx context.Context, id string) (Session, i
 // OpenID Connect login — ends here, so the id generation, the hashing, the window,
 // the audit row and the compensating delete exist exactly once.
 type sessionOpener struct {
-	sessions SessionRepo
-	audit    AuditSink
-	clock    Clock
+	sessions app.SessionRepo
+	audit    app.AuditSink
+	clock    app.Clock
 }
 
 // open creates a session for a user the caller has already authenticated and found
 // eligible, and records it under action. The returned session carries the plaintext
 // id for the caller to put in a cookie; the stored copy does not.
-func (o sessionOpener) open(ctx context.Context, user identity.User, action string, meta SessionMeta) (Session, error) {
+func (o sessionOpener) open(ctx context.Context, user identity.User, action string, meta app.SessionMeta) (app.Session, error) {
 	now := o.clock.Now()
 
 	id, err := newSessionID()
 	if err != nil {
-		return Session{}, err
+		return app.Session{}, err
 	}
 
-	stored := Session{
+	stored := app.Session{
 		IDHash:    HashSessionID(id),
 		UserID:    user.ID,
 		IP:        meta.IP,
@@ -212,10 +213,10 @@ func (o sessionOpener) open(ctx context.Context, user identity.User, action stri
 		ExpiresAt: now.Add(SessionTTL),
 	}
 	if err := o.sessions.Create(ctx, stored); err != nil {
-		return Session{}, fmt.Errorf("app: open session: %w", err)
+		return app.Session{}, fmt.Errorf("app: open session: %w", err)
 	}
 
-	if err := o.audit.Record(ctx, AuditEvent{
+	if err := o.audit.Record(ctx, app.AuditEvent{
 		At:      now,
 		ActorID: user.ID,
 		Action:  action,
@@ -231,15 +232,15 @@ func (o sessionOpener) open(ctx context.Context, user identity.User, action stri
 		// user retries against a database that is either working or honestly down.
 		// Detached: the audit most likely failed because the client hung up, and
 		// the request context is cancelled for exactly that reason.
-		cctx, cancel := CompensationContext(ctx)
+		cctx, cancel := app.CompensationContext(ctx)
 		defer cancel()
 
 		if derr := o.sessions.Delete(cctx, stored.IDHash); derr != nil {
 			//nolint:errorlint // derr is reported, not wrapped: callers match the sign-in failure alone.
-			return Session{}, fmt.Errorf("record sign-in: %w (session left open: %v)", err, derr)
+			return app.Session{}, fmt.Errorf("record sign-in: %w (session left open: %v)", err, derr)
 		}
 
-		return Session{}, fmt.Errorf("record sign-in: %w", err)
+		return app.Session{}, fmt.Errorf("record sign-in: %w", err)
 	}
 
 	stored.ID = id
@@ -265,7 +266,7 @@ type signInAttempt struct {
 // path, including the paths where there was never anything to compare against, and
 // every one of those derivations queues on the same hasher. Its error is only ever
 // the context's, and it does not depend on anything verify was handed.
-func (a signInAttempt) verify(ctx context.Context, hasher *PasswordHasher, password string) (bool, error) {
+func (a signInAttempt) verify(ctx context.Context, hasher *app.PasswordHasher, password string) (bool, error) {
 	hash := a.hash
 	if hash == "" {
 		hash = decoyHash
@@ -303,14 +304,14 @@ func (a signInAttempt) verify(ctx context.Context, hasher *PasswordHasher, passw
 // Either way the stored password must not have expired. A temporary password whose
 // window closed cannot be spent on a permanent one, or the expiry would mean nothing
 // to anyone still holding the cookie it issued.
-func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentPlain, newPlain string) error {
+func (s *Service) ChangePassword(ctx context.Context, sess app.Session, currentPlain, newPlain string) error {
 	user, err := s.users.ByID(ctx, sess.UserID)
 	if err != nil {
 		return fmt.Errorf("app: change password: %w", err)
 	}
 
 	if !user.CanSignIn() {
-		return ErrForbidden
+		return app.ErrForbidden
 	}
 
 	current, expiresAt, err := s.passwords.Get(ctx, user.ID)
@@ -319,7 +320,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 	}
 
 	if expiresAt != nil && !s.clock.Now().Before(*expiresAt) {
-		return ErrInvalidCredentials
+		return app.ErrInvalidCredentials
 	}
 
 	if !user.MustChangePassword {
@@ -329,7 +330,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 		}
 
 		if !ok {
-			return ErrInvalidCredentials
+			return app.ErrInvalidCredentials
 		}
 	}
 
@@ -360,7 +361,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 	}
 
 	now := s.clock.Now()
-	if err := s.audit.Record(ctx, AuditEvent{
+	if err := s.audit.Record(ctx, app.AuditEvent{
 		At:        now,
 		ActorID:   user.ID,
 		Action:    "auth.password_changed",
@@ -393,7 +394,7 @@ func checkNewPassword(plain string) error {
 	}
 
 	if utf8.RuneCountInString(plain) < MinPasswordLength {
-		return ErrWeakPassword
+		return app.ErrWeakPassword
 	}
 
 	return nil
@@ -406,15 +407,15 @@ func checkNewPassword(plain string) error {
 // the log says is dead. If the audit fails the session is still gone; the error says
 // the record is missing so an operator learns of the gap. The delete runs on a
 // detached context: a client that hangs up mid-sign-out must not keep its session.
-func (s *AuthService) SignOut(ctx context.Context, sess Session) error {
-	dctx, cancel := CompensationContext(ctx)
+func (s *Service) SignOut(ctx context.Context, sess app.Session) error {
+	dctx, cancel := app.CompensationContext(ctx)
 	defer cancel()
 
 	if err := s.sessions.Delete(dctx, sess.IDHash); err != nil {
 		return fmt.Errorf("app: end session: %w", err)
 	}
 
-	if err := s.audit.Record(dctx, AuditEvent{
+	if err := s.audit.Record(dctx, app.AuditEvent{
 		At:        s.clock.Now(),
 		ActorID:   sess.UserID,
 		Action:    "auth.signout",
@@ -433,12 +434,12 @@ func (s *AuthService) SignOut(ctx context.Context, sess Session) error {
 // infrastructure failures — a credential decision is never an error here, it is an
 // attempt that verify will refuse, because an error would return before the
 // derivation and reopen the timing oracle.
-func (s *AuthService) resolve(ctx context.Context, email string) (signInAttempt, error) {
+func (s *Service) resolve(ctx context.Context, email string) (signInAttempt, error) {
 	var attempt signInAttempt
 
 	user, err := s.users.ByEmail(ctx, email)
 	switch {
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, app.ErrNotFound):
 		// No such address. Nothing to fill in.
 		return attempt, nil
 	case err != nil:
@@ -454,7 +455,7 @@ func (s *AuthService) resolve(ctx context.Context, email string) (signInAttempt,
 
 	hash, expiresAt, err := s.passwords.Get(ctx, user.ID)
 	switch {
-	case errors.Is(err, ErrNotFound):
+	case errors.Is(err, app.ErrNotFound):
 		// An IdP-only person has no local password.
 		return attempt, nil
 	case err != nil:

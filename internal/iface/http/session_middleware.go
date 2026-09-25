@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appauth "github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
@@ -89,8 +90,8 @@ func (c cookies) clearSession(w http.ResponseWriter) {
 // cookie simply produces a request with no caller, and requireSession is what turns
 // that into a 401. Keeping the two apart is what lets an endpoint be reachable both
 // signed in and not. Which sessions are valid, and whether one is restricted, is
-// app.AuthService.ResolveSession's to decide.
-func loadSession(auth *app.AuthService, log app.Logger, next http.Handler) http.Handler {
+// appauth.Service.ResolveSession's to decide.
+func loadSession(auth *appauth.Service, log app.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		cookie, err := req.Cookie(sessionCookieName)
 		if err != nil || cookie.Value == "" {

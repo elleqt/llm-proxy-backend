@@ -8,16 +8,17 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 )
 
 // Deps is what the web API is built from.
 type Deps struct {
-	Auth   *app.AuthService
+	Auth   *auth.Service
 	Tokens *tokens.Service
 	// OIDC is nil when federated sign-in is not configured; /api/auth/config then
 	// says so and /api/auth/oidc/start answers oidc_disabled.
-	OIDC *app.OIDCService
+	OIDC *auth.OIDC
 	// OIDCDisplayName is the sign-in button's label; empty leaves it to the client.
 	OIDCDisplayName string
 	// LocalLogin offers sign-in with an email and a password. Off, the login form is

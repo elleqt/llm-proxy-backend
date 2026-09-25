@@ -33,7 +33,7 @@ func (rt *router) getMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // meOf describes u as the contract's Me. Restricted is read off the user, the same
-// source app.AuthService.ResolveSession derives the session's restriction from.
+// source auth.Service.ResolveSession derives the session's restriction from.
 func meOf(user identity.User) api.Me {
 	me := api.Me{
 		Id:           user.ID,

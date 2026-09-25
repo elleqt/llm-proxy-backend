@@ -1,15 +1,15 @@
-package app
+package auth
 
 import (
 	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
@@ -21,12 +21,12 @@ import (
 const challengeLen = 32
 
 // NewChallenge draws fresh, independent secrets for one login.
-func NewChallenge() (Challenge, error) {
-	var ch Challenge
+func NewChallenge() (app.Challenge, error) {
+	var ch app.Challenge
 	for _, field := range []*string{&ch.State, &ch.Nonce, &ch.Verifier} {
 		buf := make([]byte, challengeLen)
 		if _, err := rand.Read(buf); err != nil {
-			return Challenge{}, fmt.Errorf("app: read login challenge: %w", err)
+			return app.Challenge{}, fmt.Errorf("app: read login challenge: %w", err)
 		}
 
 		*field = base64.RawURLEncoding.EncodeToString(buf)
@@ -56,13 +56,13 @@ type groupGrant struct {
 	policy access.Policy
 }
 
-// OIDCService signs people in through an OpenID Connect provider.
-type OIDCService struct {
+// OIDC signs people in through an OpenID Connect provider.
+type OIDC struct {
 	sessionOpener
 
-	users  UserRepo
-	idents IdentityRepo
-	idp    IdentityProvider
+	users  app.UserRepo
+	idents app.IdentityRepo
+	idp    app.IdentityProvider
 
 	requiredGroup string
 	allowSignUp   bool
@@ -73,12 +73,12 @@ type OIDCService struct {
 	grants []groupGrant
 }
 
-// NewOIDCService parses the default policy and the group mapping up front — the one
+// NewOIDC parses the default policy and the group mapping up front — the one
 // place either is parsed: a rule that does not parse is a configuration error the
 // operator sees at startup, never a surprise on some user's login.
-func NewOIDCService(
-	users UserRepo, idents IdentityRepo, sessions SessionRepo, idp IdentityProvider, audit AuditSink, clock Clock, cfg OIDCConfig,
-) (*OIDCService, error) {
+func NewOIDC(
+	users app.UserRepo, idents app.IdentityRepo, sessions app.SessionRepo, idp app.IdentityProvider, audit app.AuditSink, clock app.Clock, cfg OIDCConfig,
+) (*OIDC, error) {
 	defaultPolicy, err := parseRules(cfg.DefaultPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("app: oidc default policy: %w", err)
@@ -96,7 +96,7 @@ func NewOIDCService(
 
 	sort.Slice(grants, func(i, j int) bool { return grants[i].group < grants[j].group })
 
-	return &OIDCService{
+	return &OIDC{
 		users:    users,
 		idents:   idents,
 		idp:      idp,
@@ -125,10 +125,10 @@ func parseRules(raw []string) (access.Policy, error) {
 
 // Begin starts a login: the URL to send the browser to, and the challenge the
 // transport must hold until the callback.
-func (s *OIDCService) Begin() (string, Challenge, error) {
+func (s *OIDC) Begin() (string, app.Challenge, error) {
 	ch, err := NewChallenge()
 	if err != nil {
-		return "", Challenge{}, err
+		return "", app.Challenge{}, err
 	}
 
 	return s.idp.AuthURL(ch), ch, nil
@@ -141,23 +141,23 @@ func (s *OIDCService) Begin() (string, Challenge, error) {
 // login. The gates then run in order — required group, identity resolution (link,
 // verified invitation, sign-up policy), CanSignIn — and only a user through all of
 // them has anything written on their behalf.
-func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Challenge, meta SessionMeta) (Session, error) {
+func (s *OIDC) Complete(ctx context.Context, code, state string, ch app.Challenge, meta app.SessionMeta) (app.Session, error) {
 	if !ch.Answers(state) {
-		return Session{}, ErrInvalidCredentials
+		return app.Session{}, app.ErrInvalidCredentials
 	}
 
 	claims, err := s.idp.Exchange(ctx, code, ch)
 	if err != nil {
-		return Session{}, fmt.Errorf("oidc exchange: %w", err)
+		return app.Session{}, fmt.Errorf("oidc exchange: %w", err)
 	}
 
 	if s.requiredGroup != "" && !slices.Contains(claims.Groups, s.requiredGroup) {
-		return Session{}, ErrForbidden
+		return app.Session{}, app.ErrForbidden
 	}
 
 	user, err := s.resolve(ctx, claims)
 	if err != nil {
-		return Session{}, err
+		return app.Session{}, err
 	}
 	// An account that has no name yet — one signed up before names were taken
 	// from the provider, or an invitation without one — gets the provider's. A
@@ -165,7 +165,7 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 	if user.DisplayName == "" && claims.Name != "" {
 		filled, err := s.users.FillDisplayName(ctx, user.ID, claims.Name)
 		if err != nil {
-			return Session{}, fmt.Errorf("oidc fill display name: %w", err)
+			return app.Session{}, fmt.Errorf("oidc fill display name: %w", err)
 		}
 
 		if filled {
@@ -178,33 +178,21 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 
 		user.PolicySource = identity.PolicyIDP
 		if err := s.users.SaveIdentityState(ctx, user); err != nil {
-			return Session{}, fmt.Errorf("app: oidc save identity state: %w", err)
+			return app.Session{}, fmt.Errorf("app: oidc save identity state: %w", err)
 		}
 	}
 
 	return s.open(ctx, user, "auth.signin.oidc", meta)
 }
 
-// Answers reports whether a callback carrying state answers this challenge, in
-// constant time. An empty value on either side is a mismatch: two empty strings are
-// equal, and a transport that lost its cookie must not thereby accept a callback
-// that carries no state either.
-func (ch Challenge) Answers(state string) bool {
-	if state == "" || ch.State == "" {
-		return false
-	}
-
-	return subtle.ConstantTimeCompare([]byte(state), []byte(ch.State)) == 1
-}
-
 // resolve finds or creates the account behind the claims and returns it only if it
 // may sign in. Nothing is linked, consumed or created for a user CanSignIn refuses.
-func (s *OIDCService) resolve(ctx context.Context, claims Claims) (identity.User, error) {
+func (s *OIDC) resolve(ctx context.Context, claims app.Claims) (identity.User, error) {
 	id, err := s.idents.BySubject(ctx, claims.Issuer, claims.Subject)
 	switch {
 	case err == nil:
 		return s.eligible(ctx, id)
-	case !errors.Is(err, ErrNotFound):
+	case !errors.Is(err, app.ErrNotFound):
 		return identity.User{}, fmt.Errorf("app: oidc find linked subject: %w", err)
 	}
 
@@ -216,13 +204,13 @@ func (s *OIDCService) resolve(ctx context.Context, claims Claims) (identity.User
 		switch {
 		case err == nil:
 			return s.redeem(ctx, invited, claims)
-		case !errors.Is(err, ErrNotFound):
+		case !errors.Is(err, app.ErrNotFound):
 			return identity.User{}, fmt.Errorf("app: oidc find invitation: %w", err)
 		}
 	}
 
 	if !s.allowSignUp {
-		return identity.User{}, ErrForbidden
+		return identity.User{}, app.ErrForbidden
 	}
 
 	return s.signUp(ctx, claims)
@@ -230,14 +218,14 @@ func (s *OIDCService) resolve(ctx context.Context, claims Claims) (identity.User
 
 // eligible loads a user and applies the one sign-in rule. The refusal is the same
 // answer a wrong password gets: a blocked account is not announced as such.
-func (s *OIDCService) eligible(ctx context.Context, id uuid.UUID) (identity.User, error) {
+func (s *OIDC) eligible(ctx context.Context, id uuid.UUID) (identity.User, error) {
 	user, err := s.users.ByID(ctx, id)
 	if err != nil {
 		return identity.User{}, fmt.Errorf("app: oidc load user: %w", err)
 	}
 
 	if !user.CanSignIn() {
-		return identity.User{}, ErrInvalidCredentials
+		return identity.User{}, app.ErrInvalidCredentials
 	}
 
 	return user, nil
@@ -252,7 +240,7 @@ func (s *OIDCService) eligible(ctx context.Context, id uuid.UUID) (identity.User
 // consumed invitation with no link, which an administrator fixes by re-inviting. The
 // other order would leave a live invitation beside a working link — redeemable a
 // second time, by a second subject, until it expired.
-func (s *OIDCService) redeem(ctx context.Context, invited uuid.UUID, claims Claims) (identity.User, error) {
+func (s *OIDC) redeem(ctx context.Context, invited uuid.UUID, claims app.Claims) (identity.User, error) {
 	user, err := s.eligible(ctx, invited)
 	if err != nil {
 		return identity.User{}, err
@@ -281,7 +269,7 @@ func signUpID(issuer, subject string) uuid.UUID {
 // signUp provisions an account for a stranger. With a group mapping the policy comes
 // from the groups, exactly as it would on every later login; without one the
 // operator's default applies and stays administrator-owned.
-func (s *OIDCService) signUp(ctx context.Context, claims Claims) (identity.User, error) {
+func (s *OIDC) signUp(ctx context.Context, claims app.Claims) (identity.User, error) {
 	user := identity.User{
 		ID:           signUpID(claims.Issuer, claims.Subject),
 		Kind:         identity.KindHuman,
@@ -306,7 +294,7 @@ func (s *OIDCService) signUp(ctx context.Context, claims Claims) (identity.User,
 	}
 
 	if err := s.users.Create(ctx, user); err != nil {
-		if !errors.Is(err, ErrConflict) {
+		if !errors.Is(err, app.ErrConflict) {
 			return identity.User{}, fmt.Errorf("oidc sign-up: %w", err)
 		}
 		// Either this subject's own account from an attempt that died before Link,
@@ -316,7 +304,7 @@ func (s *OIDCService) signUp(ctx context.Context, claims Claims) (identity.User,
 		// person's account.
 		existing, lerr := s.eligible(ctx, user.ID)
 		switch {
-		case errors.Is(lerr, ErrNotFound):
+		case errors.Is(lerr, app.ErrNotFound):
 			return identity.User{}, fmt.Errorf("oidc sign-up: %w", err)
 		case lerr != nil:
 			return identity.User{}, lerr
@@ -334,7 +322,7 @@ func (s *OIDCService) signUp(ctx context.Context, claims Claims) (identity.User,
 
 // policyFor is the union of the rules of every mapped group the user holds. Holding
 // none yields an empty, non-nil policy: signed in, entitled to no model.
-func (s *OIDCService) policyFor(groups []string) access.Policy {
+func (s *OIDC) policyFor(groups []string) access.Policy {
 	policy := access.Policy{}
 	seen := map[string]bool{}
 

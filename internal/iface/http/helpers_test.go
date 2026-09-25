@@ -14,6 +14,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -132,7 +133,7 @@ type envOption func(*testEnv)
 
 // withOIDC turns federated sign-in on, with the identity provider a mock.
 func withOIDC(env *testEnv) {
-	svc, err := app.NewOIDCService(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, app.OIDCConfig{AllowSignUp: false})
+	svc, err := auth.NewOIDC(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, auth.OIDCConfig{AllowSignUp: false})
 	require.NoError(env.t, err, "NewOIDCService")
 
 	env.deps.OIDC = svc
@@ -193,7 +194,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	}
 
 	env.deps = Deps{
-		Auth: app.NewAuthService(env.users, env.pwds, app.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
+		Auth: auth.New(env.users, env.pwds, auth.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
 		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
 		Usage:        app.NewUsageService(env.usage),
@@ -252,8 +253,8 @@ func admin() identity.User {
 // signedIn makes the store hold a live session for u and returns its cookie.
 func (e *testEnv) signedIn(u identity.User) *http.Cookie {
 	id := "session-of-" + u.ID.String()
-	e.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
-		Return(app.Session{IDHash: app.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil).Maybe()
+	e.sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).
+		Return(app.Session{IDHash: auth.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil).Maybe()
 	e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil).Maybe()
 
 	return &http.Cookie{Name: sessionCookieName, Value: id}

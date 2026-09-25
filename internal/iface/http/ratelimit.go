@@ -10,7 +10,7 @@ import (
 // RateLimit is a per-client token bucket: Burst attempts at once, then one more every
 // Every. MaxClients bounds how many clients are remembered.
 //
-// It complements, and does not replace, the per-address lockout in app.Throttle. The
+// It complements, and does not replace, the per-address lockout in auth.Throttle. The
 // lockout stops guessing at one account from many clients; this stops one client
 // spraying many accounts — which the lockout cannot see, since every address it
 // tries is fresh — and bounds the argon2 work a single client can make the server do.

@@ -1,4 +1,4 @@
-package app_test
+package auth_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -27,17 +28,17 @@ const testIssuer = "https://idp.example.com"
 var loginChallenge = app.Challenge{State: "state-1", Nonce: "nonce-1", Verifier: "verifier-1"}
 
 func newOIDC(t *testing.T, users app.UserRepo, idents app.IdentityRepo, sessions app.SessionRepo,
-	idp app.IdentityProvider, cfg app.OIDCConfig,
-) *app.OIDCService {
+	idp app.IdentityProvider, cfg auth.OIDCConfig,
+) *auth.OIDC {
 	t.Helper()
 
-	svc, err := app.NewOIDCService(users, idents, sessions, idp, nopAudit{}, systemClock{}, cfg)
+	svc, err := auth.NewOIDC(users, idents, sessions, idp, nopAudit{}, systemClock{}, cfg)
 	require.NoError(t, err, "NewOIDCService")
 
 	return svc
 }
 
-func complete(svc *app.OIDCService) (app.Session, error) {
+func complete(svc *auth.OIDC) (app.Session, error) {
 	return svc.Complete(context.Background(), "code", loginChallenge.State, loginChallenge, app.SessionMeta{})
 }
 
@@ -82,7 +83,7 @@ func TestLoginRejectedWithoutRequiredGroup(t *testing.T) {
 
 	// No expectations on idents or sessions: nothing may be looked up or written
 	// for a person outside the gate group.
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		AllowSignUp:   true,
 	})
@@ -100,7 +101,7 @@ func TestUnknownSubjectRejectedWhenSignUpDisabled(t *testing.T) {
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-unknown").Return(uuid.Nil, app.ErrNotFound)
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "stranger@example.com").Return(uuid.Nil, app.ErrNotFound)
 
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		AllowSignUp:   false,
 	})
@@ -125,7 +126,7 @@ func TestPendingIdentityLinksSubjectOnce(t *testing.T) {
 	idents.EXPECT().ConsumePending(mock.Anything, invited.ID).Return(nil).Once()
 	users.EXPECT().ByID(mock.Anything, invited.ID).Return(invited, nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate", AllowSignUp: false,
 	})
 
@@ -152,7 +153,7 @@ func TestGroupMappingSetsPolicyAndMarksItIDPManaged(t *testing.T) {
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = u }).Return(nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		GroupPolicy:   map[string][]string{"/team-a": {"chatgpt:*"}},
 	})
@@ -176,7 +177,7 @@ func TestWithoutGroupMappingPolicyStaysLocal(t *testing.T) {
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(existing.ID, nil)
 	users.EXPECT().ByID(mock.Anything, existing.ID).Return(existing, nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 	})
 
@@ -206,7 +207,7 @@ func TestCompleteRefusesAMismatchedStateWithoutCallingTheIdP(t *testing.T) {
 			// No expectations anywhere: the IdP, the stores and the sessions are all
 			// untouched by a refused callback.
 			svc := newOIDC(t, mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t),
-				mocks.NewIdentityProvider(t), app.OIDCConfig{AllowSignUp: true})
+				mocks.NewIdentityProvider(t), auth.OIDCConfig{AllowSignUp: true})
 
 			ch := loginChallenge
 			ch.State = tc.expected
@@ -231,7 +232,7 @@ func TestUnverifiedEmailDoesNotRedeemAnInvitation(t *testing.T) {
 	// The invitation exists: were it consulted, it would be found.
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "invited@example.com").Return(invited, nil).Maybe()
 
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate", AllowSignUp: false,
 	})
 
@@ -259,7 +260,7 @@ func TestBlockedUserIsRefusedWithoutASession(t *testing.T) {
 
 	// A group mapping is configured so that a gate placed too late would also
 	// rewrite the blocked user's policy; the users mock has no SaveIdentityState.
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		GroupPolicy:   map[string][]string{"/gate": {"claude:*"}},
 	})
@@ -286,7 +287,7 @@ func TestGroupPolicyIsTheUnionOfEveryMappedGroup(t *testing.T) {
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = u }).Return(nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		GroupPolicy: map[string][]string{
 			"/team-a":   {"claude:*"},
 			"/team-b":   {"openai:gpt-*", "claude:*"},
@@ -321,7 +322,7 @@ func TestUserWithNoMappedGroupGetsAnEmptyPolicy(t *testing.T) {
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = &u }).Return(nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		GroupPolicy:   map[string][]string{"/team-a": {"claude:*"}},
 	})
@@ -337,11 +338,11 @@ func TestUserWithNoMappedGroupGetsAnEmptyPolicy(t *testing.T) {
 // A typo in the mapping or the default policy is the operator's problem at
 // startup, not a user's at login, and the error names the rule.
 func TestNewOIDCServiceRejectsAMalformedRule(t *testing.T) {
-	for name, cfg := range map[string]app.OIDCConfig{
+	for name, cfg := range map[string]auth.OIDCConfig{
 		"group policy":   {GroupPolicy: map[string][]string{"/team-a": {"claude:*", "no-colon"}}},
 		"default policy": {DefaultPolicy: []string{"claude:*", "no-colon"}},
 	} {
-		_, err := app.NewOIDCService(mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t),
+		_, err := auth.NewOIDC(mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t),
 			mocks.NewIdentityProvider(t), nopAudit{}, systemClock{}, cfg)
 		require.ErrorIs(t, err, access.ErrMalformedRule, name)
 		require.ErrorContains(t, err, "no-colon", "%s: the error must name the rule", name)
@@ -369,7 +370,7 @@ func TestSignUpProvisionsWithTheDefaultPolicy(t *testing.T) {
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-new").
 		Run(func(_ context.Context, id uuid.UUID, _, _ string) { linked = id }).Return(nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{
 		RequiredGroup: "/gate",
 		AllowSignUp:   true,
 		DefaultPolicy: []string{"claude:claude-sonnet-5"},
@@ -410,7 +411,7 @@ func TestOIDCSignInOpensASessionAndAuditsTheMethod(t *testing.T) {
 	audit.EXPECT().Record(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, e app.AuditEvent) { recorded = e }).Return(nil)
 
-	svc, err := app.NewOIDCService(users, idents, sessions, idp, audit, fixedClock{now: now}, app.OIDCConfig{})
+	svc, err := auth.NewOIDC(users, idents, sessions, idp, audit, fixedClock{now: now}, auth.OIDCConfig{})
 	require.NoError(t, err, "NewOIDCService")
 
 	got, err := svc.Complete(context.Background(), "code", loginChallenge.State, loginChallenge,
@@ -418,9 +419,9 @@ func TestOIDCSignInOpensASessionAndAuditsTheMethod(t *testing.T) {
 	require.NoError(t, err, "Complete")
 	require.NotEmpty(t, got.ID, "want the plaintext id returned")
 	require.Empty(t, stored.ID, "the stored session carries the plaintext id")
-	require.Equal(t, app.HashSessionID(got.ID), stored.IDHash, "stored hash, want the hash of the returned id")
-	require.True(t, stored.ExpiresAt.Equal(now.Add(app.SessionTTL)),
-		"session expires at %v, want the local window ending %v", stored.ExpiresAt, now.Add(app.SessionTTL))
+	require.Equal(t, auth.HashSessionID(got.ID), stored.IDHash, "stored hash, want the hash of the returned id")
+	require.True(t, stored.ExpiresAt.Equal(now.Add(auth.SessionTTL)),
+		"session expires at %v, want the local window ending %v", stored.ExpiresAt, now.Add(auth.SessionTTL))
 	require.Equal(t, "auth.signin.oidc", recorded.Action, "audit action")
 	require.Equal(t, user.ID, recorded.ActorID, "audit actor")
 	require.Equal(t, "198.51.100.7", recorded.IP, "audit IP")
@@ -436,7 +437,7 @@ func TestBeginReturnsTheChallengeTheAuthURLWasBuiltFrom(t *testing.T) {
 	idp.EXPECT().AuthURL(mock.Anything).
 		Run(func(ch app.Challenge) { sent = ch }).Return("https://idp.example.com/auth?x=1")
 
-	svc := newOIDC(t, mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
+	svc := newOIDC(t, mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t), idp, auth.OIDCConfig{})
 
 	url, ch, err := svc.Begin()
 	require.NoError(t, err, "Begin")
@@ -471,7 +472,7 @@ func TestUnverifiedSignUpStoresNoEmail(t *testing.T) {
 		Run(func(_ context.Context, u identity.User) { created = u }).Return(nil)
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-new").Return(nil)
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{AllowSignUp: true})
 	_, err := complete(svc)
 	require.NoError(t, err, "Complete")
 
@@ -498,7 +499,7 @@ func TestSignUpResumesAfterALinkFailure(t *testing.T) {
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-new").
 		Return(errors.New("connection reset")).Once()
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{AllowSignUp: true})
 	_, err := complete(svc)
 	require.Error(t, err, "first attempt: want the Link failure reported")
 
@@ -537,7 +538,7 @@ func TestSignUpConflictWithAnotherAccountIsRefusedAndNeverLinked(t *testing.T) {
 			return identity.User{}, app.ErrNotFound
 		})
 
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{AllowSignUp: true})
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{AllowSignUp: true})
 	_, err := complete(svc)
 	require.ErrorIs(t, err, app.ErrConflict)
 }
@@ -556,7 +557,7 @@ func TestInvitationIsSpentEvenWhenTheLinkFails(t *testing.T) {
 	idents.EXPECT().ConsumePending(mock.Anything, invited.ID).Return(nil).Once()
 	idents.EXPECT().Link(mock.Anything, invited.ID, testIssuer, "sub-1").Return(errors.New("connection reset"))
 
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{})
 	_, err := complete(svc)
 	require.Error(t, err, "want the Link failure reported")
 	// The mock's cleanup fails the test if ConsumePending was not called.
@@ -576,7 +577,7 @@ func TestBlockedInviteeIsNeitherLinkedNorConsumed(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, invited.ID).Return(invited, nil)
 
 	// No Link or ConsumePending expectation: either call fails the test.
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{})
 	_, err := complete(svc)
 	require.ErrorIs(t, err, app.ErrInvalidCredentials)
 }
@@ -628,7 +629,7 @@ func TestSecondSubjectWithTheSameEmailIsNotResumedOntoTheFirstAccount(t *testing
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-a").
 		Run(func(_ context.Context, id uuid.UUID, _, _ string) { linkedA = id }).Return(nil).Once()
 
-	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
+	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, auth.OIDCConfig{AllowSignUp: true})
 	_, err := complete(svc)
 	require.NoError(t, err, "subject A")
 
@@ -666,7 +667,7 @@ func TestResumeOntoABlockedOrphanIsRefused(t *testing.T) {
 		})
 
 	// No Link expectation and no session store expectation: either fails the test.
-	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{AllowSignUp: true})
+	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, auth.OIDCConfig{AllowSignUp: true})
 	_, err := complete(svc)
 	require.ErrorIs(t, err, app.ErrInvalidCredentials)
 }
@@ -684,7 +685,7 @@ func TestOIDCLoginFillsOnlyAMissingDisplayName(t *testing.T) {
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		users.EXPECT().FillDisplayName(mock.Anything, user.ID, "From The IdP").Return(true, nil).Once()
 
-		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{}))
+		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), auth.OIDCConfig{}))
 		require.NoError(t, err, "Complete")
 	})
 
@@ -695,7 +696,7 @@ func TestOIDCLoginFillsOnlyAMissingDisplayName(t *testing.T) {
 		idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		// No FillDisplayName expectation: a call fails the test.
-		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{}))
+		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), auth.OIDCConfig{}))
 		require.NoError(t, err, "Complete")
 	})
 }

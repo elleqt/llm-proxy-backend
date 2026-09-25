@@ -98,3 +98,35 @@ func newPerson() identity.User {
 		PolicySource: identity.PolicyLocal,
 	}
 }
+
+// fixedClock pins time so an expiry window is a decision of the test rather than a
+// race with the wall clock.
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
+func humanUser(email string) identity.User {
+	return identity.User{
+		ID:           uuid.New(),
+		Kind:         identity.KindHuman,
+		Email:        email,
+		DisplayName:  "A Person",
+		Role:         identity.RoleUser,
+		Status:       identity.StatusActive,
+		PolicySource: identity.PolicyLocal,
+	}
+}
+
+func mustHash(t *testing.T, plain string) string {
+	t.Helper()
+
+	h, err := identity.HashPassword(plain)
+	require.NoError(t, err, "HashPassword")
+
+	return h
+}
+
+const (
+	testMaxFailures = 5
+	testLockFor     = 15 * time.Minute
+)

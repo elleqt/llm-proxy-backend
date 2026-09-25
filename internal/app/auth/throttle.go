@@ -1,9 +1,11 @@
-package app
+package auth
 
 import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 // Throttle limits password guessing per address: maxFailures attempts per window of
@@ -19,15 +21,15 @@ import (
 // maxFailures attempts. A person who mistyped a few times last week is not one guess
 // from a lockout today.
 type Throttle struct {
-	attempts    LoginAttemptRepo
+	attempts    app.LoginAttemptRepo
 	maxFailures int
 	lockFor     time.Duration
-	clock       Clock
+	clock       app.Clock
 }
 
 // NewThrottle panics on a non-positive limit or window: either would lock every
 // address forever or never, and both are programming errors in the composition root.
-func NewThrottle(attempts LoginAttemptRepo, maxFailures int, lockFor time.Duration, clock Clock) *Throttle {
+func NewThrottle(attempts app.LoginAttemptRepo, maxFailures int, lockFor time.Duration, clock app.Clock) *Throttle {
 	if maxFailures < 1 || lockFor <= 0 {
 		panic(fmt.Sprintf("app: throttle needs a positive limit and window, got %d and %v", maxFailures, lockFor))
 	}
@@ -44,7 +46,7 @@ func (t *Throttle) Check(ctx context.Context, email string) error {
 	}
 
 	if until != nil && t.clock.Now().Before(*until) {
-		return &LockedOutError{Until: *until}
+		return &app.LockedOutError{Until: *until}
 	}
 
 	return nil
@@ -71,7 +73,7 @@ func (t *Throttle) Charge(ctx context.Context, email string) error {
 		lapse = *until
 	}
 
-	return &LockedOutError{Until: lapse}
+	return &app.LockedOutError{Until: lapse}
 }
 
 // Reset forgets every attempt of email, including an open lock. Only a successful

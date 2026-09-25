@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appauth "github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
@@ -25,7 +26,7 @@ type recoveryEnv struct {
 	passwords *postgres.PasswordRepo
 	tokens    *postgres.TokenRepo
 	activity  *postgres.ActivityRepo
-	auth      *app.AuthService
+	auth      *appauth.Service
 	recovery  *app.Recovery
 }
 
@@ -37,7 +38,7 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 
 	return &recoveryEnv{
 		users: users, passwords: passwords, tokens: postgres.NewTokenRepo(pool), activity: postgres.NewActivityRepo(pool),
-		auth: app.NewAuthService(users, passwords, app.NewThrottle(attempts, testMaxFailures, testLockFor, clock),
+		auth: appauth.New(users, passwords, appauth.NewThrottle(attempts, testMaxFailures, testLockFor, clock),
 			testHasher(), sessions, audit, clock),
 		recovery: app.NewRecovery(users, passwords, sessions, attempts, testHasher(), audit, clock),
 	}

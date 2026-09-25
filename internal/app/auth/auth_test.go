@@ -1,4 +1,4 @@
-package app_test
+package auth_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -57,7 +58,7 @@ const (
 // clearingThrottle stands over an address with attempts on record but no lockout, and
 // requires the sign-in to charge this one and then clear them all: only a success
 // may, and a success must.
-func clearingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle {
+func clearingThrottle(t *testing.T, email string, clock app.Clock) *auth.Throttle {
 	t.Helper()
 
 	attempts := mocks.NewLoginAttemptRepo(t)
@@ -66,12 +67,12 @@ func clearingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle
 		Return(testMaxFailures-1, nil, nil)
 	attempts.EXPECT().Clear(mock.Anything, email).Return(nil)
 
-	return app.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
+	return auth.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
 }
 
 // countingThrottle stands over an address that has never failed, and requires the
 // sign-in to charge one attempt against it and clear nothing.
-func countingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle {
+func countingThrottle(t *testing.T, email string, clock app.Clock) *auth.Throttle {
 	t.Helper()
 
 	attempts := mocks.NewLoginAttemptRepo(t)
@@ -79,7 +80,7 @@ func countingThrottle(t *testing.T, email string, clock app.Clock) *app.Throttle
 	attempts.EXPECT().Charge(mock.Anything, email, testMaxFailures, mock.Anything, mock.Anything).
 		Return(1, nil, nil)
 
-	return app.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
+	return auth.NewThrottle(attempts, testMaxFailures, testLockFor, clock)
 }
 
 // The plaintext session id is the cookie and nothing else. What reaches the store is
@@ -116,7 +117,7 @@ func TestSignInReturnsTheSessionIDToTheCallerAndStoresOnlyItsHash(t *testing.T) 
 		})
 
 	clock := fixedClock{now: now}
-	svc := app.NewAuthService(users, passwords, clearingThrottle(t, "person@example.com", clock), testHasher(),
+	svc := auth.New(users, passwords, clearingThrottle(t, "person@example.com", clock), testHasher(),
 		sessions, audit, clock)
 
 	got, _, err := svc.SignIn(ctx, "person@example.com", "a good password",
@@ -124,14 +125,14 @@ func TestSignInReturnsTheSessionIDToTheCallerAndStoresOnlyItsHash(t *testing.T) 
 	require.NoError(t, err, "SignIn")
 	require.NotEmpty(t, got.ID, "SignIn returned no session id: the caller has nothing to put in a cookie")
 	require.Empty(t, stored.ID, "the stored session carries the plaintext id")
-	require.Equal(t, app.HashSessionID(got.ID), stored.IDHash, "stored hash, want the SHA-256 of the returned id")
+	require.Equal(t, auth.HashSessionID(got.ID), stored.IDHash, "stored hash, want the SHA-256 of the returned id")
 	require.Equal(t, stored.IDHash, got.IDHash, "returned hash, want the stored one")
 	require.Equal(t, user.ID, stored.UserID, "stored session user")
 	require.Equal(t, "198.51.100.7", stored.IP, "stored session lost its metadata")
 	require.Equal(t, "a browser", stored.UserAgent, "stored session lost its metadata")
 	require.True(t, stored.CreatedAt.Equal(now), "window starts at %v, want %v", stored.CreatedAt, now)
-	require.True(t, stored.ExpiresAt.Equal(now.Add(app.SessionTTL)),
-		"window ends at %v, want %v", stored.ExpiresAt, now.Add(app.SessionTTL))
+	require.True(t, stored.ExpiresAt.Equal(now.Add(auth.SessionTTL)),
+		"window ends at %v, want %v", stored.ExpiresAt, now.Add(auth.SessionTTL))
 
 	// An audit row is read by more people than the sessions table is: neither the
 	// id nor its hash may be in it.
@@ -165,7 +166,7 @@ func TestSignInRestrictsTheSessionOfAUserWhoMustChangeTheirPassword(t *testing.T
 		})
 
 	clock := fixedClock{now: expiry.Add(-time.Hour)}
-	svc := app.NewAuthService(users, passwords, clearingThrottle(t, "temp@example.com", clock), testHasher(),
+	svc := auth.New(users, passwords, clearingThrottle(t, "temp@example.com", clock), testHasher(),
 		sessions, nopAudit{}, clock)
 
 	got, _, err := svc.SignIn(context.Background(), "temp@example.com", "issued by an admin", app.SessionMeta{})
@@ -173,7 +174,7 @@ func TestSignInRestrictsTheSessionOfAUserWhoMustChangeTheirPassword(t *testing.T
 	require.False(t, stored.Restricted,
 		"the restriction was written to the session row: it is derived from the user, not stored")
 
-	sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(got.ID)).Return(stored, nil)
+	sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(got.ID)).Return(stored, nil)
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 
 	resolved, _, err := svc.ResolveSession(context.Background(), got.ID)
@@ -183,7 +184,7 @@ func TestSignInRestrictsTheSessionOfAUserWhoMustChangeTheirPassword(t *testing.T
 
 func TestServiceAccountCannotSignInThroughTheService(t *testing.T) {
 	users := mocks.NewUserRepo(t)
-	svc := app.NewAuthService(users, nil, countingThrottle(t, "chat-panel@example.com", systemClock{}), testHasher(),
+	svc := auth.New(users, nil, countingThrottle(t, "chat-panel@example.com", systemClock{}), testHasher(),
 		nil, nopAudit{}, systemClock{})
 
 	service := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
@@ -287,8 +288,8 @@ func TestEveryRefusalIsTheSameAnswer(t *testing.T) {
 			clock := fixedClock{now: now}
 			// No session store and no audit sink: a refusal that opened a session
 			// or wrote a record would nil-panic here rather than pass quietly.
-			svc := app.NewAuthService(users, passwords,
-				app.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
+			svc := auth.New(users, passwords,
+				auth.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
 
 			var err error
 			// "expired-but-correct" is the right password for the expired row; it is
@@ -349,8 +350,8 @@ func TestLockedAddressIsRefusedWithoutAnyPasswordWork(t *testing.T) {
 			tc.setup(attempts)
 
 			clock := fixedClock{now: now}
-			svc := app.NewAuthService(mocks.NewUserRepo(t), mocks.NewPasswordRepo(t),
-				app.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
+			svc := auth.New(mocks.NewUserRepo(t), mocks.NewPasswordRepo(t),
+				auth.NewThrottle(attempts, testMaxFailures, testLockFor, clock), testHasher(), nil, nil, clock)
 
 			var err error
 
@@ -399,7 +400,7 @@ func TestSignInSpendsPasswordWorkEvenWhenThereIsNothingToVerify(t *testing.T) {
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByEmail(mock.Anything, "nobody@example.com").
 		Return(identity.User{}, app.ErrNotFound)
-	svc := app.NewAuthService(users, nil, countingThrottle(t, "nobody@example.com", systemClock{}), testHasher(),
+	svc := auth.New(users, nil, countingThrottle(t, "nobody@example.com", systemClock{}), testHasher(),
 		nil, nil, systemClock{})
 
 	absent := medianDuration(func() {
@@ -489,7 +490,7 @@ func TestChangePasswordClearsTheRestrictionAndTheExpiry(t *testing.T) {
 			return nil
 		})
 
-	svc := app.NewAuthService(users, passwords, nil, testHasher(), sessions, nopAudit{}, fixedClock{now: now})
+	svc := auth.New(users, passwords, nil, testHasher(), sessions, nopAudit{}, fixedClock{now: now})
 	// A restricted session proved the password at sign-in, so none is presented here.
 	err := svc.ChangePassword(context.Background(), sess, "", "one I chose myself")
 	require.NoError(t, err, "ChangePassword")
@@ -514,7 +515,7 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 		// No Set expectation: a write would fail the test.
 
-		svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+		svc := auth.New(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
 
 		err := svc.ChangePassword(context.Background(), sess, "a guess", "something new")
 		require.Same(t, app.ErrInvalidCredentials, err, "want exactly app.ErrInvalidCredentials, unwrapped")
@@ -527,7 +528,7 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		passwords.EXPECT().Get(mock.Anything, user.ID).Return(current, nil, nil)
 
-		svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+		svc := auth.New(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
 
 		err := svc.ChangePassword(context.Background(), sess, "", "something new")
 		require.Same(t, app.ErrInvalidCredentials, err, "want exactly app.ErrInvalidCredentials, unwrapped")
@@ -545,7 +546,7 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().DeleteByUserExcept(mock.Anything, user.ID, sess.IDHash).Return(nil)
 
-		svc := app.NewAuthService(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
+		svc := auth.New(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
 		err := svc.ChangePassword(context.Background(), sess, "the current one", "something new")
 		require.NoError(t, err, "ChangePassword")
 	})
@@ -562,7 +563,7 @@ func TestChangePasswordRequiresTheCurrentPasswordOnAFullSession(t *testing.T) {
 		sessions := mocks.NewSessionRepo(t)
 		sessions.EXPECT().DeleteByUserExcept(mock.Anything, user.ID, sess.IDHash).Return(errors.New("connection reset"))
 
-		svc := app.NewAuthService(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
+		svc := auth.New(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
 		err := svc.ChangePassword(context.Background(), sess, "the current one", "something new")
 		require.Error(t, err, "ChangePassword succeeded although the other sessions may still be open")
 	})
@@ -583,7 +584,7 @@ func TestChangePasswordRefusesAnExpiredTemporaryPassword(t *testing.T) {
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "temporary"), &expiry, nil)
 	// No Set and no SetMustChangePassword expectation: either call fails the test.
 
-	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, fixedClock{now: now})
+	svc := auth.New(users, passwords, nil, testHasher(), nil, nopAudit{}, fixedClock{now: now})
 
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "temporary", "a new one")
@@ -598,7 +599,7 @@ func TestChangePasswordRefusesABlockedUser(t *testing.T) {
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 
-	svc := app.NewAuthService(users, nil, nil, testHasher(), nil, nopAudit{}, systemClock{})
+	svc := auth.New(users, nil, nil, testHasher(), nil, nopAudit{}, systemClock{})
 
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID}, "whatever", "a new one")
@@ -619,7 +620,7 @@ func TestChangePasswordRefusesTheEmptyPassword(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "current"), nil, nil)
 
-	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+	svc := auth.New(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
 
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "", "")
@@ -641,7 +642,7 @@ func TestChangePasswordDoesNotTrustASessionThatClaimsToBeRestricted(t *testing.T
 	passwords.EXPECT().Get(mock.Anything, user.ID).Return(mustHash(t, "the current one"), nil, nil)
 	// No Set expectation: a write would fail the test.
 
-	svc := app.NewAuthService(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
+	svc := auth.New(users, passwords, nil, testHasher(), nil, nopAudit{}, systemClock{})
 
 	err := svc.ChangePassword(context.Background(),
 		app.Session{UserID: user.ID, Restricted: true}, "", "something new")
@@ -681,7 +682,7 @@ func TestSignInDropsTheSessionWhenTheAuditFails(t *testing.T) {
 			return nil
 		})
 
-	svc := app.NewAuthService(users, passwords, clearingThrottle(t, user.Email, systemClock{}), testHasher(),
+	svc := auth.New(users, passwords, clearingThrottle(t, user.Email, systemClock{}), testHasher(),
 		sessions, audit, systemClock{})
 
 	got, _, err := svc.SignIn(context.Background(), user.Email, "a good password", app.SessionMeta{})
@@ -724,7 +725,7 @@ func TestSignInDropsTheSessionEvenWhenTheClientHungUp(t *testing.T) {
 			return dctx.Err()
 		})
 
-	svc := app.NewAuthService(users, passwords, clearingThrottle(t, user.Email, systemClock{}), testHasher(),
+	svc := auth.New(users, passwords, clearingThrottle(t, user.Email, systemClock{}), testHasher(),
 		sessions, audit, systemClock{})
 	_, _, err := svc.SignIn(ctx, user.Email, "a good password", app.SessionMeta{})
 	require.Error(t, err, "SignIn succeeded although the sign-in was never recorded")
@@ -738,10 +739,10 @@ func TestChangePasswordRefusesAShortPassword(t *testing.T) {
 		name, plain string
 		want        error
 	}{
-		{"one short", strings.Repeat("a", app.MinPasswordLength-1), app.ErrWeakPassword},
+		{"one short", strings.Repeat("a", auth.MinPasswordLength-1), app.ErrWeakPassword},
 		// 11 runes in 22 bytes: a byte count would let it through.
-		{"multi-byte, one short", strings.Repeat("é", app.MinPasswordLength-1), app.ErrWeakPassword},
-		{"multi-byte at the floor", strings.Repeat("é", app.MinPasswordLength), nil},
+		{"multi-byte, one short", strings.Repeat("é", auth.MinPasswordLength-1), app.ErrWeakPassword},
+		{"multi-byte at the floor", strings.Repeat("é", auth.MinPasswordLength), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			user := humanUser("person@example.com")
@@ -761,7 +762,7 @@ func TestChangePasswordRefusesAShortPassword(t *testing.T) {
 			}
 			// No Set expectation for the refused case: a write fails the test.
 
-			svc := app.NewAuthService(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
+			svc := auth.New(users, passwords, nil, testHasher(), sessions, nopAudit{}, systemClock{})
 
 			err := svc.ChangePassword(context.Background(), app.Session{UserID: user.ID}, "", tc.plain)
 			require.ErrorIs(t, err, tc.want)
@@ -772,7 +773,7 @@ func TestChangePasswordRefusesAShortPassword(t *testing.T) {
 // Sign-out removes the session the cookie named and records it, as sign-in does.
 func TestSignOutDeletesTheSessionAndRecordsIt(t *testing.T) {
 	owner := uuid.New()
-	sess := app.Session{IDHash: app.HashSessionID("the-cookie"), UserID: owner, IP: "192.0.2.1"}
+	sess := app.Session{IDHash: auth.HashSessionID("the-cookie"), UserID: owner, IP: "192.0.2.1"}
 
 	sessions := mocks.NewSessionRepo(t)
 	audit := mocks.NewAuditSink(t)
@@ -787,7 +788,7 @@ func TestSignOutDeletesTheSessionAndRecordsIt(t *testing.T) {
 		return nil
 	})
 
-	svc := app.NewAuthService(nil, nil, nil, testHasher(), sessions, audit, systemClock{})
+	svc := auth.New(nil, nil, nil, testHasher(), sessions, audit, systemClock{})
 	require.NoError(t, svc.SignOut(context.Background(), sess), "SignOut")
 	require.Equal(t, "auth.signout", got.Action, "audit action")
 	require.Equal(t, owner, got.ActorID, "audit actor")
@@ -797,7 +798,7 @@ func TestSignOutDeletesTheSessionAndRecordsIt(t *testing.T) {
 // A session that could not be deleted is still live, so nothing may record it as
 // ended, and a client that hung up does not get to keep it.
 func TestSignOutRecordsNothingWhenTheSessionSurvives(t *testing.T) {
-	sess := app.Session{IDHash: app.HashSessionID("the-cookie"), UserID: uuid.New()}
+	sess := app.Session{IDHash: auth.HashSessionID("the-cookie"), UserID: uuid.New()}
 	down := errors.New("database unreachable")
 
 	sessions := mocks.NewSessionRepo(t)
@@ -805,12 +806,12 @@ func TestSignOutRecordsNothingWhenTheSessionSurvives(t *testing.T) {
 
 	audit := mocks.NewAuditSink(t) // strict: a Record call fails the test
 
-	svc := app.NewAuthService(nil, nil, nil, testHasher(), sessions, audit, systemClock{})
+	svc := auth.New(nil, nil, nil, testHasher(), sessions, audit, systemClock{})
 	require.ErrorIs(t, svc.SignOut(context.Background(), sess), down, "want the failed delete")
 }
 
 func TestSignOutEndsTheSessionOfAClientThatHungUp(t *testing.T) {
-	sess := app.Session{IDHash: app.HashSessionID("the-cookie"), UserID: uuid.New()}
+	sess := app.Session{IDHash: auth.HashSessionID("the-cookie"), UserID: uuid.New()}
 	ctx, hangUp := context.WithCancel(context.Background())
 	hangUp()
 
@@ -824,7 +825,7 @@ func TestSignOutEndsTheSessionOfAClientThatHungUp(t *testing.T) {
 		return dctx.Err()
 	})
 
-	svc := app.NewAuthService(nil, nil, nil, testHasher(), sessions, nopAudit{}, systemClock{})
+	svc := auth.New(nil, nil, nil, testHasher(), sessions, nopAudit{}, systemClock{})
 	require.NoError(t, svc.SignOut(ctx, sess), "SignOut on a hung-up request: the session was left open")
 
 	assertCompensationContext(t, deleteCtx)
