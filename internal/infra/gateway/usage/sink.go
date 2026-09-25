@@ -1,4 +1,6 @@
-package gateway
+// Package usage is the gateway's usage plugin: it turns upstream usage records
+// into ledger rows, metrics and vendor quota signals, priced as they are mapped.
+package usage
 
 import (
 	"context"
@@ -13,13 +15,14 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/google/uuid"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
-// UsageObserver is what the sink reports to besides the ledger: the metric
+// Observer is what the sink reports to besides the ledger: the metric
 // families of internal/infra/metrics. *metrics.Metrics implements it.
-type UsageObserver interface {
+type Observer interface {
 	// ObserveUsage records one request. user is the owner's human-readable
 	// label, never an id.
 	ObserveUsage(ev app.UsageEvent, user string)
@@ -49,7 +52,7 @@ const (
 	unknownLabel = "unknown"
 )
 
-// UsageSink turns upstream usage records into ledger rows, metrics and vendor
+// Sink turns upstream usage records into ledger rows, metrics and vendor
 // quota signals. It implements upstream's usage.Plugin. Each row is priced as it
 // is mapped, at the price in force then (app.PriceUsage), and the metrics count
 // that same cost, so the ledger and the metrics never price a request apart.
@@ -61,13 +64,13 @@ const (
 // goroutine.
 //
 // Every provider the sink records — ledger rows, metric labels, quota signals —
-// is the policy-facing name (PolicyProvider), never the upstream key.
-type UsageSink struct {
+// is the policy-facing name (gateway.PolicyProvider), never the upstream key.
+type Sink struct {
 	events   app.UsageRepo
 	tokens   app.TokenRepo
 	users    app.UserRepo
 	prices   app.PriceLookup
-	observer UsageObserver
+	observer Observer
 	clock    app.Clock
 	log      app.Logger
 
@@ -86,16 +89,16 @@ type UsageSink struct {
 }
 
 var (
-	_ cliproxyusage.Plugin = (*UsageSink)(nil)
-	_ app.QuotaReader      = (*UsageSink)(nil)
+	_ cliproxyusage.Plugin = (*Sink)(nil)
+	_ app.QuotaReader      = (*Sink)(nil)
 )
 
-// NewUsageSink starts the sink's worker; it runs for the life of the process.
+// New starts the sink's worker; it runs for the life of the process.
 // prices must answer from memory: it is read for every record.
-func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
-	observer UsageObserver, clock app.Clock, log app.Logger,
-) *UsageSink {
-	sink := &UsageSink{
+func New(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
+	observer Observer, clock app.Clock, log app.Logger,
+) *Sink {
+	sink := &Sink{
 		events:     events,
 		tokens:     tokens,
 		users:      users,
@@ -116,7 +119,7 @@ func NewUsageSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo
 // HandleUsage enqueues record and returns at once. When the queue is full, or
 // Drain has been called, the record is dropped and counted (Dropped): the
 // ledger may lose a row under overload, the proxy never waits for it.
-func (s *UsageSink) HandleUsage(_ context.Context, record cliproxyusage.Record) {
+func (s *Sink) HandleUsage(_ context.Context, record cliproxyusage.Record) {
 	if s.closed.Load() {
 		s.dropped.Add(1)
 
@@ -132,17 +135,17 @@ func (s *UsageSink) HandleUsage(_ context.Context, record cliproxyusage.Record) 
 
 // Dropped is how many records HandleUsage has dropped: on a full queue, or
 // after Drain.
-func (s *UsageSink) Dropped() uint64 { return s.dropped.Load() }
+func (s *Sink) Dropped() uint64 { return s.dropped.Load() }
 
 // Panics is how many panics the worker has recovered from.
-func (s *UsageSink) Panics() uint64 { return s.panics.Load() }
+func (s *Sink) Panics() uint64 { return s.panics.Load() }
 
 // Drain is for shutdown. It stops accepting records — HandleUsage drops and
 // counts them from then on — and returns once every record accepted before
 // has been processed: written (or failed and logged), observed and touched.
 // If ctx ends first it returns an error wrapping ctx.Err(); the worker
 // finishes on its own.
-func (s *UsageSink) Drain(ctx context.Context) error {
+func (s *Sink) Drain(ctx context.Context) error {
 	s.closed.Store(true)
 
 	return s.sync(ctx)
@@ -237,7 +240,7 @@ func partitionDetail(ev *app.UsageEvent, providerKey string, detail cliproxyusag
 // a protocol it does not recognise.
 func detailSemantics(providerKey string) (bool, bool, bool) {
 	key := strings.ToLower(strings.TrimSpace(providerKey))
-	if key == OpenAICompatibilityKey || strings.HasPrefix(key, OpenAICompatiblePrefix) {
+	if key == gateway.OpenAICompatibilityKey || strings.HasPrefix(key, gateway.OpenAICompatiblePrefix) {
 		return true, true, true
 	}
 
@@ -251,7 +254,7 @@ func detailSemantics(providerKey string) (bool, bool, bool) {
 		}
 	}
 
-	for _, marker := range [...]string{"openai", CodexProviderKey, XAIProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+	for _, marker := range [...]string{"openai", gateway.CodexProviderKey, gateway.XAIProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
 		if strings.Contains(key, marker) {
 			return true, true, true
 		}
@@ -301,7 +304,7 @@ func (c labelCache) get(now time.Time, id uuid.UUID, lookup func(context.Context
 
 // QuotaSignals returns every account's latest snapshot, ordered by account and
 // window.
-func (s *UsageSink) QuotaSignals() []app.QuotaSignal {
+func (s *Sink) QuotaSignals() []app.QuotaSignal {
 	s.quotaMu.Lock()
 
 	var out []app.QuotaSignal
@@ -325,7 +328,7 @@ func (s *UsageSink) QuotaSignals() []app.QuotaSignal {
 
 // ForgetAccount drops a removed account's quota snapshot; call it with
 // metrics.ForgetAccount. A record of the account still queued brings it back.
-func (s *UsageSink) ForgetAccount(account string) {
+func (s *Sink) ForgetAccount(account string) {
 	s.quotaMu.Lock()
 	delete(s.quota, account)
 	s.quotaMu.Unlock()
@@ -335,7 +338,7 @@ func (s *UsageSink) ForgetAccount(account string) {
 // processed, or an error wrapping ctx.Err(). It does not stop intake: the
 // worker processes only as many records as were queued when it took the
 // request, so arrivals cannot keep it from answering.
-func (s *UsageSink) sync(ctx context.Context) error {
+func (s *Sink) sync(ctx context.Context) error {
 	done := make(chan struct{})
 	select {
 	case s.flush <- done:
@@ -351,7 +354,7 @@ func (s *UsageSink) sync(ctx context.Context) error {
 	}
 }
 
-func (s *UsageSink) run() {
+func (s *Sink) run() {
 	batch := make([]cliproxyusage.Record, 0, usageBatchMax)
 
 	for {
@@ -375,7 +378,7 @@ func (s *UsageSink) run() {
 }
 
 // fill tops batch up with at most n more queued records, without waiting.
-func (s *UsageSink) fill(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
+func (s *Sink) fill(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
 	for ; n > 0; n-- {
 		select {
 		case r := <-s.queue:
@@ -389,7 +392,7 @@ func (s *UsageSink) fill(batch []cliproxyusage.Record, n int) []cliproxyusage.Re
 }
 
 // take appends exactly n queued records to batch.
-func (s *UsageSink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
+func (s *Sink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Record {
 	for ; n > 0; n-- {
 		batch = append(batch, <-s.queue)
 	}
@@ -399,12 +402,12 @@ func (s *UsageSink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Re
 
 // process handles one batch: map and observe every record, write the ledger
 // rows, then stamp the tokens and owners the batch used.
-func (s *UsageSink) process(records []cliproxyusage.Record) {
+func (s *Sink) process(records []cliproxyusage.Record) {
 	events := make([]app.UsageEvent, 0, len(records))
 	for _, record := range records {
 		s.guard(func(p any) {
 			s.log.Warn("recovered a panic handling a usage record",
-				slog.String("provider", PolicyProvider(record.Provider)), slog.String("model", record.Model), slog.Any("panic", p))
+				slog.String("provider", gateway.PolicyProvider(record.Provider)), slog.String("model", record.Model), slog.Any("panic", p))
 		}, func() {
 			ev := s.eventOf(record)
 			events = append(events, ev)
@@ -427,7 +430,7 @@ func (s *UsageSink) process(records []cliproxyusage.Record) {
 }
 
 // guard runs fn, and on a panic counts it and hands the value to report.
-func (s *UsageSink) guard(report func(any), fn func()) {
+func (s *Sink) guard(report func(any), fn func()) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.panics.Add(1)
@@ -439,7 +442,7 @@ func (s *UsageSink) guard(report func(any), fn func()) {
 }
 
 // observe feeds the metrics and the quota store from one record.
-func (s *UsageSink) observe(record cliproxyusage.Record, ev app.UsageEvent) {
+func (s *Sink) observe(record cliproxyusage.Record, ev app.UsageEvent) {
 	s.observer.ObserveUsage(ev, s.userLabel(ev.UserID))
 
 	if record.AuthID == "" {
@@ -455,10 +458,10 @@ func (s *UsageSink) observe(record cliproxyusage.Record, ev app.UsageEvent) {
 
 // eventOf maps a record onto a ledger row. Record.APIKey carries the principal
 // (app.Principal.String); a record without one is kept unattributed.
-func (s *UsageSink) eventOf(record cliproxyusage.Record) app.UsageEvent {
+func (s *Sink) eventOf(record cliproxyusage.Record) app.UsageEvent {
 	ev := app.UsageEvent{
 		At:              record.RequestedAt,
-		Provider:        PolicyProvider(record.Provider),
+		Provider:        gateway.PolicyProvider(record.Provider),
 		Model:           record.Model,
 		Alias:           record.Alias,
 		Stream:          record.Stream,
@@ -508,7 +511,7 @@ func (s *UsageSink) eventOf(record cliproxyusage.Record) app.UsageEvent {
 // touch stamps each token and owner in events once, with the latest time one
 // of its requests completed. Records arrive in completion order, and the
 // repositories never move a stamp backwards.
-func (s *UsageSink) touch(ctx context.Context, events []app.UsageEvent) {
+func (s *Sink) touch(ctx context.Context, events []app.UsageEvent) {
 	tokens, users := map[uuid.UUID]time.Time{}, map[uuid.UUID]time.Time{}
 
 	for _, ev := range events {
@@ -536,7 +539,7 @@ func (s *UsageSink) touch(ctx context.Context, events []app.UsageEvent) {
 }
 
 // userLabel is the owner's label (identity.User.Label).
-func (s *UsageSink) userLabel(id uuid.UUID) string {
+func (s *Sink) userLabel(id uuid.UUID) string {
 	return s.userLabels.get(s.clock.Now(), id, func(ctx context.Context) (string, error) {
 		u, err := s.users.ByID(ctx, id)
 
@@ -562,7 +565,7 @@ func (s *UsageSink) userLabel(id uuid.UUID) string {
 // Like upstream's own snapshot (sdk/cliproxy/auth/quota_signals.go), a
 // response carrying any signal replaces the account's whole snapshot, so a
 // window the vendor stopped reporting disappears; one carrying none leaves it.
-func (s *UsageSink) observeQuota(record cliproxyusage.Record, provider string, observedAt time.Time) {
+func (s *Sink) observeQuota(record cliproxyusage.Record, provider string, observedAt time.Time) {
 	headers := record.ResponseHeaders
 	if headers == nil {
 		return
@@ -590,7 +593,7 @@ func (s *UsageSink) observeQuota(record cliproxyusage.Record, provider string, o
 			reset, _ := parseEpochOrRFC3339(headers.Get(prefix + "Reset"))
 			add(window, ratio, reset)
 		}
-	case CodexProviderKey:
+	case gateway.CodexProviderKey:
 		for _, pos := range [...]struct{ name, fallback string }{{"Primary", "5h"}, {"Secondary", "7d"}} {
 			prefix := "X-Codex-" + pos.name + "-"
 

@@ -1,4 +1,4 @@
-package gateway
+package usage
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
@@ -60,18 +61,18 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 	require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
+	sink := New(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
 	wire := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +
 			`"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`),
-	}, Params{
+	}, gateway.Params{
 		Config:      &cliproxyconfig.Config{},
 		UsagePlugin: sink,
 		Resolver:    app.NewTokenResolver(users, tokens),
 	})
 
-	status, _, body := wire.postMessages(t, secret, false)
+	status, body := wire.postMessages(t, secret)
 	require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
 
 	// Upstream publishes usage records asynchronously, through one queue
@@ -90,7 +91,7 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 
 	require.NoError(t, tokens.Create(ctx, laterTok), "create token")
 
-	status, _, body = wire.postMessages(t, laterSecret, false)
+	status, body = wire.postMessages(t, laterSecret)
 	require.Equal(t, http.StatusOK, status, "later POST /v1/messages (%s)", body)
 
 	awaitLedgerRow(t, pool, sink, later.ID, laterTok.ID)
@@ -143,7 +144,7 @@ func rerunInFreshProcess(t *testing.T) {
 
 // ledgerRows waits until sink has processed every record handed to it, then
 // counts the ledger rows attributed to userID or tokenID.
-func ledgerRows(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, tokenID uuid.UUID) int {
+func ledgerRows(t *testing.T, pool *pgxpool.Pool, sink *Sink, userID, tokenID uuid.UUID) int {
 	t.Helper()
 	flushed(t, sink)
 
@@ -158,7 +159,7 @@ func ledgerRows(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, token
 
 // awaitLedgerRow waits up to 10s for a ledger row attributed to userID or
 // tokenID to appear.
-func awaitLedgerRow(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, tokenID uuid.UUID) {
+func awaitLedgerRow(t *testing.T, pool *pgxpool.Pool, sink *Sink, userID, tokenID uuid.UUID) {
 	t.Helper()
 
 	for deadline := time.Now().Add(10 * time.Second); ledgerRows(t, pool, sink, userID, tokenID) == 0; time.Sleep(20 * time.Millisecond) {

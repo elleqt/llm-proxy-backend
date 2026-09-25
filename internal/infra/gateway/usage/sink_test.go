@@ -1,4 +1,4 @@
-package gateway
+package usage
 
 import (
 	"context"
@@ -122,17 +122,17 @@ func knownPrincipal(users *mocks.UserRepo, tokens *mocks.TokenRepo) {
 }
 
 // newMeteredSink builds a sink on the wall clock reporting to real metric families.
-func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, log app.Logger) (*UsageSink, *metrics.Metrics, *prometheus.Registry) {
+func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, log app.Logger) (*Sink, *metrics.Metrics, *prometheus.Registry) {
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
 
-	return NewUsageSink(events, tokens, users, &app.PriceTable{}, m, wallClock{}, log), m, reg
+	return New(events, tokens, users, &app.PriceTable{}, m, wallClock{}, log), m, reg
 }
 
 // flushed waits until every record handed to sink so far has been processed.
 // It is bounded: a mock refusing an unexpected call ends the worker goroutine
 // (FailNow), which no recover can catch.
-func flushed(t *testing.T, sink *UsageSink) {
+func flushed(t *testing.T, sink *Sink) {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -353,7 +353,7 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 		{Provider: "gemini", Model: "gemini-3", Input: 1, Output: 8, CacheRead: 0.25},
 		{Provider: "mystery", Model: "m", Input: 1, Output: 1},
 	})
-	sink := NewUsageSink(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
+	sink := New(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
 
 	for _, rec := range []cliproxyusage.Record{
 		{Provider: "codex", Model: "gpt-6", Detail: cliproxyusage.Detail{
@@ -419,7 +419,7 @@ func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
 
 	prices := &app.PriceTable{}
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(events, tokens, users, prices, meter, wallClock{}, discardLog{})
+	sink := New(events, tokens, users, prices, meter, wallClock{}, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{
 			Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
@@ -493,7 +493,7 @@ func TestSinkLabelCacheExpires(t *testing.T) {
 
 	clock := &manualClock{now: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)}
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, meter, clock, discardLog{})
+	sink := New(events, tokens, users, &app.PriceTable{}, meter, clock, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey})
 		flushed(t, sink)
@@ -552,7 +552,7 @@ func TestSinkSurvivesPanic(t *testing.T) {
 
 	log := &recordingLog{}
 
-	sink := NewUsageSink(events, tokens, users, &app.PriceTable{}, panickyObserver{}, wallClock{}, log)
+	sink := New(events, tokens, users, &app.PriceTable{}, panickyObserver{}, wallClock{}, log)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "boom", APIKey: sinkKey})
 	flushed(t, sink)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "fine", APIKey: sinkKey})
@@ -840,7 +840,7 @@ func quotaGauge(t *testing.T, reg *prometheus.Registry, family string) map[quota
 	return out
 }
 
-func quotaSink(t *testing.T) (*UsageSink, *prometheus.Registry) {
+func quotaSink(t *testing.T) (*Sink, *prometheus.Registry) {
 	t.Helper()
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	events.accept()

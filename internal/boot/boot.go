@@ -25,6 +25,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
+	gwusage "github.com/elleqt/llm-proxy-backend/internal/infra/gateway/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
@@ -127,7 +128,7 @@ type process struct {
 	// catalogUpdates starts upstream's model catalogue updaters once the gateway
 	// runs (LLMPROXY_MODEL_CATALOG_UPDATES).
 	catalogUpdates bool
-	sink           *gateway.UsageSink
+	sink           *gwusage.Sink
 	// prices checks the price catalog every catalogInterval while serving.
 	prices          *app.Prices
 	catalogInterval time.Duration
@@ -171,7 +172,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
 	//nolint:contextcheck // the sink's goroutine lives until Drain, not for a boot context
-	sink := gateway.NewUsageSink(usage, tokens, users, prices, meters, clock, logs)
+	sink := gwusage.New(usage, tokens, users, prices, meters, clock, logs)
 
 	registerSinkCounters(registry, sink)
 	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
@@ -270,7 +271,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 // registerSinkCounters exposes the usage sink's dropped records and recovered
 // panics as counters on registry.
-func registerSinkCounters(registry *prometheus.Registry, sink *gateway.UsageSink) {
+func registerSinkCounters(registry *prometheus.Registry, sink *gwusage.Sink) {
 	registry.MustRegister(
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: "llmproxy", Name: "usage_dropped_total",
