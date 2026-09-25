@@ -15,6 +15,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
@@ -194,7 +195,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	env.deps = Deps{
 		Auth: app.NewAuthService(env.users, env.pwds, app.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
-		Tokens:       app.NewTokenService(env.users, env.tokens, env.audit, env.clock, env.log),
+		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
 		Usage:        app.NewUsageService(env.usage),
 		Models:       app.NewModelsService(env.catalog),
 		LocalLogin:   true,

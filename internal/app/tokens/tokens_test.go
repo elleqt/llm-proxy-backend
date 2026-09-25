@@ -1,4 +1,4 @@
-package app_test
+package tokens_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -24,7 +25,7 @@ var frozen = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
 func TestIssueForOtherUserRequiresAdmin(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 
@@ -37,7 +38,7 @@ func TestIssueForOtherUserRequiresAdmin(t *testing.T) {
 func TestAdminIssuesForServiceAccount(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit := mocks.NewAuditSink(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, audit, clock, discardLogger{})
 
 	service := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	users.EXPECT().ByID(mock.Anything, service.ID).Return(service, nil)
@@ -77,7 +78,7 @@ func TestAdminIssuesForServiceAccount(t *testing.T) {
 
 func TestIssueForUnknownOwnerIsNotFound(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	owner := uuid.New()
 	users.EXPECT().ByID(mock.Anything, owner).Return(identity.User{}, app.ErrNotFound)
@@ -91,7 +92,7 @@ func TestIssueForUnknownOwnerIsNotFound(t *testing.T) {
 func TestIssueReturnsNoSecretWhenTheRowIsNotPersisted(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit := mocks.NewAuditSink(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, audit, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -111,7 +112,7 @@ func TestIssueReturnsNoSecretWhenTheRowIsNotPersisted(t *testing.T) {
 func TestIssueRetractsTheRowWhenTheAuditRecordFails(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit := mocks.NewAuditSink(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, audit, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -143,7 +144,7 @@ func TestIssueRetractsTheRowWhenTheAuditRecordFails(t *testing.T) {
 func TestIssueErrorNamesBothFailuresWhenTheRetractionAlsoFails(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit, logger := mocks.NewAuditSink(t), mocks.NewLogger(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, logger)
+	svc := apptokens.New(users, tokens, audit, clock, logger)
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -182,7 +183,7 @@ func TestIssueErrorNamesBothFailuresWhenTheRetractionAlsoFails(t *testing.T) {
 
 func TestOwnerIssuesListsAndRevokesOwnToken(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -238,7 +239,7 @@ func TestOwnerIssuesListsAndRevokesOwnToken(t *testing.T) {
 
 func TestListForOtherUserRequiresAdmin(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	_, err := svc.List(context.Background(), actor, uuid.New())
@@ -249,7 +250,7 @@ func TestListForOtherUserRequiresAdmin(t *testing.T) {
 // equally empty owner and the ownership rule turns into an allow.
 func TestUnpopulatedActorIsForbidden(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	ctx := context.Background()
 	_, _, err := svc.Issue(ctx, identity.User{}, uuid.Nil, "ghost")
@@ -269,7 +270,7 @@ func TestUnpopulatedActorIsForbidden(t *testing.T) {
 
 func TestRevokeOtherUsersTokenIsForbidden(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	victim := uuid.New()
 
@@ -286,7 +287,7 @@ func TestRevokeOtherUsersTokenIsForbidden(t *testing.T) {
 
 func TestAdminRevokesAnotherUsersToken(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	tok, _, err := credentials.Generate(uuid.New(), "laptop")
@@ -310,7 +311,7 @@ func TestAdminRevokesAnotherUsersToken(t *testing.T) {
 
 func TestRevokeUnknownTokenIsNotFound(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	id := uuid.New()
 	tokens.EXPECT().ByID(mock.Anything, id).Return(credentials.Token{}, app.ErrNotFound)
@@ -321,7 +322,7 @@ func TestRevokeUnknownTokenIsNotFound(t *testing.T) {
 
 func TestRevokeTwiceFails(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
-	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, nopAudit{}, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -352,7 +353,7 @@ func TestRevokeTwiceFails(t *testing.T) {
 func TestRevokeSucceedsAndLogsWhenTheAuditRecordFails(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit, logger := mocks.NewAuditSink(t), mocks.NewLogger(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, logger)
+	svc := apptokens.New(users, tokens, audit, clock, logger)
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
@@ -387,7 +388,7 @@ func TestRevokeSucceedsAndLogsWhenTheAuditRecordFails(t *testing.T) {
 func TestAuditDetailsNeverCarrySecretOrHash(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit := mocks.NewAuditSink(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, audit, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	var events []app.AuditEvent
@@ -446,7 +447,7 @@ func renderEvent(e app.AuditEvent) string {
 func TestIssueRetractsTheRowEvenWhenTheClientHungUp(t *testing.T) {
 	users, tokens, clock := mocks.NewUserRepo(t), mocks.NewTokenRepo(t), mocks.NewClock(t)
 	audit := mocks.NewAuditSink(t)
-	svc := app.NewTokenService(users, tokens, audit, clock, discardLogger{})
+	svc := apptokens.New(users, tokens, audit, clock, discardLogger{})
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}

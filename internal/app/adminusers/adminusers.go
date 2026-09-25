@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -57,7 +58,7 @@ type Service struct {
 	idents    app.IdentityRepo
 	sessions  app.SessionRepo
 	activity  app.ActivityRepo
-	tokens    *app.TokenService
+	tokens    *apptokens.Service
 	hasher    *app.PasswordHasher
 	audit     app.AuditSink
 	clock     app.Clock
@@ -67,7 +68,7 @@ type Service struct {
 
 func New(
 	users app.UserRepo, passwords app.PasswordRepo, idents app.IdentityRepo, sessions app.SessionRepo, activity app.ActivityRepo,
-	tokens *app.TokenService, hasher *app.PasswordHasher, audit app.AuditSink, clock app.Clock, catalog app.ModelCatalog, cfg Config,
+	tokens *apptokens.Service, hasher *app.PasswordHasher, audit app.AuditSink, clock app.Clock, catalog app.ModelCatalog, cfg Config,
 ) *Service {
 	return &Service{
 		users: users, passwords: passwords, idents: idents, sessions: sessions, activity: activity,

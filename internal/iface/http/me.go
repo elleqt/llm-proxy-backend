@@ -133,7 +133,7 @@ func (rt *router) revokeMyToken(rw http.ResponseWriter, req *http.Request) {
 }
 
 // ownAuthority is u acting through the cabinet, which reaches only u's own keys. An
-// administrator's role lets app.TokenService manage anyone's; that authority belongs
+// administrator's role lets tokens.Service manage anyone's; that authority belongs
 // to the admin API, so here it is set aside and a foreign token id is refused like
 // anyone else's attempt would be. The actor recorded in the audit is still u.
 func ownAuthority(u identity.User) identity.User {

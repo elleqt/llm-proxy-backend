@@ -22,6 +22,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
@@ -234,7 +235,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	tokenService := app.NewTokenService(users, tokens, audit, clock, logs)
+	tokenService := apptokens.New(users, tokens, audit, clock, logs)
 
 	router, err := webapi.NewRouter(webapi.Deps{
 		Auth: app.NewAuthService(users, passwords,

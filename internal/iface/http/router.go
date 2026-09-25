@@ -8,12 +8,13 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 )
 
 // Deps is what the web API is built from.
 type Deps struct {
 	Auth   *app.AuthService
-	Tokens *app.TokenService
+	Tokens *tokens.Service
 	// OIDC is nil when federated sign-in is not configured; /api/auth/config then
 	// says so and /api/auth/oidc/start answers oidc_disabled.
 	OIDC *app.OIDCService

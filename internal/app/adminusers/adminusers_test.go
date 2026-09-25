@@ -10,6 +10,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -48,7 +49,7 @@ func newAdminFixture(t *testing.T, cfg adminusers.Config) *adminFixture {
 	}
 	clock := mocks.NewClock(t)
 	clock.EXPECT().Now().Return(frozen).Maybe()
-	tokenSvc := app.NewTokenService(fixture.users, fixture.tokens, fixture.audit, clock, discardLogger{})
+	tokenSvc := tokens.New(fixture.users, fixture.tokens, fixture.audit, clock, discardLogger{})
 	fixture.svc = adminusers.New(fixture.users, fixture.passwords, fixture.idents, fixture.sessions, fixture.activity,
 		tokenSvc, testHasher(), fixture.audit, clock, fixture.catalog, cfg)
 
