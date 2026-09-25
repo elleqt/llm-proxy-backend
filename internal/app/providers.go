@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
@@ -95,7 +96,8 @@ func (s *Providers) withdraw(ctx context.Context, account VendorAccount, cause e
 	cctx, cancel := compensationContext(ctx)
 	defer cancel()
 	if err := s.accounts.RemoveAccount(cctx, account.ID); err != nil {
-		s.logger.Warnf("app: vendor account %s is live but unaudited: audit failed (%v) and removing it failed (%v) — remove it by hand", account.ID, cause, err)
+		s.logger.Warn("vendor account is live but unaudited — remove it by hand",
+			slog.String("account", account.ID), slog.Any("audit_err", cause), slog.Any("remove_err", err))
 		return fmt.Errorf("app: added vendor account not audited (%w); removing it failed: %v", cause, err)
 	}
 	return fmt.Errorf("app: added vendor account not audited, account removed: %w", cause)
@@ -169,6 +171,7 @@ func (s *Providers) record(ctx context.Context, actor identity.User, action, tar
 		Target:  target,
 		Detail:  detail,
 	}); err != nil {
-		s.logger.Warnf("app: %s on %s done but the audit record failed: %v", action, target, err)
+		s.logger.Warn("audit record failed after a completed action",
+			slog.String("action", action), slog.String("target", target), slog.Any("err", err))
 	}
 }

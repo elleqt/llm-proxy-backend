@@ -1,0 +1,109 @@
+package boot
+
+import (
+	"bytes"
+	"encoding/json"
+	"log/slog"
+	"runtime/debug"
+	"strings"
+	"testing"
+
+	"github.com/sirupsen/logrus"
+
+	"github.com/elleqt/llm-proxy-backend/internal/config"
+)
+
+// An upstream logrus record reaches the process log as a record of its own:
+// labelled CLIProxyAPI's with both versions, its fields as attributes, its time
+// in UTC. Debug stays off whatever logrus was set to, since it would log request
+// details, and upstream's "no request id" placeholder is dropped.
+func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
+	std := logrus.StandardLogger()
+	out, formatter, level := std.Out, std.Formatter, std.GetLevel()
+	hooks := std.ReplaceHooks(make(logrus.LevelHooks))
+	t.Cleanup(func() {
+		std.SetOutput(out)
+		std.SetFormatter(formatter)
+		std.SetLevel(level)
+		std.ReplaceHooks(hooks)
+	})
+	logrus.SetLevel(logrus.DebugLevel)
+
+	var buf bytes.Buffer
+	routeLogrus(newLogHandler(&buf, config.LogFormatJSON, "0.1.2"))
+	logrus.WithField("body", "secret prompt").Debug("request detail")
+	logrus.WithFields(logrus.Fields{"provider": "claude", "request_id": "--------"}).Warn("quota exceeded\n")
+	logrus.WithField("request_id", "a1b2c3d4").Info("request served")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d records, want the warning and the info line only:\n%s", len(lines), buf.String())
+	}
+	var warn, info map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &warn); err != nil {
+		t.Fatalf("record %q: %v", lines[0], err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &info); err != nil {
+		t.Fatalf("record %q: %v", lines[1], err)
+	}
+	for k, want := range map[string]any{
+		"level": "WARN", "msg": "quota exceeded", "provider": "claude",
+		"version": "0.1.2", "component": "cliproxyapi",
+	} {
+		if warn[k] != want {
+			t.Errorf("%s = %v, want %v (record %s)", k, warn[k], want, lines[0])
+		}
+	}
+	if v, _ := warn["cliproxy_version"].(string); !strings.HasPrefix(v, "v7.") {
+		t.Errorf("cliproxy_version = %q, want the embedded CLIProxyAPI v7 module's version", v)
+	}
+	if ts, _ := warn["time"].(string); !strings.HasSuffix(ts, "Z") {
+		t.Errorf("time = %q, want UTC", ts)
+	}
+	if _, ok := warn["request_id"]; ok {
+		t.Errorf("the placeholder request_id was kept: %s", lines[0])
+	}
+	if info["request_id"] != "a1b2c3d4" {
+		t.Errorf("request_id = %v, want a real id kept", info["request_id"])
+	}
+}
+
+// Trace joins debug and fatal and panic join error; no logrus level lands on a
+// less severe slog level than its own.
+func TestLogrusLevelsKeepTheirSeverity(t *testing.T) {
+	want := map[logrus.Level]slog.Level{
+		logrus.TraceLevel: slog.LevelDebug,
+		logrus.DebugLevel: slog.LevelDebug,
+		logrus.InfoLevel:  slog.LevelInfo,
+		logrus.WarnLevel:  slog.LevelWarn,
+		logrus.ErrorLevel: slog.LevelError,
+		logrus.FatalLevel: slog.LevelError,
+		logrus.PanicLevel: slog.LevelError,
+	}
+	for _, l := range logrus.AllLevels {
+		if got := slogLevel(l); got != want[l] {
+			t.Errorf("slogLevel(%v) = %v, want %v", l, got, want[l])
+		}
+	}
+}
+
+// The version label prefers what the build injected, then the module version a
+// tagged go install records, then the commit a checkout build was made from.
+func TestVersionPrecedence(t *testing.T) {
+	vcs := []debug.BuildSetting{{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}}
+	for _, c := range []struct {
+		name, injected string
+		bi             *debug.BuildInfo
+		want           string
+	}{
+		{"injected wins", "0.1.2", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.1"}, Settings: vcs}, "0.1.2"},
+		{"module version", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.1"}, Settings: vcs}, "v0.1.1"},
+		{"checkout build", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: vcs}, "01234567"},
+		{"no commit", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, "unknown"},
+		{"no build info", "", nil, "unknown"},
+	} {
+		if got := versionOf(c.injected, c.bi); got != c.want {
+			t.Errorf("%s: versionOf = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

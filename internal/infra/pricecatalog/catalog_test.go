@@ -2,6 +2,7 @@ package pricecatalog_test
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -221,8 +222,8 @@ func (clock) Now() time.Time { return time.Date(2026, 9, 23, 12, 0, 0, 0, time.U
 
 type quiet struct{}
 
-func (quiet) Warnf(string, ...any) {}
-func (quiet) Infof(string, ...any) {}
+func (quiet) Warn(string, ...slog.Attr) {}
+func (quiet) Info(string, ...slog.Attr) {}
 
 // The fingerprint tells two URLs apart without holding either: a credential in the
 // URL must not reach the store.

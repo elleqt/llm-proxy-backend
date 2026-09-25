@@ -92,6 +92,15 @@ jobs:
             org.opencontainers.image.title=llm-proxy-backend
             org.opencontainers.image.description=llm-proxy gateway: shared Claude and ChatGPT subscriptions behind personal API keys
             org.opencontainers.image.licenses=MIT
+      # The version the binary reports in its logs and llmproxy_build_info: the
+      # bare semver on a tag (like the image tag), edge-<7-char sha> on main.
+      - id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
       - id: build
         name: Build and push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -101,7 +110,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: VERSION=${{ steps.meta.outputs.version }}
+          build-args: VERSION=${{ steps.ver.outputs.version }}
           sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max

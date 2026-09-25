@@ -65,6 +65,8 @@ services:
       LLMPROXY_LOCAL_LOGIN: "true"
       # Parallel password hashes (about 19 MiB each); unset: the CPU count.
       # LLMPROXY_PASSWORD_HASH_CONCURRENCY: "4"
+      # The process log's format: "text" (key=value lines) or "json" (one object per line).
+      LLMPROXY_LOG_FORMAT: text
       # "on" fetches upstream's model catalogue from the internet at start and every
       # three hours; "off" keeps the one compiled into the build.
       LLMPROXY_MODEL_CATALOG_UPDATES: "on"

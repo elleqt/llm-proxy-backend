@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +29,7 @@ import (
 // discardLog drops warnings, for tests that do not assert on them.
 type discardLog struct{}
 
-func (discardLog) Warnf(string, ...any) {}
+func (discardLog) Warn(string, ...slog.Attr) {}
 
 // recordingLog keeps every warning, formatted.
 type recordingLog struct {
@@ -36,9 +37,9 @@ type recordingLog struct {
 	lines []string
 }
 
-func (l *recordingLog) Warnf(format string, args ...any) {
+func (l *recordingLog) Warn(msg string, attrs ...slog.Attr) {
 	l.mu.Lock()
-	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+	l.lines = append(l.lines, fmt.Sprintln(msg, attrs))
 	l.mu.Unlock()
 }
 

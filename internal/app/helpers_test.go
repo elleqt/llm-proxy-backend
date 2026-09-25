@@ -5,6 +5,7 @@ package app_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -39,8 +40,8 @@ func mustPolicy(t *testing.T, rules ...string) access.Policy {
 
 type discardLogger struct{}
 
-func (discardLogger) Warnf(string, ...any) {}
-func (discardLogger) Infof(string, ...any) {}
+func (discardLogger) Warn(string, ...slog.Attr) {}
+func (discardLogger) Info(string, ...slog.Attr) {}
 
 // testHasher runs the real argon2 derivations with room for every test in the package
 // to derive at once: the bound is under test in hasher_test.go, not here.

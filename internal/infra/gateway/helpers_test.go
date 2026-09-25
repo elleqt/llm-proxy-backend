@@ -29,7 +29,7 @@ func gateEngine(resolver Resolver, catalog access.Catalog) *gin.Engine {
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) {
 		c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
-	}, policyGate(resolver, catalog, nil))
+	}, policyGate(resolver, catalog, nil, nil))
 	return engine
 }
 

@@ -38,9 +38,12 @@ type Config struct {
 	// network at start and every three hours. Off, it serves the catalogue
 	// compiled into the build.
 	ModelCatalogUpdates bool
-	OIDC                OIDC
-	Web                 Web
-	PriceCatalog        PriceCatalog
+	// LogFormat is LLMPROXY_LOG_FORMAT, LogFormatText unless it is LogFormatJSON:
+	// how the process log's records are written.
+	LogFormat    string
+	OIDC         OIDC
+	Web          Web
+	PriceCatalog PriceCatalog
 }
 
 // PriceCatalogOff is the LLMPROXY_PRICES_CATALOG_URL value that turns the price
@@ -76,6 +79,13 @@ const WebAddrOff = "off"
 const (
 	ModelCatalogUpdatesOff = "off"
 	ModelCatalogUpdatesOn  = "on"
+)
+
+// LogFormatText and LogFormatJSON are the LLMPROXY_LOG_FORMAT values: one
+// key=value line per record, or one JSON object per record. No value is text.
+const (
+	LogFormatText = "text"
+	LogFormatJSON = "json"
 )
 
 // Web configures the browser-facing API's listener (internal/iface/http). It is on
@@ -196,6 +206,14 @@ func Load() (Config, error) {
 	case ModelCatalogUpdatesOff:
 	default:
 		return Config{}, errors.New("config: LLMPROXY_MODEL_CATALOG_UPDATES must be on or off")
+	}
+	switch os.Getenv("LLMPROXY_LOG_FORMAT") {
+	case "", LogFormatText:
+		cfg.LogFormat = LogFormatText
+	case LogFormatJSON:
+		cfg.LogFormat = LogFormatJSON
+	default:
+		return Config{}, errors.New("config: LLMPROXY_LOG_FORMAT must be text or json")
 	}
 	oidc, err := loadOIDC()
 	if err != nil {

@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -499,16 +500,19 @@ type LoginAttemptRepo interface {
 	Clear(ctx context.Context, email string) error
 }
 
-// Logger keeps the sink from importing a logging library into the domain.
+// Logger keeps the services from depending on a log handler or its output format.
+// It takes slog.Attr values only (slog.String, slog.Int, slog.Any("err", err)):
+// every attribute's key travels with its value, so a loose key/value pair is a
+// compile error rather than a !BADKEY in the log.
 type Logger interface {
-	Warnf(format string, args ...any)
+	Warn(msg string, attrs ...slog.Attr)
 }
 
 // InfoLogger is a Logger that also reports routine outcomes, for a service whose
 // successes are worth a line too.
 type InfoLogger interface {
 	Logger
-	Infof(format string, args ...any)
+	Info(msg string, attrs ...slog.Attr)
 }
 
 // SettingsRepo stores the editable upstream configuration document, verbatim as the

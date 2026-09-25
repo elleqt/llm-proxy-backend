@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,16 +47,16 @@ type testLog struct {
 	lines []string
 }
 
-func (l *testLog) Warnf(format string, args ...any) {
-	line := fmt.Sprintf(format, args...)
+func (l *testLog) Warn(msg string, attrs ...slog.Attr) {
+	line := fmt.Sprint(msg, attrs)
 	l.t.Log("router log: " + line)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lines = append(l.lines, line)
 }
 
-func (l *testLog) Infof(format string, args ...any) {
-	l.t.Log("router log: " + fmt.Sprintf(format, args...))
+func (l *testLog) Info(msg string, attrs ...slog.Attr) {
+	l.t.Log("router log: " + fmt.Sprint(msg, attrs))
 }
 func (l *testLog) text() string {
 	l.mu.Lock()

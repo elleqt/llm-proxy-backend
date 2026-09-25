@@ -85,7 +85,7 @@ The full variable reference is in `internal/config/config.go` and the README.
 - **Web error body:** every web error is JSON `api.Error{code,message,field?}` written by `writeError`. Clients key on `code`, so treat codes as contract.
 - **SQL:** raw SQL in documented string constants; no ORM or sqlc. Multi-row writes use `pgx.Batch`.
 - **Unique violations** become `app.ErrConflict` through `asConflict()`, so callers never import pgx.
-- **Time** always goes through `app.Clock`. The app layer logs through `app.Logger`; logrus is there only for upstream.
+- **Time** always goes through `app.Clock`. The app layer logs through `app.Logger`, which takes `slog.Attr` values only (`slog.Any("err", err)`), never loose key/value pairs. Boot bridges upstream's logrus into the same slog handler (`internal/boot/logging.go`); logrus is there only for upstream.
 - **Config** is env-only with the `LLMPROXY_` prefix and fails fast in `config.Load()`. Errors name the variable and never echo its value. Secrets use the self-redacting `config.Secret`.
 - **Comments:** every package has a doc comment. Comments are full sentences that explain invariants and reasons; match that style.
 - **Goroutines** belong to `serve()` in boot. Don't start unmanaged background work.

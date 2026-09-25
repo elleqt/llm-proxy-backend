@@ -10,7 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -23,7 +23,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/sirupsen/logrus"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
@@ -38,11 +37,12 @@ import (
 
 // Options is what the process takes from outside its environment variables.
 type Options struct {
-	// Output receives the process log and the bootstrap administrator's one-time
-	// password banner. The command passes os.Stderr. Required.
+	// Output receives the process log, upstream's logrus records included, and the
+	// bootstrap administrator's one-time password banner, which bypasses the
+	// logger. The command passes os.Stderr. Required.
 	Output io.Writer
-	// Version labels llmproxy_build_info; empty takes it from the binary's build
-	// information.
+	// Version labels every log record and llmproxy_build_info; empty takes it from
+	// the binary's build information (resolveVersion).
 	Version string
 	// Compatibility declares openai-compatibility vendors in the boot
 	// configuration: boot-only credentials, which a configuration push cannot add
@@ -75,25 +75,28 @@ const (
 // the stop has begun, a second SIGTERM or SIGINT is no longer caught: it ends the
 // process at once, as the signal does by default.
 //
-// Boot order: configuration, migrations, the pool, repositories and the one
-// password hasher, the bootstrap administrator, the upstream boot configuration
-// from the database, metrics, the price list and the usage sink, the gateway, then
-// the three listeners and the price catalog's checks, and once the gateway runs,
-// the model catalogue updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// Boot order: configuration and the process log, migrations, the pool,
+// repositories and the one password hasher, the bootstrap administrator, the
+// upstream boot configuration from the database, metrics, the price list and the
+// usage sink, the gateway, then the three listeners and the price catalog's
+// checks, and once the gateway runs, the model catalogue updaters unless
+// LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	plog := log.New(opts.Output, "", log.LstdFlags|log.LUTC)
-	// Upstream logs through logrus. Debug level would log request details; keep it
-	// at info whatever the environment set before.
-	logrus.SetLevel(logrus.InfoLevel)
-
+	// A configuration error is returned, not logged: the log format is part of
+	// the configuration.
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
+	version := resolveVersion(opts.Version)
+	h := newLogHandler(opts.Output, cfg.LogFormat, version)
+	logger := slog.New(h.WithAttrs([]slog.Attr{slog.String("component", componentOwn)}))
+	routeLogrus(h)
+
 	// Neither error carries the DSN (see postgres.report).
 	if err := postgres.Migrate(ctx, cfg.DatabaseURL); err != nil {
 		return fmt.Errorf("database migration: %w", err)
@@ -103,9 +106,9 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("database: %w", err)
 	}
 	defer pool.Close()
-	plog.Printf("database migrated and connected")
+	logger.Info("database migrated and connected")
 
-	p, err := build(ctx, cfg, opts, pool, plog)
+	p, err := build(ctx, cfg, opts, version, pool, logger)
 	if err != nil {
 		return err
 	}
@@ -114,7 +117,7 @@ func Run(ctx context.Context, opts Options) error {
 
 // process is the built service, ready to serve.
 type process struct {
-	log     *log.Logger
+	log     *slog.Logger
 	gateway *gateway.Gateway
 	// apiAddr is where the gateway serves the proxied API.
 	apiAddr string
@@ -130,12 +133,15 @@ type process struct {
 	metrics *http.Server
 }
 
-func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.Pool, plog *log.Logger) (*process, error) {
+// build wires the services. version is the resolved build version, and logger
+// the process's own (component llmproxy).
+func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
+	logger *slog.Logger) (*process, error) {
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 	tokens, sessions := postgres.NewTokenRepo(pool), postgres.NewSessionRepo(pool)
 	audit, usage := postgres.NewAuditSink(pool), postgres.NewUsageRepo(pool)
 	settings := postgres.NewSettingsRepo(pool)
-	clock, logs := systemClock{}, processLog{plog}
+	clock, logs := systemClock{}, processLog{logger}
 	// One hasher, so LLMPROXY_PASSWORD_HASH_CONCURRENCY bounds every derivation in
 	// the process: sign-in, bootstrap and administrators' resets alike.
 	hasher := app.NewPasswordHasher(cfg.PasswordHashConcurrency, identity.HashPassword, identity.VerifyPassword)
@@ -147,8 +153,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	if password != "" {
 		printBootstrapPassword(opts.Output, cfg.BootstrapAdminEmail, password)
 		if cfg.Web.Enabled() && !cfg.Web.LocalLogin {
-			logs.Warnf("the bootstrap administrator %s signs in with a password, but LLMPROXY_LOCAL_LOGIN is false: "+
-				"set it to true until the administrator can sign in another way", cfg.BootstrapAdminEmail)
+			logs.Warn("the bootstrap administrator signs in with a password, but LLMPROXY_LOCAL_LOGIN is false: "+
+				"set it to true until the administrator can sign in another way", slog.String("admin", cfg.BootstrapAdminEmail))
 		}
 	}
 
@@ -162,7 +168,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	var g *gateway.Gateway
 	meters := metrics.New(registry,
 		metrics.WithClock(clock),
-		metrics.WithVersion(opts.Version),
+		metrics.WithVersion(version),
 		// g is set below, before anything is served.
 		metrics.WithKnownModel(func(model string) (string, bool) { return g.Catalog().KnownModel(model) }),
 	)
@@ -181,7 +187,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 	// in force; the catalog's first check runs as serving starts.
 	var catalogSource app.PriceCatalogSource
 	if cfg.PriceCatalog.Enabled() {
-		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, opts.Version)
+		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, version)
 	}
 	priceList := app.NewPrices(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
 		prices, meters, audit, clock, logs)
@@ -204,13 +210,14 @@ func build(ctx context.Context, cfg config.Config, opts Options, pool *pgxpool.P
 		Resolver:    app.NewTokenResolver(users, tokens),
 		// The gate's 401s and refusals are counted, a denial under its owner.
 		Observer: gateMetrics{meters},
+		Log:      logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
 
 	p := &process{
-		log:             plog,
+		log:             logger,
 		gateway:         g,
 		apiAddr:         cfg.ListenAddr,
 		catalogUpdates:  cfg.ModelCatalogUpdates,
@@ -364,7 +371,7 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 		if p.gateway.WaitReload(gatewayCtx) != nil {
 			return
 		}
-		p.log.Printf("serving the proxied API on %s", p.apiAddr)
+		p.log.Info("serving the proxied API", slog.String("addr", p.apiAddr))
 		// Upstream's binary starts the model catalogue updaters before its
 		// service; here they start once the service runs, under its context,
 		// which ends their periodic refresh at shutdown. A change found before
@@ -384,7 +391,7 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 
 	failed := make(chan error, len(servers))
 	for i, s := range servers {
-		p.log.Printf("serving %s on %s", s.name, listeners[i].Addr())
+		p.log.Info("serving listener", slog.String("listener", s.name), slog.String("addr", listeners[i].Addr().String()))
 		go func() {
 			if err := s.srv.Serve(listeners[i]); !errors.Is(err, http.ErrServerClosed) {
 				failed <- fmt.Errorf("%s listener: %w", s.name, err)
@@ -403,9 +410,9 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	}
 	releaseSignals()
 	if cause != nil {
-		p.log.Printf("stopping: %v", cause)
+		p.log.Info("stopping", slog.Any("cause", cause))
 	} else {
-		p.log.Printf("stopping")
+		p.log.Info("stopping")
 	}
 	stopCatalog()
 	var stopped sync.WaitGroup
@@ -414,7 +421,8 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 			sctx, cancel := context.WithTimeout(context.Background(), listenerGrace)
 			defer cancel()
 			if err := s.srv.Shutdown(sctx); err != nil {
-				p.log.Printf("%s listener: %v; closing its remaining connections", s.name, err)
+				p.log.Warn("listener shutdown incomplete; closing its remaining connections",
+					slog.String("listener", s.name), slog.Any("err", err))
 				_ = s.srv.Close()
 			}
 		})
@@ -436,9 +444,9 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	dctx, cancel := context.WithTimeout(context.Background(), sinkGrace)
 	defer cancel()
 	if err := p.sink.Drain(dctx); err != nil {
-		p.log.Printf("usage records still queued were not all written: %v", err)
+		p.log.Warn("usage records still queued were not all written", slog.Any("err", err))
 	}
-	p.log.Printf("stopped")
+	p.log.Info("stopped")
 	return cause
 }
 
@@ -458,9 +466,3 @@ func printBootstrapPassword(w io.Writer, email, password string) {
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now().UTC() }
-
-// processLog is app.Logger over the process log.
-type processLog struct{ l *log.Logger }
-
-func (p processLog) Warnf(format string, args ...any) { p.l.Printf("warning: "+format, args...) }
-func (p processLog) Infof(format string, args ...any) { p.l.Printf(format, args...) }

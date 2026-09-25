@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	log "github.com/sirupsen/logrus"
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 )
@@ -43,10 +43,13 @@ import (
 //     admits.
 //
 // observe is told of every 401 and every policy or route refusal; nil observes
-// nothing.
-func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver) gin.HandlerFunc {
+// nothing. log receives the gate's own failures; nil discards them.
+func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver, log *slog.Logger) gin.HandlerFunc {
 	if observe == nil {
 		observe = noGateObserver{}
+	}
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
 	}
 	return func(c *gin.Context) {
 		r := classify(c.Request.Method, c.FullPath())
@@ -84,7 +87,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 				observe.AuthFailed(AuthInvalid)
 			}
 			if authErr.HTTPStatusCode() >= http.StatusInternalServerError {
-				log.Errorf("policy gate: authentication failed: %v", authErr)
+				log.Error("policy gate: authentication failed", slog.Any("err", authErr))
 			}
 			c.AbortWithStatusJSON(authErr.HTTPStatusCode(), gin.H{"error": authErr.Message})
 			return
@@ -109,7 +112,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 				// in the background, where a deadline would cut the reply.
 				var err error
 				if deadline, err = setBodyReadDeadline(c); err != nil {
-					log.Errorf("policy gate: %v", err)
+					log.Error("policy gate: request body deadline could not be set", slog.Any("err", err))
 					abortWithError(c, http.StatusInternalServerError, "server_error", "request body cannot be received")
 					return
 				}
@@ -167,7 +170,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 			requested = model
 		}
 		if r.kind == routeListing {
-			serveListing(c, r.listing, func(model string) bool { return policy.Admits(catalog, model) })
+			serveListing(c, r.listing, func(model string) bool { return policy.Admits(catalog, model) }, log)
 			return
 		}
 		model, providers := access.Routed(catalog, requested)
@@ -187,7 +190,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver)
 // serveListing runs the handler with its response held back, and sends what
 // list keeps of it. A list that is too large or not of the expected shape is
 // not sent: 502.
-func serveListing(c *gin.Context, list listing, admitted func(string) bool) {
+func serveListing(c *gin.Context, list listing, admitted func(string) bool, log *slog.Logger) {
 	held := &bufferedWriter{ResponseWriter: c.Writer, status: http.StatusOK, limit: maxListingBody}
 	c.Writer = held
 	c.Next()
@@ -199,7 +202,7 @@ func serveListing(c *gin.Context, list listing, admitted func(string) bool) {
 	}
 	c.Writer.Header().Del("Content-Length")
 	if err != nil {
-		log.Errorf("policy gate: filter %s: %v", c.FullPath(), err)
+		log.Error("policy gate: filtering a listing failed", slog.String("route", c.FullPath()), slog.Any("err", err))
 		abortWithError(c, http.StatusBadGateway, "server_error", "model list unavailable")
 		return
 	}

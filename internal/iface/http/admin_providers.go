@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -70,7 +71,8 @@ func (rt *router) startProviderLogin(w http.ResponseWriter, r *http.Request) {
 func (rt *router) completeProviderLogin(w http.ResponseWriter, r *http.Request) {
 	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(completeLoginWriteTime)); err != nil &&
 		!errors.Is(err, http.ErrNotSupported) {
-		rt.Log.Warnf("web: %s %s: extend the write deadline: %v", r.Method, r.URL.Path, err)
+		rt.Log.Warn("extending the write deadline failed",
+			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("err", err))
 	}
 	c, _ := callerFrom(r.Context())
 	var body api.ProviderLoginCompleteRequest
