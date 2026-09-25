@@ -398,6 +398,9 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 		aliases[1].Alias != "claude-sonnet-4-5" || !aliases[1].Fork {
 		t.Fatalf("default aliases = %#v", aliases)
 	}
+	if excluded := cfg.OAuthExcludedModels["claude"]; len(excluded) != 5 || excluded[3] != "claude-3-7-sonnet-20250219" {
+		t.Fatalf("default exclusions = %#v", excluded)
+	}
 }
 
 func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {
