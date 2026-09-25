@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -266,7 +266,7 @@ func TestListingThroughTheWire(t *testing.T) {
 }
 
 // TestCabinetListsWhatTheListingLists: the cabinet's list of a user's models
-// (app.ModelsService over this gateway's catalogue) holds exactly the models
+// (models.Service over this gateway's catalogue) holds exactly the models
 // GET /v1/models lists to the same user's key, each under every provider
 // serving it. One model is only reachable through upstream's thinking-suffix
 // resolution: "<think>(high)" is registered for chatgpt, but a request for it
@@ -275,7 +275,7 @@ func TestListingThroughTheWire(t *testing.T) {
 func TestCabinetListsWhatTheListingLists(t *testing.T) {
 	policy := &switchableResolver{}
 	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
-	cabinet := app.NewModelsService(srv.gateway.Catalog())
+	cabinet := models.New(srv.gateway.Catalog())
 
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	claudeOnly, codexOnly, shared := "cab-claude-"+seq, "cab-codex-"+seq, "cab-shared-"+seq

@@ -77,7 +77,8 @@ type OIDC struct {
 // place either is parsed: a rule that does not parse is a configuration error the
 // operator sees at startup, never a surprise on some user's login.
 func NewOIDC(
-	users app.UserRepo, idents app.IdentityRepo, sessions app.SessionRepo, idp app.IdentityProvider, audit app.AuditSink, clock app.Clock, cfg OIDCConfig,
+	users app.UserRepo, idents app.IdentityRepo, sessions app.SessionRepo, idp app.IdentityProvider, audit app.AuditSink,
+	clock app.Clock, cfg OIDCConfig,
 ) (*OIDC, error) {
 	defaultPolicy, err := parseRules(cfg.DefaultPolicy)
 	if err != nil {

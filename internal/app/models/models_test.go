@@ -1,10 +1,11 @@
-package app_test
+package models_test
 
 import (
 	"slices"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appmodels "github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/stretchr/testify/assert"
 )
@@ -41,7 +42,7 @@ var twoProviders = fakeCatalog{
 // only when both are allowed, as GET /v1/models does, and a provider left with
 // nothing is absent.
 func TestAllowedModelsFollowThePolicy(t *testing.T) {
-	svc := app.NewModelsService(twoProviders)
+	svc := appmodels.New(twoProviders)
 	for _, tc := range []struct {
 		rules []string
 		want  []app.CatalogProvider

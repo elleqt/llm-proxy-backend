@@ -1,18 +1,20 @@
-package app
+// Package models shows the cabinet which models a user's keys may use.
+package models
 
 import (
 	"slices"
 	"strings"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
-// ModelsService shows the cabinet which models a user's keys may use.
-type ModelsService struct {
-	catalog ModelCatalog
+// Service shows the cabinet which models a user's keys may use.
+type Service struct {
+	catalog app.ModelCatalog
 }
 
-func NewModelsService(catalog ModelCatalog) *ModelsService { return &ModelsService{catalog: catalog} }
+func New(catalog app.ModelCatalog) *Service { return &Service{catalog: catalog} }
 
 // Allowed is today's catalogue as u's keys see it: every model u's policy admits
 // by access.Policy.Admits — the rule the gateway filters GET /v1/models by, so a
@@ -23,8 +25,8 @@ func NewModelsService(catalog ModelCatalog) *ModelsService { return &ModelsServi
 // The policy is the one user carries: the session middleware loads the user on every
 // request, as the gate loads a key's owner, so an administrator's edit shows on
 // the next call.
-func (s *ModelsService) Allowed(user identity.User) []CatalogProvider {
-	out := []CatalogProvider{}
+func (s *Service) Allowed(user identity.User) []app.CatalogProvider {
+	out := []app.CatalogProvider{}
 	if len(user.Policy) == 0 {
 		return out
 	}
@@ -51,10 +53,10 @@ func (s *ModelsService) Allowed(user identity.User) []CatalogProvider {
 		}
 
 		slices.Sort(allowed)
-		out = append(out, CatalogProvider{Name: name, Models: allowed})
+		out = append(out, app.CatalogProvider{Name: name, Models: allowed})
 	}
 
-	slices.SortFunc(out, func(a, b CatalogProvider) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(out, func(a, b app.CatalogProvider) int { return strings.Compare(a.Name, b.Name) })
 
 	return out
 }

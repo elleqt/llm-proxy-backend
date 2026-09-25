@@ -1,3 +1,5 @@
+// Package settings edits the upstream configuration the gateway runs with, and
+// loads it at boot (LoadBootConfig).
 package settings
 
 import (

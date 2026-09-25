@@ -1,4 +1,4 @@
-package app_test
+package providers_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,7 @@ type providersFixture struct {
 	quota    *mocks.VendorQuota
 	metrics  *mocks.AccountMetrics
 	audit    *mocks.AuditSink
-	svc      *app.Providers
+	svc      *providers.Service
 	events   []app.AuditEvent
 }
 
@@ -37,7 +38,7 @@ func newProvidersFixture(t *testing.T) *providersFixture {
 		metrics:  mocks.NewAccountMetrics(t),
 		audit:    mocks.NewAuditSink(t),
 	}
-	fixture.svc = app.NewProviders(fixture.accounts, fixture.logins, fixture.quota, fixture.metrics, fixture.audit, systemClock{}, discardLogger{})
+	fixture.svc = providers.New(fixture.accounts, fixture.logins, fixture.quota, fixture.metrics, fixture.audit, systemClock{}, discardLogger{})
 
 	return fixture
 }
@@ -261,7 +262,7 @@ func TestProvidersWithdrawsAnAccountWhoseAuditFails(t *testing.T) {
 func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	accounts, logins := mocks.NewVendorAccounts(t), mocks.NewVendorLogins(t)
 	audit, logger := mocks.NewAuditSink(t), mocks.NewLogger(t)
-	svc := app.NewProviders(accounts, logins, mocks.NewVendorQuota(t), mocks.NewAccountMetrics(t), audit, systemClock{}, logger)
+	svc := providers.New(accounts, logins, mocks.NewVendorQuota(t), mocks.NewAccountMetrics(t), audit, systemClock{}, logger)
 	logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(codexAccount, nil)
 
 	auditDown := errors.New("audit store down")

@@ -2,7 +2,7 @@ package app
 
 import "sync/atomic"
 
-// PriceTable is the in-memory price list: Prices fills it with the effective list
+// PriceTable is the in-memory price list: prices.Service fills it with the effective list
 // (catalog prices under the manual overrides) at boot, on every replacement and on
 // every catalog change (it is a PriceSink), and the usage sink prices every
 // recorded request from it (it is a PriceLookup). A replacement swaps the whole

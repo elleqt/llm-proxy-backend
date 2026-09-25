@@ -1,3 +1,5 @@
+// Package tokens issues, lists and revokes API keys. A token carries no
+// permissions of its own: every restriction is read from its owner at request time.
 package tokens
 
 import (

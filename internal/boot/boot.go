@@ -23,9 +23,12 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
@@ -248,8 +251,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		OIDC:            oidcService,
 		OIDCDisplayName: cfg.OIDC.DisplayName,
 		LocalLogin:      cfg.Web.LocalLogin,
-		Usage:           app.NewUsageService(usage),
-		Models:          app.NewModelsService(gw.Catalog()),
+		Usage:           appusage.New(usage),
+		Models:          models.New(gw.Catalog()),
 		AdminUsers: adminusers.New(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
 			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,
@@ -258,8 +261,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Settings: appsettings.New(settings, gw, audit, clock),
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
-		// series in these metrics (Providers.Remove).
-		Providers:    app.NewProviders(gw, login.New(gw), sink, meters, audit, clock, logs),
+		// series in these metrics (providers.Service.Remove).
+		Providers:    providers.New(gw, login.New(gw), sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,

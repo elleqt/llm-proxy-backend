@@ -22,7 +22,7 @@ var (
 	ErrForbidden          = errors.New("app: forbidden")
 	ErrInvalidCredentials = errors.New("app: invalid credentials")
 	ErrLockedOut          = errors.New("app: locked out")
-	// ErrWeakPassword refuses a new password shorter than MinPasswordLength.
+	// ErrWeakPassword refuses a new password shorter than auth.MinPasswordLength.
 	ErrWeakPassword = errors.New("app: password too short")
 	// ErrConflict reports that a write lost a uniqueness race — the row it would
 	// create already exists. Repositories map the driver's unique-violation onto it
@@ -345,7 +345,7 @@ type VendorAccount struct {
 	Disabled        bool
 	LastError       string
 	LastRefreshedAt time.Time // zero when never refreshed
-	// Quota is filled by the Providers service from the QuotaReader.
+	// Quota is filled by providers.Service from the QuotaReader.
 	Quota []QuotaSignal
 }
 
@@ -496,7 +496,7 @@ type LoginAttemptRepo interface {
 	// maxFailures.
 	Charge(ctx context.Context, email string, maxFailures int, now, lockUntil time.Time) (count int, lockedUntil *time.Time, err error)
 	// Clear forgets every attempt of the address, an open lock included. A successful
-	// sign-in (Throttle.Reset) and the operator's recovery (Recovery.ResetPassword)
+	// sign-in (auth.Throttle.Reset) and the operator's recovery (recovery.Service.ResetPassword)
 	// call it, and nothing else.
 	Clear(ctx context.Context, email string) error
 }
@@ -518,7 +518,7 @@ type InfoLogger interface {
 
 // SettingsRepo stores the editable upstream configuration document, verbatim as the
 // administrator wrote it. Postgres is its source of truth: the gateway's boot
-// configuration is built from it (LoadBootConfig).
+// configuration is built from it (settings.LoadBootConfig).
 type SettingsRepo interface {
 	// UpstreamDocument returns the stored YAML document, or ErrNotFound when none
 	// was ever saved.

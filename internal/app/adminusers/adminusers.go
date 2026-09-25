@@ -1,3 +1,5 @@
+// Package adminusers is the administrator's view of accounts: people, service
+// accounts, their policies, passwords, tokens and history.
 package adminusers
 
 import (
@@ -187,7 +189,9 @@ func (s *Service) CreateUser(ctx context.Context, actor identity.User, in NewUse
 
 // newServiceAccount is CreateUser's account for a service account: no address, no
 // sign-in, and never more than RoleUser.
-func newServiceAccount(in NewUser, name string, role identity.Role, policy access.Policy, now time.Time) (app.NewAccount, CreatedUser, error) {
+func newServiceAccount(
+	in NewUser, name string, role identity.Role, policy access.Policy, now time.Time,
+) (app.NewAccount, CreatedUser, error) {
 	if in.Email != "" {
 		return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldEmail}
 	}

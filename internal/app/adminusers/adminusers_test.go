@@ -21,7 +21,7 @@ import (
 
 const inviteIssuer = "https://idp.example.com/realms/demo/"
 
-// adminFixture wires AdminUsers to strict mocks: a repository call a test did not
+// adminFixture wires adminusers.Service to strict mocks: a repository call a test did not
 // expect fails it, so a refusal that still reaches a write is caught.
 type adminFixture struct {
 	users     *mocks.UserRepo

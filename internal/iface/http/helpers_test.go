@@ -16,9 +16,12 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
@@ -199,8 +202,8 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		Auth: auth.New(env.users, env.pwds, auth.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
 		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
-		Usage:        app.NewUsageService(env.usage),
-		Models:       app.NewModelsService(env.catalog),
+		Usage:        usage.New(env.usage),
+		Models:       models.New(env.catalog),
 		LocalLogin:   true,
 		Clock:        env.clock,
 		Log:          env.log,
@@ -221,7 +224,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	}
 
 	env.deps.Prices = prices.New(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
-	env.deps.Providers = app.NewProviders(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
+	env.deps.Providers = providers.New(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
 	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	h, err := NewRouter(env.deps)

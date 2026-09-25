@@ -48,7 +48,7 @@ type systemClock struct{}
 func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 // testHasher runs the real argon2 derivations with room for every test in the package
-// to derive at once: the bound is under test in hasher_test.go, not here.
+// to derive at once: the bound is under test in internal/app's hasher_test.go, not here.
 func testHasher() *app.PasswordHasher {
 	return app.NewPasswordHasher(64, identity.HashPassword, identity.VerifyPassword)
 }

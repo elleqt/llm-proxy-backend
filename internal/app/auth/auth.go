@@ -1,3 +1,6 @@
+// Package auth signs people in and owns the browser sessions that result: a local
+// password (Service) under per-address throttling (Throttle), or an OpenID
+// Connect provider (OIDC). It is the only place that mints a session id.
 package auth
 
 import (
@@ -41,7 +44,8 @@ type Service struct {
 }
 
 func New(
-	users app.UserRepo, passwords app.PasswordRepo, throttle *Throttle, hasher *app.PasswordHasher, sessions app.SessionRepo, audit app.AuditSink, clock app.Clock,
+	users app.UserRepo, passwords app.PasswordRepo, throttle *Throttle, hasher *app.PasswordHasher, sessions app.SessionRepo,
+	audit app.AuditSink, clock app.Clock,
 ) *Service {
 	return &Service{
 		users:     users,

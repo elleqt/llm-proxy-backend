@@ -159,6 +159,14 @@ linters:
           - err113
           - wrapcheck
         path: _test\.go
+      # One service per subpackage over a shared root: a service passes the
+      # refusals of the root's kernels and of a sibling service through
+      # unchanged, as it did when they shared a package, because callers and
+      # tests match them by identity (require.Same).
+      - linters:
+          - wrapcheck
+        path: ^internal/app/
+        text: 'sig: func \(?\*?github\.com/elleqt/llm-proxy-backend/internal/app[./]'
     paths:
       - \.gen\.go$
       - mocks

@@ -1,3 +1,5 @@
+// Package prices maintains the price list the cost estimates use: the price
+// catalog's prices with the administrator's manual overrides on top.
 package prices
 
 import (

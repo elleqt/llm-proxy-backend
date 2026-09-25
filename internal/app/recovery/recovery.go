@@ -1,4 +1,7 @@
-package app
+// Package recovery is the way back into an installation from the shell of the
+// host it runs on, when nobody can sign in to reset a password on the web
+// interface.
+package recovery
 
 import (
 	"context"
@@ -6,30 +9,31 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 )
 
-// Recovery is the way back into an installation from the shell of the host it runs
+// Service is the way back into an installation from the shell of the host it runs
 // on, when nobody can sign in to reset a password on the web interface: the sole
 // administrator forgot theirs, or never saw the bootstrap one. Access to that shell
 // is the authority, so there is no actor: every change is recorded with none and
 // {"via": "cli"}.
-type Recovery struct {
-	users     UserRepo
-	passwords PasswordRepo
-	sessions  SessionRepo
-	attempts  LoginAttemptRepo
-	hasher    *PasswordHasher
-	audit     AuditSink
-	clock     Clock
+type Service struct {
+	users     app.UserRepo
+	passwords app.PasswordRepo
+	sessions  app.SessionRepo
+	attempts  app.LoginAttemptRepo
+	hasher    *app.PasswordHasher
+	audit     app.AuditSink
+	clock     app.Clock
 }
 
-func NewRecovery(
-	users UserRepo, passwords PasswordRepo, sessions SessionRepo, attempts LoginAttemptRepo,
-	hasher *PasswordHasher, audit AuditSink, clock Clock,
-) *Recovery {
-	return &Recovery{
+func New(
+	users app.UserRepo, passwords app.PasswordRepo, sessions app.SessionRepo, attempts app.LoginAttemptRepo,
+	hasher *app.PasswordHasher, audit app.AuditSink, clock app.Clock,
+) *Service {
+	return &Service{
 		users: users, passwords: passwords, sessions: sessions, attempts: attempts,
 		hasher: hasher, audit: audit, clock: clock,
 	}
@@ -39,13 +43,13 @@ func NewRecovery(
 // shown once.
 type Recovered struct {
 	User      identity.User
-	Password  TemporaryPassword
+	Password  app.TemporaryPassword
 	Unblocked bool
 }
 
 // ResetPassword gives the human account at email, compared case-insensitively as
 // sign-in does, the temporary password an administrator's reset would
-// (AdminUsers.ResetPassword): it must be changed at the next sign-in, and every
+// (adminusers.Service.ResetPassword): it must be changed at the next sign-in, and every
 // session of the account ends. It also clears the sign-in lockout of the address, so
 // an account locked out by failed attempts can sign in at once. API tokens are left
 // alone. Everything is in the database, so a running server honours it from the next
@@ -60,14 +64,14 @@ type Recovered struct {
 // The unblock and its user.update record are one write, made first: whatever fails
 // after it, the unblock is on record, and a retry finds the account active. Any
 // failure withholds the password: the caller retries, and a retry issues another.
-func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool) (Recovered, error) {
+func (r *Service) ResetPassword(ctx context.Context, email string, unblock bool) (Recovered, error) {
 	user, err := r.users.ByEmail(ctx, strings.TrimSpace(email))
 	if err != nil {
 		return Recovered{}, fmt.Errorf("app: recover account: %w", err)
 	}
 
 	if user.Kind != identity.KindHuman {
-		return Recovered{}, ErrNotLocal
+		return Recovered{}, app.ErrNotLocal
 	}
 
 	out := Recovered{User: user}
@@ -84,7 +88,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 		}
 
 		if !unblock || !canUnblock {
-			return Recovered{}, &BlockedError{CanUnblock: canUnblock}
+			return Recovered{}, &app.BlockedError{CanUnblock: canUnblock}
 		}
 
 		out.Unblocked = true
@@ -94,7 +98,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 
 	if out.Unblocked {
 		active := identity.StatusActive
-		if err := r.users.Unblock(ctx, user.ID, AuditEvent{
+		if err := r.users.Unblock(ctx, user.ID, app.AuditEvent{
 			At: now, Action: "user.update", Target: user.ID.String(),
 			Detail: map[string]any{"via": "cli", "status": string(active)},
 		}); err != nil {
@@ -105,7 +109,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	}
 	// An old password that signs in between the unblock and the reset gets a session
 	// the reset ends; after the reset it no longer signs in.
-	out.Password, err = ResetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, user.ID, now)
+	out.Password, err = app.ResetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, user.ID, now)
 	if err != nil {
 		return Recovered{}, err
 	}
@@ -117,7 +121,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	out.User.MustChangePassword = true
 
 	if err := r.record(ctx, "user.password_reset", user.ID, now,
-		map[string]any{"via": "cli", AuditExpiresAt: out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
+		map[string]any{"via": "cli", app.AuditExpiresAt: out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
 		return Recovered{}, err
 	}
 
@@ -125,7 +129,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 }
 
 // otherActiveAdmin reports whether an administrator other than id can sign in.
-func (r *Recovery) otherActiveAdmin(ctx context.Context, id uuid.UUID) (bool, error) {
+func (r *Service) otherActiveAdmin(ctx context.Context, id uuid.UUID) (bool, error) {
 	all, err := r.users.List(ctx)
 	if err != nil {
 		return false, fmt.Errorf("app: find another administrator: %w", err)
@@ -142,8 +146,8 @@ func (r *Recovery) otherActiveAdmin(ctx context.Context, id uuid.UUID) (bool, er
 
 // record writes a recovery step to the audit log, with no actor. As for an
 // administrator's change, a step that landed unaudited is reported as an error.
-func (r *Recovery) record(ctx context.Context, action string, target uuid.UUID, at time.Time, detail map[string]any) error {
-	if err := r.audit.Record(ctx, AuditEvent{At: at, Action: action, Target: target.String(), Detail: detail}); err != nil {
+func (r *Service) record(ctx context.Context, action string, target uuid.UUID, at time.Time, detail map[string]any) error {
+	if err := r.audit.Record(ctx, app.AuditEvent{At: at, Action: action, Target: target.String(), Detail: detail}); err != nil {
 		return fmt.Errorf("app: %s on %s applied but not audited: %w", action, target, err)
 	}
 

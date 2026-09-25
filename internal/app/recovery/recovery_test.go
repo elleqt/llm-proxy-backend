@@ -1,4 +1,4 @@
-package app_test
+package recovery_test
 
 import (
 	"context"
@@ -9,6 +9,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	appauth "github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	apprecovery "github.com/elleqt/llm-proxy-backend/internal/app/recovery"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -27,7 +28,7 @@ type recoveryEnv struct {
 	tokens    *postgres.TokenRepo
 	activity  *postgres.ActivityRepo
 	auth      *appauth.Service
-	recovery  *app.Recovery
+	recovery  *apprecovery.Service
 }
 
 func newRecoveryEnv(t *testing.T) *recoveryEnv {
@@ -40,7 +41,7 @@ func newRecoveryEnv(t *testing.T) *recoveryEnv {
 		users: users, passwords: passwords, tokens: postgres.NewTokenRepo(pool), activity: postgres.NewActivityRepo(pool),
 		auth: appauth.New(users, passwords, appauth.NewThrottle(attempts, testMaxFailures, testLockFor, clock),
 			testHasher(), sessions, audit, clock),
-		recovery: app.NewRecovery(users, passwords, sessions, attempts, testHasher(), audit, clock),
+		recovery: apprecovery.New(users, passwords, sessions, attempts, testHasher(), audit, clock),
 	}
 }
 
@@ -248,7 +249,7 @@ func TestRecoveryRecordsTheUnblockEvenWhenTheResetFails(t *testing.T) {
 
 	failure := errors.New("database went away")
 	users.EXPECT().SetMustChangePassword(mock.Anything, admin.ID, true).Return(failure)
-	r := app.NewRecovery(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
+	r := apprecovery.New(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
 		testHasher(), mocks.NewAuditSink(t), systemClock{})
 
 	_, err := r.ResetPassword(context.Background(), admin.Email, true)
@@ -267,7 +268,7 @@ func TestRecoveryOfAServiceAccountIsNotLocal(t *testing.T) {
 	users := mocks.NewUserRepo(t)
 	svc := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	users.EXPECT().ByEmail(mock.Anything, "panel@example.com").Return(svc, nil)
-	r := app.NewRecovery(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
+	r := apprecovery.New(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
 		testHasher(), mocks.NewAuditSink(t), systemClock{})
 
 	_, err := r.ResetPassword(context.Background(), "panel@example.com", false)

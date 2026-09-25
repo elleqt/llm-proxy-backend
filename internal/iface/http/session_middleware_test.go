@@ -273,7 +273,7 @@ func TestLoadSessionPassesAnAnonymousRequestThrough(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, "status")
 }
 
-// resolverOver is an AuthService that can resolve sessions and nothing else.
+// resolverOver is an auth.Service that can resolve sessions and nothing else.
 func resolverOver(users app.UserRepo, sessions app.SessionRepo) *auth.Service {
 	return auth.New(users, nil, nil, nil, sessions, nil, nil)
 }

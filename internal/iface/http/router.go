@@ -9,9 +9,12 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 )
 
 // Deps is what the web API is built from.
@@ -27,15 +30,15 @@ type Deps struct {
 	// not offered and POST /api/auth/login answers as an unknown route does.
 	LocalLogin bool
 	// Usage serves the cabinet's consumption chart.
-	Usage *app.UsageService
+	Usage *usage.Service
 	// Models serves the cabinet's list of the models the caller may use.
-	Models *app.ModelsService
+	Models *models.Service
 
 	// The administration API's services.
 	AdminUsers *adminusers.Service
 	Settings   *settings.Service
 	Prices     *prices.Service
-	Providers  *app.Providers
+	Providers  *providers.Service
 
 	Clock app.Clock
 	Log   app.Logger
