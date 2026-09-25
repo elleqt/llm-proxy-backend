@@ -22,14 +22,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func forbidden(field string) error {
-	return &app.SettingError{Field: field, Reason: "owned by the gateway", Kind: app.ErrForbiddenSetting}
-}
-
-func invalid(field, reason string) error {
-	return &app.SettingError{Field: field, Reason: reason, Kind: app.ErrInvalidSettings}
-}
-
 // ownedKeys are the top-level keys of the upstream configuration the gateway owns.
 // A document setting one is refused rather than applied or silently ignored, and
 // the running value is carried over from the configuration that owns it:
@@ -138,7 +130,7 @@ func checkOwnedUnset(cfg *sdkconfig.Config) error {
 
 	for _, f := range ownedFields {
 		if !reflect.DeepEqual(f.of(cfg).Interface(), f.of(empty).Interface()) {
-			return forbidden(f.key)
+			return app.ForbiddenSetting(f.key)
 		}
 	}
 
@@ -402,9 +394,9 @@ func view(doc string, cfg *sdkconfig.Config) View {
 func (req Update) validate() error {
 	switch {
 	case req.YAML != nil && req.Fields != nil:
-		return invalid("fields", "yaml and fields are mutually exclusive")
+		return app.InvalidSetting("fields", "yaml and fields are mutually exclusive")
 	case req.YAML == nil && req.Fields == nil:
-		return invalid("yaml", "one of yaml or fields is required")
+		return app.InvalidSetting("yaml", "one of yaml or fields is required")
 	}
 
 	if req.Fields != nil {
@@ -417,16 +409,16 @@ func (req Update) validate() error {
 func (p Patch) validate() error {
 	if p.ProxyURL != nil {
 		if _, err := proxyutil.Parse(*p.ProxyURL); err != nil {
-			return invalid("proxyURL", err.Error())
+			return app.InvalidSetting("proxyURL", err.Error())
 		}
 	}
 
 	if p.RequestRetry != nil && *p.RequestRetry < 0 {
-		return invalid("requestRetry", "must not be negative")
+		return app.InvalidSetting("requestRetry", "must not be negative")
 	}
 
 	if p.MaxRetryInterval != nil && *p.MaxRetryInterval < 0 {
-		return invalid("maxRetryInterval", "must not be negative")
+		return app.InvalidSetting("maxRetryInterval", "must not be negative")
 	}
 
 	return nil
@@ -475,10 +467,10 @@ func setScalar(mapping *yaml.Node, key, tag, value string) {
 // documentRoot parses doc and returns its top-level mapping; an empty document is
 // an empty mapping.
 //
-// A stream of more than one document is refused (forbidden, field "document"):
+// A stream of more than one document is refused (app.ForbiddenSetting, field "document"):
 // upstream reads the first document only, so anything after it would be stored,
 // served back by Get and silently ignored. So is a YAML merge key anywhere
-// (forbidden, field "<<"): a merge can set a key the literal key check never sees.
+// (app.ForbiddenSetting, field "<<"): a merge can set a key the literal key check never sees.
 func documentRoot(doc string) (*yaml.Node, error) {
 	dec := yaml.NewDecoder(strings.NewReader(doc))
 
@@ -486,20 +478,20 @@ func documentRoot(doc string) (*yaml.Node, error) {
 	if err := dec.Decode(&document); errors.Is(err, io.EOF) {
 		return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}, nil
 	} else if err != nil {
-		return nil, invalid("yaml", err.Error())
+		return nil, app.InvalidSetting("yaml", err.Error())
 	}
 
 	var extra yaml.Node
 	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
-		return nil, forbidden("document")
+		return nil, app.ForbiddenSetting("document")
 	}
 
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, invalid("yaml", "the document must be a mapping")
+		return nil, app.InvalidSetting("yaml", "the document must be a mapping")
 	}
 
 	if hasMergeKey(document.Content[0]) {
-		return nil, forbidden("<<")
+		return nil, app.ForbiddenSetting("<<")
 	}
 
 	return document.Content[0], nil
@@ -533,7 +525,7 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 
 	for i := 0; i+1 < len(root.Content); i += 2 {
 		if key := root.Content[i].Value; isOwnedKey(key) {
-			return nil, forbidden(key)
+			return nil, app.ForbiddenSetting(key)
 		}
 	}
 
@@ -548,12 +540,12 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 
 	var probe sdkconfig.Config
 	if err := dec.Decode(&probe); err != nil {
-		return nil, invalid("yaml", err.Error())
+		return nil, app.InvalidSetting("yaml", err.Error())
 	}
 
 	cfg, err := sdkconfig.ParseConfigBytes(data)
 	if err != nil {
-		return nil, invalid("yaml", err.Error())
+		return nil, app.InvalidSetting("yaml", err.Error())
 	}
 
 	if err := checkOwnedUnset(cfg); err != nil {
@@ -561,7 +553,7 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 	}
 
 	if _, err := proxyutil.Parse(cfg.ProxyURL); err != nil {
-		return nil, invalid("proxy-url", err.Error())
+		return nil, app.InvalidSetting("proxy-url", err.Error())
 	}
 
 	return cfg, nil

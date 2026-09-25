@@ -56,16 +56,16 @@ var (
 )
 
 // SettingError names the request field or top-level YAML key a settings update is
-// refused for. It unwraps to its Kind.
+// refused for. It unwraps to ErrForbiddenSetting or ErrInvalidSettings; build one
+// with ForbiddenSetting or InvalidSetting.
 type SettingError struct {
 	Field  string
 	Reason string
-	// Kind is ErrForbiddenSetting or ErrInvalidSettings.
-	Kind error
+	kind   error
 }
 
 func (e *SettingError) Error() string {
-	msg := e.Kind.Error()
+	msg := e.kind.Error()
 	if e.Field != "" {
 		msg += ": " + e.Field
 	}
@@ -77,7 +77,17 @@ func (e *SettingError) Error() string {
 	return msg
 }
 
-func (e *SettingError) Unwrap() error { return e.Kind }
+func (e *SettingError) Unwrap() error { return e.kind }
+
+// ForbiddenSetting refuses field as owned by the gateway.
+func ForbiddenSetting(field string) error {
+	return &SettingError{Field: field, Reason: "owned by the gateway", kind: ErrForbiddenSetting}
+}
+
+// InvalidSetting refuses field as malformed or not acceptable, for reason.
+func InvalidSetting(field, reason string) error {
+	return &SettingError{Field: field, Reason: reason, kind: ErrInvalidSettings}
+}
 
 // ErrBlocked is what a *BlockedError unwraps to.
 var ErrBlocked = errors.New("app: account is blocked")
