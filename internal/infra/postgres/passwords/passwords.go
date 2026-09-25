@@ -1,4 +1,5 @@
-package postgres
+// Package passwords stores password hashes, permanent or temporary (app.PasswordRepo).
+package passwords
 
 import (
 	"context"
@@ -7,27 +8,28 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type PasswordRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.PasswordRepo = (*PasswordRepo)(nil)
+var _ app.PasswordRepo = (*Repo)(nil)
 
-func NewPasswordRepo(pool *pgxpool.Pool) *PasswordRepo { return &PasswordRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // Set stores a password hash, replacing any previous one. It upserts because setting
 // a password and changing it are the same operation from the caller's side, and a
 // separate "has one already?" read would be a race between two admins.
 //
 // expiresAt is nil for a permanent password and non-nil for a temporary one.
-func (r *PasswordRepo) Set(ctx context.Context, userID uuid.UUID, hash string, expiresAt *time.Time) error {
-	return SetPassword(ctx, r.pool, userID, hash, expiresAt)
+func (r *Repo) Set(ctx context.Context, userID uuid.UUID, hash string, expiresAt *time.Time) error {
+	return Upsert(ctx, r.pool, userID, hash, expiresAt)
 }
 
-func SetPassword(ctx context.Context, q Execer, userID uuid.UUID, hash string, expiresAt *time.Time) error {
+func Upsert(ctx context.Context, q postgres.Execer, userID uuid.UUID, hash string, expiresAt *time.Time) error {
 	if _, err := q.Exec(ctx,
 		`INSERT INTO user_passwords (user_id, hash, expires_at, updated_at)
 		 VALUES ($1, $2, $3, now())
@@ -42,7 +44,7 @@ func SetPassword(ctx context.Context, q Execer, userID uuid.UUID, hash string, e
 
 // Get returns app.ErrNotFound when the user has no password at all — the normal state
 // of a service account or an IdP-only person, and never the same thing as a wrong one.
-func (r *PasswordRepo) Get(ctx context.Context, userID uuid.UUID) (string, *time.Time, error) {
+func (r *Repo) Get(ctx context.Context, userID uuid.UUID) (string, *time.Time, error) {
 	var (
 		hash      string
 		expiresAt *time.Time

@@ -1,4 +1,6 @@
-package postgres
+// Package prices stores the administrator's manual prices (app.PriceRepo) and the
+// price catalog's (app.PriceCatalogRepo).
+package prices
 
 import (
 	"context"
@@ -6,25 +8,26 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Two tables hold prices, with one shape and one replacement rule: model_prices
-// (the administrator's overrides, PriceRepo) and catalog_prices (the catalog's,
-// PriceCatalogRepo). The table name is always one of these constants.
+// (the administrator's overrides, Repo) and catalog_prices (the catalog's,
+// CatalogRepo). The table name is always one of these constants.
 const (
 	manualPrices  = "model_prices"
 	catalogPrices = "catalog_prices"
 )
 
-type PriceRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.PriceRepo = (*PriceRepo)(nil)
+var _ app.PriceRepo = (*Repo)(nil)
 
-func NewPriceRepo(pool *pgxpool.Pool) *PriceRepo { return &PriceRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
-func (r *PriceRepo) List(ctx context.Context) ([]app.ModelPrice, error) {
+func (r *Repo) List(ctx context.Context) ([]app.ModelPrice, error) {
 	return listPrices(ctx, r.pool, manualPrices)
 }
 
@@ -32,7 +35,7 @@ func (r *PriceRepo) List(ctx context.Context) ([]app.ModelPrice, error) {
 // transaction. updated_at moves only for a row whose rates changed. A duplicate
 // (provider, model) in prices fails the statement (ON CONFLICT cannot touch a row
 // twice), so nothing is written.
-func (r *PriceRepo) Replace(ctx context.Context, prices []app.ModelPrice, at time.Time) error {
+func (r *Repo) Replace(ctx context.Context, prices []app.ModelPrice, at time.Time) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		return replacePrices(ctx, tx, manualPrices, prices, at)
 	}); err != nil {
@@ -42,17 +45,17 @@ func (r *PriceRepo) Replace(ctx context.Context, prices []app.ModelPrice, at tim
 	return nil
 }
 
-type PriceCatalogRepo struct{ pool *pgxpool.Pool }
+type CatalogRepo struct{ pool *pgxpool.Pool }
 
-var _ app.PriceCatalogRepo = (*PriceCatalogRepo)(nil)
+var _ app.PriceCatalogRepo = (*CatalogRepo)(nil)
 
-func NewPriceCatalogRepo(pool *pgxpool.Pool) *PriceCatalogRepo { return &PriceCatalogRepo{pool: pool} }
+func NewCatalogRepo(pool *pgxpool.Pool) *CatalogRepo { return &CatalogRepo{pool: pool} }
 
-func (r *PriceCatalogRepo) List(ctx context.Context) ([]app.ModelPrice, error) {
+func (r *CatalogRepo) List(ctx context.Context) ([]app.ModelPrice, error) {
 	return listPrices(ctx, r.pool, catalogPrices)
 }
 
-func (r *PriceCatalogRepo) State(ctx context.Context) (app.CatalogState, error) {
+func (r *CatalogRepo) State(ctx context.Context) (app.CatalogState, error) {
 	var (
 		state                app.CatalogState
 		checkedAt, changedAt *time.Time
@@ -81,9 +84,9 @@ func (r *PriceCatalogRepo) State(ctx context.Context) (app.CatalogState, error) 
 	return state, nil
 }
 
-// Replace replaces the catalog's prices as PriceRepo.Replace does the manual ones,
+// Replace replaces the catalog's prices as Repo.Replace does the manual ones,
 // and records state, in one transaction.
-func (r *PriceCatalogRepo) Replace(ctx context.Context, prices []app.ModelPrice, state app.CatalogState, at time.Time) error {
+func (r *CatalogRepo) Replace(ctx context.Context, prices []app.ModelPrice, state app.CatalogState, at time.Time) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if err := replacePrices(ctx, tx, catalogPrices, prices, at); err != nil {
 			return err
@@ -97,16 +100,16 @@ func (r *PriceCatalogRepo) Replace(ctx context.Context, prices []app.ModelPrice,
 	return nil
 }
 
-func (r *PriceCatalogRepo) SetState(ctx context.Context, state app.CatalogState) error {
+func (r *CatalogRepo) SetState(ctx context.Context, state app.CatalogState) error {
 	return setCatalogState(ctx, r.pool, state)
 }
 
-func setCatalogState(ctx context.Context, db Execer, s app.CatalogState) error {
+func setCatalogState(ctx context.Context, db postgres.Execer, s app.CatalogState) error {
 	if _, err := db.Exec(ctx,
 		`UPDATE catalog_state
 		    SET etag = $1, last_modified = $2, fingerprint = $3, checked_at = $4, changed_at = $5, last_error = $6`,
 		s.Validators.ETag, s.Validators.LastModified, s.Fingerprint, nullTime(s.CheckedAt), nullTime(s.ChangedAt),
-		NullString(s.LastError)); err != nil {
+		postgres.NullString(s.LastError)); err != nil {
 		return fmt.Errorf("postgres: set catalog state: %w", err)
 	}
 

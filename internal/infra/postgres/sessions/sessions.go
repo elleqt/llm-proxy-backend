@@ -1,4 +1,5 @@
-package postgres
+// Package sessions stores browser sessions, by the hash of their id (app.SessionRepo).
+package sessions
 
 import (
 	"context"
@@ -6,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -19,22 +21,22 @@ import (
 // table: whether a session is restricted is read from the user at every request.
 const sessionColumns = `id, user_id, ip, user_agent, created_at, expires_at`
 
-type SessionRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.SessionRepo = (*SessionRepo)(nil)
+var _ app.SessionRepo = (*Repo)(nil)
 
-func NewSessionRepo(pool *pgxpool.Pool) *SessionRepo { return &SessionRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // Create writes the session. Session.ID — the plaintext — is not in the projection
 // and could not be persisted by accident even if a caller left it set. Neither is
 // Session.Restricted, which is derived and has no column to land in.
-func (r *SessionRepo) Create(ctx context.Context, session app.Session) error {
+func (r *Repo) Create(ctx context.Context, session app.Session) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO sessions (`+sessionColumns+`)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		session.IDHash, session.UserID, session.IP, session.UserAgent, session.CreatedAt, session.ExpiresAt)
 
-	return AsConflict(err)
+	return postgres.AsConflict(err)
 }
 
 // ByHash resolves a live session.
@@ -47,7 +49,7 @@ func (r *SessionRepo) Create(ctx context.Context, session app.Session) error {
 //
 // The Restricted field of the result is always false. It is not this repository's to
 // answer — the caller derives it from the user.
-func (r *SessionRepo) ByHash(ctx context.Context, idHash string) (app.Session, error) {
+func (r *Repo) ByHash(ctx context.Context, idHash string) (app.Session, error) {
 	var session app.Session
 
 	err := r.pool.QueryRow(ctx,
@@ -68,7 +70,7 @@ func (r *SessionRepo) ByHash(ctx context.Context, idHash string) (app.Session, e
 // Delete ends a session. A session that is already gone is the state the caller
 // wanted, so a zero row count is success: sign-out must not fail because the row
 // expired a second earlier.
-func (r *SessionRepo) Delete(ctx context.Context, idHash string) error {
+func (r *Repo) Delete(ctx context.Context, idHash string) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM sessions WHERE id = $1`, idHash); err != nil {
 		return fmt.Errorf("postgres: delete session: %w", err)
 	}
@@ -80,7 +82,7 @@ func (r *SessionRepo) Delete(ctx context.Context, idHash string) error {
 // password call it: the sessions table is the only place a cookie is still honoured,
 // so a row left here would outlive the decision that should have ended it. A user
 // with no session is the state the caller wanted, not an error.
-func (r *SessionRepo) DeleteByUser(ctx context.Context, userID uuid.UUID) error {
+func (r *Repo) DeleteByUser(ctx context.Context, userID uuid.UUID) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1`, userID); err != nil {
 		return fmt.Errorf("postgres: delete user sessions: %w", err)
 	}
@@ -91,7 +93,7 @@ func (r *SessionRepo) DeleteByUser(ctx context.Context, userID uuid.UUID) error 
 // DeleteByUserExcept ends every session userID holds but the one keyed keepHash: a
 // password change signs out everyone holding the account's cookies except the person
 // who changed it.
-func (r *SessionRepo) DeleteByUserExcept(ctx context.Context, userID uuid.UUID, keepHash string) error {
+func (r *Repo) DeleteByUserExcept(ctx context.Context, userID uuid.UUID, keepHash string) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM sessions WHERE user_id = $1 AND id <> $2`, userID, keepHash); err != nil {
 		return fmt.Errorf("postgres: delete other user sessions: %w", err)
 	}

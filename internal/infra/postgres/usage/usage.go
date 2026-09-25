@@ -1,4 +1,5 @@
-package postgres
+// Package usage is the consumption ledger (app.UsageRepo).
+package usage
 
 import (
 	"context"
@@ -6,17 +7,18 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// UsageRepo is the consumption ledger.
-type UsageRepo struct{ pool *pgxpool.Pool }
+// Repo is the consumption ledger.
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.UsageRepo = (*UsageRepo)(nil)
+var _ app.UsageRepo = (*Repo)(nil)
 
-func NewUsageRepo(pool *pgxpool.Pool) *UsageRepo { return &UsageRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // appendUsage keeps an event whose owner or token no longer exists: user_id and
 // token_id are foreign keys, and a request that raced its owner's deletion would
@@ -34,7 +36,7 @@ VALUES ($1, (SELECT id FROM users WHERE id = $2), (SELECT id FROM api_tokens WHE
 
 // AppendBatch writes events in one round trip and one implicit transaction: every
 // event or none.
-func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) error {
+func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) error {
 	if len(events) == 0 {
 		return nil
 	}
@@ -42,7 +44,7 @@ func (r *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) er
 	batch := &pgx.Batch{}
 	for _, event := range events {
 		batch.Queue(appendUsage,
-			event.At.UTC(), NullUUID(event.UserID), NullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
+			event.At.UTC(), postgres.NullUUID(event.UserID), postgres.NullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
 			event.Stream, event.ServiceTier, event.TokensInput, event.TokensOutput, event.TokensReasoning,
 			event.TokensCacheRead, event.TokensCacheWrite, event.TokensTotal, event.BreakdownQuality,
 			event.LatencyMS, event.TTFTMS, event.StatusCode, event.Failed, event.VendorAccountID,
@@ -78,7 +80,7 @@ ORDER BY bucket, model`
 
 // SeriesForUser aggregates userID's events in [from, to) per bucket and model; the
 // bucket width is app.UsageBucketFor(from, to). Totals cover the same points.
-func (r *UsageRepo) SeriesForUser(ctx context.Context, userID uuid.UUID, from, to time.Time) (app.UsageSeries, error) {
+func (r *Repo) SeriesForUser(ctx context.Context, userID uuid.UUID, from, to time.Time) (app.UsageSeries, error) {
 	series := app.UsageSeries{Bucket: app.UsageBucketFor(from, to)}
 
 	rows, err := r.pool.Query(ctx, seriesForUser, userID, from.UTC(), to.UTC(), string(series.Bucket))

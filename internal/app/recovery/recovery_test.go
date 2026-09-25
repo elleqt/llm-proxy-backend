@@ -13,8 +13,14 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgactivity "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgsessions "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -23,10 +29,10 @@ import (
 // recoveryEnv is Recovery over a real database, beside the sign-in it must let
 // people back through.
 type recoveryEnv struct {
-	users     *postgres.UserRepo
-	passwords *postgres.PasswordRepo
-	tokens    *postgres.TokenRepo
-	activity  *postgres.ActivityRepo
+	users     *pgusers.Repo
+	passwords *pgpasswords.Repo
+	tokens    *pgtokens.Repo
+	activity  *pgactivity.Repo
 	auth      *appauth.Service
 	recovery  *apprecovery.Service
 }
@@ -34,11 +40,11 @@ type recoveryEnv struct {
 func newRecoveryEnv(t *testing.T) *recoveryEnv {
 	t.Helper()
 	pool := pgtest.NewTestPool(t)
-	users, passwords, sessions := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool), postgres.NewSessionRepo(pool)
-	attempts, audit, clock := postgres.NewLoginAttemptRepo(pool), postgres.NewAuditSink(pool), systemClock{}
+	users, passwords, sessions := pgusers.New(pool), pgpasswords.New(pool), pgsessions.New(pool)
+	attempts, audit, clock := loginattempts.New(pool), pgaudit.New(pool), systemClock{}
 
 	return &recoveryEnv{
-		users: users, passwords: passwords, tokens: postgres.NewTokenRepo(pool), activity: postgres.NewActivityRepo(pool),
+		users: users, passwords: passwords, tokens: pgtokens.New(pool), activity: pgactivity.New(pool),
 		auth: appauth.New(users, passwords, appauth.NewThrottle(attempts, testMaxFailures, testLockFor, clock),
 			testHasher(), sessions, audit, clock),
 		recovery: apprecovery.New(users, passwords, sessions, attempts, testHasher(), audit, clock),

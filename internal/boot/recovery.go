@@ -12,6 +12,11 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
+	pgsessions "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 )
 
 // Refusals ResetPassword explains to the operator. Each is the whole message, or
@@ -70,10 +75,10 @@ func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 	}
 	defer pool.Close()
 
-	recovery := apprecovery.New(postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool),
-		postgres.NewSessionRepo(pool), postgres.NewLoginAttemptRepo(pool),
+	recovery := apprecovery.New(pgusers.New(pool), pgpasswords.New(pool),
+		pgsessions.New(pool), pgloginattempts.New(pool),
 		app.NewPasswordHasher(cfg.PasswordHashConcurrency, identity.HashPassword, identity.VerifyPassword),
-		postgres.NewAuditSink(pool), systemClock{})
+		pgaudit.New(pool), systemClock{})
 	out, err := recovery.ResetPassword(ctx, opts.Email, opts.Unblock)
 
 	var blocked *app.BlockedError

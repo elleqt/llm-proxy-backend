@@ -9,6 +9,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -243,13 +244,13 @@ func TestMigrations(t *testing.T) {
 		require.NoError(t, err, "insert a manual price")
 		require.NoError(t, postgres.Migrate(ctx, dsn), "migrate up")
 
-		manual, err := postgres.NewPriceRepo(pool).List(ctx)
+		manual, err := pgprices.New(pool).List(ctx)
 		require.NoError(t, err, "manual prices after the upgrade")
 		require.Len(t, manual, 1, "manual prices after the upgrade: want the row kept")
 		require.Equal(t, "claude-sonnet-5", manual[0].Model, "manual price model")
 		require.Equal(t, 3.75, manual[0].CacheWrite, "manual price cache write")
 
-		catalog := postgres.NewPriceCatalogRepo(pool)
+		catalog := pgprices.NewCatalogRepo(pool)
 		prices, err := catalog.List(ctx)
 		require.NoError(t, err, "catalog prices")
 		require.Empty(t, prices, "catalog prices: want none")

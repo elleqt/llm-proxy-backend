@@ -167,6 +167,14 @@ linters:
           - wrapcheck
         path: ^internal/app/
         text: 'sig: func \(?\*?github\.com/elleqt/llm-proxy-backend/internal/app[./]'
+      # One repository per subpackage over a shared root: AsConflict and a
+      # sibling's transactional writer return errors already mapped onto app's
+      # sentinels (matched by identity) or prefixed "postgres:", passed through
+      # unchanged as when they shared a package.
+      - linters:
+          - wrapcheck
+        path: ^internal/infra/postgres/
+        text: 'sig: func \(?\*?github\.com/elleqt/llm-proxy-backend/internal/infra/postgres[./]'
     paths:
       - \.gen\.go$
       - mocks

@@ -1,4 +1,4 @@
-package postgres_test
+package settings_test
 
 import (
 	"context"
@@ -8,8 +8,10 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,7 +23,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 	pool := pgtest.NewTestPool(t)
 
 	t.Run("upstream document round-trips verbatim", func(t *testing.T) {
-		repo := postgres.NewSettingsRepo(pool)
+		repo := settings.New(pool)
 		_, err := repo.UpstreamDocument(ctx)
 		require.ErrorIs(t, err, app.ErrNotFound, "before any save")
 
@@ -29,7 +31,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 			ID: uuid.New(), Kind: identity.KindHuman, Email: "root@example.com",
 			Role: identity.RoleAdmin, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
 		}
-		require.NoError(t, postgres.NewUserRepo(pool).Create(ctx, admin), "create admin")
+		require.NoError(t, users.New(pool).Create(ctx, admin), "create admin")
 
 		at := time.Now().UTC().Truncate(time.Microsecond)
 
@@ -60,7 +62,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 	})
 
 	t.Run("prices replace the whole list", func(t *testing.T) {
-		repo := postgres.NewPriceRepo(pool)
+		repo := pgprices.New(pool)
 		t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 		t1 := t0.Add(time.Minute)
 
@@ -122,7 +124,7 @@ func TestSettingsAndPriceRepos(t *testing.T) {
 	})
 
 	t.Run("catalog prices and state replace together", func(t *testing.T) {
-		repo := postgres.NewPriceCatalogRepo(pool)
+		repo := pgprices.NewCatalogRepo(pool)
 		t0 := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 		t1 := t0.Add(time.Minute)
 		sonnet := app.ModelPrice{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75}

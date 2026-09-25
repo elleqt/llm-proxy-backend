@@ -1,4 +1,4 @@
-package postgres_test
+package users_test
 
 import (
 	"context"
@@ -8,8 +8,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -40,7 +40,7 @@ func ruleStrings(p access.Policy) []string {
 func TestUserRepo(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users := postgres.NewUserRepo(pool)
+	users := pgusers.New(pool)
 
 	// First, while the database is empty: later subtests create administrators.
 	t.Run("AdminExistsCountsAnyAdministrator", func(t *testing.T) {

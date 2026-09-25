@@ -1,4 +1,5 @@
-package postgres
+// Package users stores accounts and the identity state they carry (app.UserRepo).
+package users
 
 import (
 	"context"
@@ -10,6 +11,10 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,17 +27,17 @@ import (
 const userColumns = `id, kind, email, display_name, role, status, policy,
 	policy_managed_by, must_change_password, last_seen_at, created_at`
 
-type UserRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.UserRepo = (*UserRepo)(nil)
+var _ app.UserRepo = (*Repo)(nil)
 
-func NewUserRepo(pool *pgxpool.Pool) *UserRepo { return &UserRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
-func (r *UserRepo) Create(ctx context.Context, u identity.User) error {
+func (r *Repo) Create(ctx context.Context, u identity.User) error {
 	return insertUser(ctx, r.pool, u)
 }
 
-func insertUser(ctx context.Context, db Execer, user identity.User) error {
+func insertUser(ctx context.Context, db postgres.Execer, user identity.User) error {
 	policy, err := encodePolicy(user.Policy)
 	if err != nil {
 		return err
@@ -51,38 +56,38 @@ func insertUser(ctx context.Context, db Execer, user identity.User) error {
 		`INSERT INTO users (id, kind, email, display_name, role, status, policy,
 		                    policy_managed_by, must_change_password, last_seen_at, created_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()))`,
-		user.ID, string(user.Kind), NullString(user.Email), user.DisplayName, string(user.Role),
+		user.ID, string(user.Kind), postgres.NullString(user.Email), user.DisplayName, string(user.Role),
 		string(user.Status), policy, string(user.PolicySource), user.MustChangePassword,
 		user.LastSeenAt, createdAt)
 	// A duplicate email — including one differing only in case, which the
 	// users_email_lower_key index catches — is a conflict the caller must be able to
 	// recognise, not an opaque driver failure.
-	return AsConflict(err)
+	return postgres.AsConflict(err)
 }
 
 // CreateAccount commits the user, its first credential and the audit record of its
 // creation in one transaction. A failure at any step rolls back every earlier one,
 // so a retry of the same request finds nothing in its way: no half-made account
 // holding the address, and no account the audit log does not know about.
-func (r *UserRepo) CreateAccount(ctx context.Context, account app.NewAccount) error {
+func (r *Repo) CreateAccount(ctx context.Context, account app.NewAccount) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		if err := insertUser(ctx, tx, account.User); err != nil {
 			return err
 		}
 
 		if account.Password != nil {
-			if err := SetPassword(ctx, tx, account.User.ID, account.Password.Hash, account.Password.ExpiresAt); err != nil {
+			if err := passwords.Upsert(ctx, tx, account.User.ID, account.Password.Hash, account.Password.ExpiresAt); err != nil {
 				return err
 			}
 		}
 
 		if account.Invitation != nil {
-			if err := WriteInvitation(ctx, tx, account.User.ID, *account.Invitation); err != nil {
+			if err := identities.WriteInvitation(ctx, tx, account.User.ID, *account.Invitation); err != nil {
 				return err
 			}
 		}
 
-		return InsertAudit(ctx, tx, account.Audit)
+		return pgaudit.Insert(ctx, tx, account.Audit)
 	}); err != nil {
 		return fmt.Errorf("postgres: create account: %w", err)
 	}
@@ -90,21 +95,21 @@ func (r *UserRepo) CreateAccount(ctx context.Context, account app.NewAccount) er
 	return nil
 }
 
-func (r *UserRepo) ByID(ctx context.Context, id uuid.UUID) (identity.User, error) {
+func (r *Repo) ByID(ctx context.Context, id uuid.UUID) (identity.User, error) {
 	return scanUser(r.pool.QueryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = $1`, id))
 }
 
 // ByEmail matches case-insensitively: an address differing only in case is the same
 // mailbox, and a sign-in form that capitalises the first letter must not create or
 // miss an account.
-func (r *UserRepo) ByEmail(ctx context.Context, email string) (identity.User, error) {
+func (r *Repo) ByEmail(ctx context.Context, email string) (identity.User, error) {
 	return scanUser(r.pool.QueryRow(ctx,
 		`SELECT `+userColumns+` FROM users WHERE lower(email) = lower($1)`, email))
 }
 
 // AdminExists counts a blocked administrator too: blocking the only one is an
 // operator's decision, and a restart must not answer it by minting a fresh one.
-func (r *UserRepo) AdminExists(ctx context.Context) (bool, error) {
+func (r *Repo) AdminExists(ctx context.Context) (bool, error) {
 	var exists bool
 
 	if err := r.pool.QueryRow(ctx,
@@ -119,7 +124,7 @@ func (r *UserRepo) AdminExists(ctx context.Context) (bool, error) {
 // UpdatePolicy reports app.ErrNotFound when no such user exists. An administrator
 // editing a policy must learn that the edit landed nowhere; a silent no-op here
 // would read as success in the admin UI.
-func (r *UserRepo) UpdatePolicy(ctx context.Context, id uuid.UUID, p access.Policy) error {
+func (r *Repo) UpdatePolicy(ctx context.Context, id uuid.UUID, p access.Policy) error {
 	policy, err := encodePolicy(p)
 	if err != nil {
 		return err
@@ -141,7 +146,7 @@ func (r *UserRepo) UpdatePolicy(ctx context.Context, id uuid.UUID, p access.Poli
 // between authentication and this call is not an error worth failing a request over,
 // so a zero row count is accepted. The stamp never moves backwards: stamps can
 // arrive out of order, and GREATEST ignores a NULL.
-func (r *UserRepo) TouchLastSeen(ctx context.Context, id uuid.UUID, at time.Time) error {
+func (r *Repo) TouchLastSeen(ctx context.Context, id uuid.UUID, at time.Time) error {
 	if _, err := r.pool.Exec(ctx,
 		`UPDATE users SET last_seen_at = GREATEST(last_seen_at, $2) WHERE id = $1`, id, at.UTC()); err != nil {
 		return fmt.Errorf("postgres: touch last seen: %w", err)
@@ -157,7 +162,7 @@ func (r *UserRepo) TouchLastSeen(ctx context.Context, id uuid.UUID, at time.Time
 // password and cleared when the user changes it, and it must survive every federated
 // login in between. An unknown user is app.ErrNotFound — a restriction that was never
 // applied, or never lifted, cannot be allowed to read as success.
-func (r *UserRepo) SetMustChangePassword(ctx context.Context, id uuid.UUID, must bool) error {
+func (r *Repo) SetMustChangePassword(ctx context.Context, id uuid.UUID, must bool) error {
 	tag, err := r.pool.Exec(ctx, `UPDATE users SET must_change_password = $2 WHERE id = $1`, id, must)
 	if err != nil {
 		return fmt.Errorf("postgres: set must change password: %w", err)
@@ -172,7 +177,7 @@ func (r *UserRepo) SetMustChangePassword(ctx context.Context, id uuid.UUID, must
 
 // FillDisplayName names an account that has no name. The emptiness test is part of
 // the statement, so a name an administrator sets concurrently is not replaced.
-func (r *UserRepo) FillDisplayName(ctx context.Context, id uuid.UUID, name string) (bool, error) {
+func (r *Repo) FillDisplayName(ctx context.Context, id uuid.UUID, name string) (bool, error) {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE users SET display_name = $2 WHERE id = $1 AND display_name = ''`, id, name)
 	if err != nil {
@@ -202,7 +207,7 @@ func (r *UserRepo) FillDisplayName(ctx context.Context, id uuid.UUID, name strin
 // Role, status and must_change_password are deliberately absent. They are
 // administrator decisions — an operator who blocks or promotes a federated user must
 // not have that undone by the user's next login.
-func (r *UserRepo) SaveIdentityState(ctx context.Context, user identity.User) error {
+func (r *Repo) SaveIdentityState(ctx context.Context, user identity.User) error {
 	policy, err := encodePolicy(user.Policy)
 	if err != nil {
 		return err
@@ -212,12 +217,12 @@ func (r *UserRepo) SaveIdentityState(ctx context.Context, user identity.User) er
 		`UPDATE users
 		 SET policy = $2, policy_managed_by = $3, email = $4
 		 WHERE id = $1`,
-		user.ID, policy, string(user.PolicySource), NullString(user.Email))
+		user.ID, policy, string(user.PolicySource), postgres.NullString(user.Email))
 	// The fourth 23505-capable boundary, and the one on the hot login path: an IdP
 	// that reasserts an address a local account already holds is a conflict the
 	// federated-login flow has to recognise, not an opaque driver error.
 	if err != nil {
-		return AsConflict(err)
+		return postgres.AsConflict(err)
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -237,7 +242,7 @@ func (r *UserRepo) SaveIdentityState(ctx context.Context, user identity.User) er
 // matches no row while the stored policy is idp-managed, so a login that made it
 // idp-managed a moment ago cannot be overwritten by an edit checked against an older
 // read.
-func (r *UserRepo) UpdateAdminState(ctx context.Context, id uuid.UUID, ch app.AdminChange) error {
+func (r *Repo) UpdateAdminState(ctx context.Context, id uuid.UUID, ch app.AdminChange) error {
 	var policy []byte
 
 	if ch.Policy != nil {
@@ -279,7 +284,7 @@ func (r *UserRepo) UpdateAdminState(ctx context.Context, id uuid.UUID, ch app.Ad
 
 // Unblock writes the status and the audit record in one transaction, so no unblock
 // ever stands without its record.
-func (r *UserRepo) Unblock(ctx context.Context, id uuid.UUID, audit app.AuditEvent) error {
+func (r *Repo) Unblock(ctx context.Context, id uuid.UUID, audit app.AuditEvent) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE users SET status = 'active' WHERE id = $1`, id)
 		if err != nil {
@@ -290,7 +295,7 @@ func (r *UserRepo) Unblock(ctx context.Context, id uuid.UUID, audit app.AuditEve
 			return app.ErrNotFound
 		}
 
-		return InsertAudit(ctx, tx, audit)
+		return pgaudit.Insert(ctx, tx, audit)
 	}); err != nil {
 		return fmt.Errorf("postgres: unblock user: %w", err)
 	}
@@ -316,7 +321,7 @@ const userViewQuery = `SELECT ` + userColumns + `, has_password, has_link, invit
 
 // List returns every account, oldest first. The id breaks ties between accounts
 // created in the same microsecond, so the order is stable.
-func (r *UserRepo) List(ctx context.Context) ([]app.UserView, error) {
+func (r *Repo) List(ctx context.Context) ([]app.UserView, error) {
 	rows, err := r.pool.Query(ctx, userViewQuery+`ORDER BY created_at, id`)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: list users: %w", err)
@@ -341,7 +346,7 @@ func (r *UserRepo) List(ctx context.Context) ([]app.UserView, error) {
 	return views, nil
 }
 
-func (r *UserRepo) View(ctx context.Context, id uuid.UUID) (app.UserView, error) {
+func (r *Repo) View(ctx context.Context, id uuid.UUID) (app.UserView, error) {
 	rows, err := r.pool.Query(ctx, userViewQuery+`WHERE id = $1`, id)
 	if err != nil {
 		return app.UserView{}, fmt.Errorf("postgres: view user: %w", err)

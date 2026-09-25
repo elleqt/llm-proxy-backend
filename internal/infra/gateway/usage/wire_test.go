@@ -14,8 +14,10 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusage "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -46,7 +48,7 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
+	users, tokens := pgusers.New(pool), pgtokens.New(pool)
 
 	alice := identity.User{
 		ID: uuid.New(), Kind: identity.KindHuman, Email: "alice@example.com", DisplayName: "Alice",
@@ -61,7 +63,7 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 	require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := New(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
+	sink := New(pgusage.New(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
 	wire := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +

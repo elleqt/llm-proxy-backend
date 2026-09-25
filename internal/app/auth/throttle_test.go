@@ -11,7 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -24,7 +24,7 @@ import (
 // a decision here, not a sleep.
 func TestThrottle(t *testing.T) {
 	ctx := context.Background()
-	attempts := postgres.NewLoginAttemptRepo(pgtest.NewTestPool(t))
+	attempts := loginattempts.New(pgtest.NewTestPool(t))
 
 	const limit, window = 3, time.Minute
 
@@ -141,7 +141,7 @@ func TestThrottle(t *testing.T) {
 func TestSignInBurstGetsExactlyTheLimitOfDerivations(t *testing.T) {
 	const burst, limit = 10, 3
 
-	attempts := postgres.NewLoginAttemptRepo(pgtest.NewTestPool(t))
+	attempts := loginattempts.New(pgtest.NewTestPool(t))
 	users := mocks.NewUserRepo(t)
 	users.EXPECT().ByEmail(mock.Anything, "target@example.com").Return(identity.User{}, app.ErrNotFound)
 

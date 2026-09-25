@@ -1,4 +1,4 @@
-package postgres_test
+package usage_test
 
 import (
 	"context"
@@ -9,8 +9,10 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -20,7 +22,7 @@ import (
 func TestUsageRepo(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
+	users, tokens := pgusers.New(pool), pgtokens.New(pool)
 
 	// A session zone with a half-hour offset: buckets truncated in it rather than
 	// in UTC would start at :30 and on the wrong day.
@@ -31,7 +33,7 @@ func TestUsageRepo(t *testing.T) {
 	require.NoError(t, err, "pool")
 
 	t.Cleanup(kolkata.Close)
-	ledger := postgres.NewUsageRepo(kolkata)
+	ledger := usage.New(kolkata)
 
 	newOwner := func(t *testing.T) (identity.User, credentials.Token) {
 		t.Helper()

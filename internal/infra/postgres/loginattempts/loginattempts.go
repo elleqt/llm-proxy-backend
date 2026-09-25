@@ -1,4 +1,6 @@
-package postgres
+// Package loginattempts counts sign-in attempts per address for the sign-in
+// throttle (app.LoginAttemptRepo).
+package loginattempts
 
 import (
 	"context"
@@ -11,12 +13,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type LoginAttemptRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.LoginAttemptRepo = (*LoginAttemptRepo)(nil)
+var _ app.LoginAttemptRepo = (*Repo)(nil)
 
-func NewLoginAttemptRepo(pool *pgxpool.Pool) *LoginAttemptRepo {
-	return &LoginAttemptRepo{pool: pool}
+func New(pool *pgxpool.Pool) *Repo {
+	return &Repo{pool: pool}
 }
 
 // Failures reports the consecutive failure count and the lockout expiry, if any.
@@ -27,7 +29,7 @@ func NewLoginAttemptRepo(pool *pgxpool.Pool) *LoginAttemptRepo {
 //
 // The address is lower-cased on both read and write so that varying the capitalisation
 // of an email cannot be used to reset the counter.
-func (r *LoginAttemptRepo) Failures(ctx context.Context, email string) (int, *time.Time, error) {
+func (r *Repo) Failures(ctx context.Context, email string) (int, *time.Time, error) {
 	var (
 		count       int
 		lockedUntil *time.Time
@@ -55,7 +57,7 @@ func (r *LoginAttemptRepo) Failures(ctx context.Context, email string) (int, *ti
 // lets the cases of the port contract be decided on the old row. The lock window's
 // length is lockUntil - now, so "the last attempt is older than one window" needs no
 // extra parameter.
-func (r *LoginAttemptRepo) Charge(ctx context.Context, email string, maxFailures int, now, lockUntil time.Time) (int, *time.Time, error) {
+func (r *Repo) Charge(ctx context.Context, email string, maxFailures int, now, lockUntil time.Time) (int, *time.Time, error) {
 	var (
 		count       int
 		lockedUntil *time.Time
@@ -91,7 +93,7 @@ func (r *LoginAttemptRepo) Charge(ctx context.Context, email string, maxFailures
 
 // Clear forgets an address after a successful sign-in, dropping both the count and any
 // lockout.
-func (r *LoginAttemptRepo) Clear(ctx context.Context, email string) error {
+func (r *Repo) Clear(ctx context.Context, email string) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM login_attempts WHERE email = lower($1)`, email); err != nil {
 		return fmt.Errorf("postgres: clear login attempts: %w", err)
 	}

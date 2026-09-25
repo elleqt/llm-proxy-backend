@@ -1,4 +1,6 @@
-package postgres
+// Package identities stores federated identity links and pending invitations
+// (app.IdentityRepo).
+package identities
 
 import (
 	"context"
@@ -6,21 +8,22 @@ import (
 	"fmt"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type IdentityRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.IdentityRepo = (*IdentityRepo)(nil)
+var _ app.IdentityRepo = (*Repo)(nil)
 
-func NewIdentityRepo(pool *pgxpool.Pool) *IdentityRepo { return &IdentityRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // BySubject resolves an already-linked federated identity. Issuer and subject are
 // matched exactly: both are opaque provider-issued strings, and normalising them
 // would let two different subjects collapse onto one account.
-func (r *IdentityRepo) BySubject(ctx context.Context, issuer, subject string) (uuid.UUID, error) {
+func (r *Repo) BySubject(ctx context.Context, issuer, subject string) (uuid.UUID, error) {
 	var id uuid.UUID
 
 	err := r.pool.QueryRow(ctx,
@@ -45,12 +48,12 @@ func (r *IdentityRepo) BySubject(ctx context.Context, issuer, subject string) (u
 // That conflict comes back as app.ErrConflict. The OIDC flow has to tell "this
 // subject is already linked" from a transport failure, and it cannot reach for the
 // driver's error type to do it.
-func (r *IdentityRepo) Link(ctx context.Context, userID uuid.UUID, issuer, subject string) error {
+func (r *Repo) Link(ctx context.Context, userID uuid.UUID, issuer, subject string) error {
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO user_identities (user_id, issuer, subject) VALUES ($1, $2, $3)`,
 		userID, issuer, subject)
 
-	return AsConflict(err)
+	return postgres.AsConflict(err)
 }
 
 // PendingByEmail finds the account an administrator pre-provisioned for an address
@@ -58,7 +61,7 @@ func (r *IdentityRepo) Link(ctx context.Context, userID uuid.UUID, issuer, subje
 // pending row would let anyone who later controls the address claim the account.
 // Email matching is case-insensitive because an address is one mailbox regardless of
 // how the provider capitalises it.
-func (r *IdentityRepo) PendingByEmail(ctx context.Context, issuer, email string) (uuid.UUID, error) {
+func (r *Repo) PendingByEmail(ctx context.Context, issuer, email string) (uuid.UUID, error) {
 	var id uuid.UUID
 
 	err := r.pool.QueryRow(ctx,
@@ -79,7 +82,7 @@ func (r *IdentityRepo) PendingByEmail(ctx context.Context, issuer, email string)
 // ConsumePending removes the invitation once it has been redeemed. Deleting a row
 // that is already gone is not an error: the call is the tail of a link operation that
 // may legitimately be retried.
-func (r *IdentityRepo) ConsumePending(ctx context.Context, userID uuid.UUID) error {
+func (r *Repo) ConsumePending(ctx context.Context, userID uuid.UUID) error {
 	if _, err := r.pool.Exec(ctx, `DELETE FROM pending_identities WHERE user_id = $1`, userID); err != nil {
 		return fmt.Errorf("postgres: consume pending identity: %w", err)
 	}
@@ -88,7 +91,7 @@ func (r *IdentityRepo) ConsumePending(ctx context.Context, userID uuid.UUID) err
 }
 
 // Invite writes an invitation in its own transaction; see WriteInvitation.
-func (r *IdentityRepo) Invite(ctx context.Context, userID uuid.UUID, inv app.Invitation) error {
+func (r *Repo) Invite(ctx context.Context, userID uuid.UUID, inv app.Invitation) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return WriteInvitation(ctx, tx, userID, inv) }); err != nil {
 		return fmt.Errorf("postgres: invite: %w", err)
 	}
@@ -127,7 +130,7 @@ func WriteInvitation(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.I
 		 WHERE NOT EXISTS (SELECT 1 FROM user_identities WHERE user_id = $1)`,
 		userID, inv.Issuer, inv.Email, inv.ExpiresAt.UTC())
 	if err != nil {
-		return AsConflict(err)
+		return postgres.AsConflict(err)
 	}
 
 	if tag.RowsAffected() == 0 {

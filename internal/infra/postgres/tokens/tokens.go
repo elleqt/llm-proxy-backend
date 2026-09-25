@@ -1,4 +1,5 @@
-package postgres
+// Package tokens stores API tokens, by the SHA-256 hash of their secret (app.TokenRepo).
+package tokens
 
 import (
 	"context"
@@ -20,18 +21,18 @@ import (
 const tokenColumns = `id, user_id, label, hash, prefix, created_at, last_used_at,
 	revoked_at, revoked_by`
 
-type TokenRepo struct{ pool *pgxpool.Pool }
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.TokenRepo = (*TokenRepo)(nil)
+var _ app.TokenRepo = (*Repo)(nil)
 
-func NewTokenRepo(pool *pgxpool.Pool) *TokenRepo { return &TokenRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // Create enforces app.MaxLiveTokensPerOwner. The owner's row is locked first, so
 // creates for one owner run one at a time: under READ COMMITTED each statement sees
 // what committed before it began, so the count that follows the lock includes every
 // token a create that held the lock before this one wrote. An unknown owner is
 // app.ErrNotFound.
-func (r *TokenRepo) Create(ctx context.Context, token credentials.Token) error {
+func (r *Repo) Create(ctx context.Context, token credentials.Token) error {
 	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var owner uuid.UUID
 
@@ -72,7 +73,7 @@ func (r *TokenRepo) Create(ctx context.Context, token credentials.Token) error {
 
 // ByID loads a token the caller already knows the identity of — the revoke path,
 // which must read the row to check ownership before it writes.
-func (r *TokenRepo) ByID(ctx context.Context, id uuid.UUID) (credentials.Token, error) {
+func (r *Repo) ByID(ctx context.Context, id uuid.UUID) (credentials.Token, error) {
 	return scanToken(r.pool.QueryRow(ctx,
 		`SELECT `+tokenColumns+` FROM api_tokens WHERE id = $1`, id))
 }
@@ -81,7 +82,7 @@ func (r *TokenRepo) ByID(ctx context.Context, id uuid.UUID) (credentials.Token, 
 // authentication: prefix is a seven-character display aid and collides freely once a
 // deployment holds a few thousand tokens, so resolving by it would authenticate the
 // wrong account.
-func (r *TokenRepo) ByHash(ctx context.Context, hash string) (credentials.Token, error) {
+func (r *Repo) ByHash(ctx context.Context, hash string) (credentials.Token, error) {
 	return scanToken(r.pool.QueryRow(ctx,
 		`SELECT `+tokenColumns+` FROM api_tokens WHERE hash = $1`, hash))
 }
@@ -104,7 +105,7 @@ func scanToken(row pgx.Row) (credentials.Token, error) {
 	return token, nil
 }
 
-func (r *TokenRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]credentials.Token, error) {
+func (r *Repo) ListByUser(ctx context.Context, userID uuid.UUID) ([]credentials.Token, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT `+tokenColumns+` FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC`,
 		userID)
@@ -134,7 +135,7 @@ func (r *TokenRepo) ListByUser(ctx context.Context, userID uuid.UUID) ([]credent
 
 // Save persists the mutable half of a token: its label and its revocation. The hash,
 // prefix and owner are fixed at creation and are deliberately not updatable.
-func (r *TokenRepo) Save(ctx context.Context, token credentials.Token) error {
+func (r *Repo) Save(ctx context.Context, token credentials.Token) error {
 	tag, err := r.pool.Exec(ctx,
 		`UPDATE api_tokens SET label = $2, revoked_at = $3, revoked_by = $4 WHERE id = $1`,
 		token.ID, token.Label, token.RevokedAt, token.RevokedBy)
@@ -153,7 +154,7 @@ func (r *TokenRepo) Save(ctx context.Context, token credentials.Token) error {
 // mid-request is not worth failing the request over, so a zero row count is accepted.
 // The stamp never moves backwards: stamps can arrive out of order, and GREATEST
 // ignores a NULL.
-func (r *TokenRepo) TouchLastUsed(ctx context.Context, id uuid.UUID, at time.Time) error {
+func (r *Repo) TouchLastUsed(ctx context.Context, id uuid.UUID, at time.Time) error {
 	if _, err := r.pool.Exec(ctx,
 		`UPDATE api_tokens SET last_used_at = GREATEST(last_used_at, $2) WHERE id = $1`, id, at.UTC()); err != nil {
 		return fmt.Errorf("postgres: touch token last used: %w", err)

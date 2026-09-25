@@ -2,7 +2,7 @@
 //
 // External test package on purpose: the container harness lives in pgtest, which
 // imports postgres, so an internal test file here would be an import cycle.
-package postgres_test
+package tokens_test
 
 import (
 	"context"
@@ -14,8 +14,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -26,7 +27,7 @@ import (
 func TestTokenRepo(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
+	users, tokens := pgusers.New(pool), pgtokens.New(pool)
 
 	newOwner := func(t *testing.T, name string) identity.User {
 		t.Helper()

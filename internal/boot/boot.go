@@ -38,6 +38,17 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgactivity "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	pgidentities "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
+	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
+	pgsessions "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgsettings "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/settings"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusage "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -151,10 +162,10 @@ type process struct {
 func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) (*process, error) {
-	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
-	tokens, sessions := postgres.NewTokenRepo(pool), postgres.NewSessionRepo(pool)
-	audit, usage := postgres.NewAuditSink(pool), postgres.NewUsageRepo(pool)
-	settings := postgres.NewSettingsRepo(pool)
+	users, passwords := pgusers.New(pool), pgpasswords.New(pool)
+	tokens, sessions := pgtokens.New(pool), pgsessions.New(pool)
+	audit, usage := pgaudit.New(pool), pgusage.New(pool)
+	settings := pgsettings.New(pool)
 	clock, logs := systemClock{}, processLog{logger}
 	// One hasher, so LLMPROXY_PASSWORD_HASH_CONCURRENCY bounds every derivation in
 	// the process: sign-in, bootstrap and administrators' resets alike.
@@ -191,7 +202,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, version)
 	}
 
-	priceList := appprices.New(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
+	priceList := appprices.New(pgprices.New(pool), pgprices.NewCatalogRepo(pool), catalogSource,
 		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
 		return nil, fmt.Errorf("prices: %w", err)
@@ -234,7 +245,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return proc, nil
 	}
 
-	idents := postgres.NewIdentityRepo(pool)
+	idents := pgidentities.New(pool)
 
 	oidcService, err := newOIDCService(ctx, cfg.OIDC, users, idents, sessions, audit, clock)
 	if err != nil {
@@ -245,7 +256,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	router, err := webapi.NewRouter(webapi.Deps{
 		Auth: auth.New(users, passwords,
-			auth.NewThrottle(postgres.NewLoginAttemptRepo(pool), signInFailures, signInLockout, clock),
+			auth.NewThrottle(pgloginattempts.New(pool), signInFailures, signInLockout, clock),
 			hasher, sessions, audit, clock),
 		Tokens:          tokenService,
 		OIDC:            oidcService,
@@ -253,7 +264,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		LocalLogin:      cfg.Web.LocalLogin,
 		Usage:           appusage.New(usage),
 		Models:          models.New(gw.Catalog()),
-		AdminUsers: adminusers.New(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
+		AdminUsers: adminusers.New(users, passwords, idents, sessions, pgactivity.New(pool),
 			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,
 				GroupMappingConfigured: len(cfg.OIDC.GroupPolicy) > 0,

@@ -1,4 +1,6 @@
-package postgres
+// Package activity reads one account's recent history for the administration
+// screens (app.ActivityRepo).
+package activity
 
 import (
 	"context"
@@ -12,18 +14,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// ActivityRepo reads one account's recent history for the administration screens.
+// Repo reads one account's recent history for the administration screens.
 // It only reads: the usage ledger is written by the usage sink and the audit log by
-// AuditSink, each through its own type.
-type ActivityRepo struct{ pool *pgxpool.Pool }
+// audit.Sink, each through its own type.
+type Repo struct{ pool *pgxpool.Pool }
 
-var _ app.ActivityRepo = (*ActivityRepo)(nil)
+var _ app.ActivityRepo = (*Repo)(nil)
 
-func NewActivityRepo(pool *pgxpool.Pool) *ActivityRepo { return &ActivityRepo{pool: pool} }
+func New(pool *pgxpool.Pool) *Repo { return &Repo{pool: pool} }
 
 // RecentUsage reads through usage_events_user_at_idx. The id breaks ties between
 // requests recorded in the same microsecond, so a page is stable.
-func (r *ActivityRepo) RecentUsage(ctx context.Context, userID uuid.UUID, limit int) ([]app.UsageEvent, error) {
+func (r *Repo) RecentUsage(ctx context.Context, userID uuid.UUID, limit int) ([]app.UsageEvent, error) {
 	rows, err := r.pool.Query(ctx,
 		`SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
 		        tokens_input, tokens_output, tokens_reasoning, tokens_cache_read,
@@ -122,7 +124,7 @@ func (row usageEventRow) event() app.UsageEvent {
 // RecentAudit returns what userID did and what was done to it: rows it is the actor
 // of, rows whose target is the account (sign-ins, password changes, administrator
 // edits) and rows about its tokens, which name the owner in the detail.
-func (r *ActivityRepo) RecentAudit(ctx context.Context, userID uuid.UUID, limit int) ([]app.AuditEvent, error) {
+func (r *Repo) RecentAudit(ctx context.Context, userID uuid.UUID, limit int) ([]app.AuditEvent, error) {
 	// Two parameters rather than one cast two ways: a single $1 compared with a uuid
 	// column and cast to text leaves its type to the planner's inference order.
 	rows, err := r.pool.Query(ctx,
@@ -167,7 +169,7 @@ type auditEventRow struct {
 func (row auditEventRow) event() (app.AuditEvent, error) {
 	event := app.AuditEvent{At: row.At, Action: row.Action, Target: row.Target, IP: row.IP, UserAgent: row.UserAgent}
 	// A system action, or an actor deleted since, is NULL; the event models "no
-	// actor" as uuid.Nil, as AuditSink.Record does on the way in.
+	// actor" as uuid.Nil, as audit.Sink.Record does on the way in.
 	if row.ActorID != nil {
 		event.ActorID = *row.ActorID
 	}

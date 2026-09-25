@@ -9,8 +9,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -22,7 +23,7 @@ const minBootstrapPasswordLen = 22
 func TestBootstrap(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
+	users, passwords := pgusers.New(pool), pgpasswords.New(pool)
 
 	secret, err := app.Bootstrap(ctx, users, passwords, testHasher(), "admin@example.com")
 	require.NoError(t, err, "Bootstrap")

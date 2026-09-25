@@ -12,8 +12,14 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -25,9 +31,9 @@ import (
 func TestAdminRepos(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users := postgres.NewUserRepo(pool)
-	passwords := postgres.NewPasswordRepo(pool)
-	idents := postgres.NewIdentityRepo(pool)
+	users := pgusers.New(pool)
+	passwords := pgpasswords.New(pool)
+	idents := identities.New(pool)
 
 	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	seq := 0
@@ -272,7 +278,7 @@ func TestAdminRepos(t *testing.T) {
 	})
 
 	t.Run("SessionsDeleteByUser", func(t *testing.T) {
-		repo := postgres.NewSessionRepo(pool)
+		repo := sessions.New(pool)
 		target, bystander := human(t, "gina@example.com", "Gina"), human(t, "hal@example.com", "Hal")
 
 		now := time.Now().UTC()
@@ -297,7 +303,7 @@ func TestAdminRepos(t *testing.T) {
 	})
 
 	t.Run("SessionsDeleteByUserExcept", func(t *testing.T) {
-		repo := postgres.NewSessionRepo(pool)
+		repo := sessions.New(pool)
 		target, bystander := human(t, "iris@example.com", "Iris"), human(t, "jon@example.com", "Jon")
 
 		now := time.Now().UTC()
@@ -396,12 +402,12 @@ func TestAdminRepos(t *testing.T) {
 	})
 
 	t.Run("RecentUsage", func(t *testing.T) {
-		repo := postgres.NewActivityRepo(pool)
+		repo := activity.New(pool)
 		user, other := human(t, "uma@example.com", "Uma"), human(t, "vic@example.com", "Vic")
 
 		tok, _, err := credentials.Generate(user.ID, "laptop")
 		require.NoError(t, err, "Generate")
-		require.NoError(t, postgres.NewTokenRepo(pool).Create(ctx, tok), "create token")
+		require.NoError(t, tokens.New(pool).Create(ctx, tok), "create token")
 
 		at := time.Now().UTC().Truncate(time.Microsecond)
 		addUsage(ctx, t, pool, user.ID, &tok.ID, at.Add(-3*time.Minute), "alpha", "old")
@@ -441,8 +447,8 @@ func TestAdminRepos(t *testing.T) {
 	})
 
 	t.Run("RecentAudit", func(t *testing.T) {
-		repo := postgres.NewActivityRepo(pool)
-		sink := postgres.NewAuditSink(pool)
+		repo := activity.New(pool)
+		sink := audit.New(pool)
 		user, admin, other := human(t, "wes@example.com", "Wes"), human(t, "xena@example.com", "Xena"), human(t, "yan@example.com", "Yan")
 
 		at := time.Now().UTC().Truncate(time.Microsecond)
