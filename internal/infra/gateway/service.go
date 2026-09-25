@@ -726,7 +726,7 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 
 	out := make([]app.VendorAccount, 0, len(held))
 	for _, auth := range held {
-		out = append(out, vendorAccount(auth))
+		out = append(out, VendorAccount(auth))
 	}
 
 	slices.SortFunc(out, func(a, b app.VendorAccount) int {
@@ -736,9 +736,10 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 	return out
 }
 
-// vendorAccount is auth as the admin API shows it. Email is the one metadata
-// field read; tokens, attributes and storage never leave the gateway.
-func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
+// VendorAccount is auth as the admin API shows it, for Accounts and
+// gateway/login. Email is the one metadata field read; tokens, attributes and
+// storage never leave the gateway.
+func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 	account := app.VendorAccount{
 		ID:              auth.ID,
 		Provider:        PolicyProvider(auth.Provider),

@@ -1,4 +1,4 @@
-package gateway
+package login
 
 import (
 	"bufio"
@@ -192,9 +192,9 @@ func codeGrant(code string) *coreauth.Auth {
 	return &coreauth.Auth{ID: "claude-" + code + ".json", Provider: "claude", Metadata: map[string]any{"email": code + "@example.com"}}
 }
 
-// fakeLogin is a Login whose only provider, "claude", is vendor, adding
+// fakeLogin is a Service whose only provider, "claude", is vendor, adding
 // through add.
-func fakeLogin(t *testing.T, grant func(string) *coreauth.Auth, add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)) (*Login, *fakeOAuth) {
+func fakeLogin(t *testing.T, grant func(string) *coreauth.Auth, add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)) (*Service, *fakeOAuth) {
 	t.Helper()
 	authDir := t.TempDir()
 	vendor := newFakeOAuth(authDir, grant)
@@ -208,7 +208,7 @@ func fakeLogin(t *testing.T, grant func(string) *coreauth.Auth, add func(context
 
 // endLogins ends every login still in progress, so no upstream waiter outlives
 // its test.
-func endLogins(login *Login) {
+func endLogins(login *Service) {
 	login.mu.Lock()
 
 	pending := make(map[string]*pendingLogin, len(login.sessions))
@@ -433,8 +433,8 @@ func listeningSockets(t *testing.T) map[string]bool {
 // returns a vendor authorisation URL, and no listening socket appears while
 // the logins are pending. Providers go by their policy names.
 func TestLoginStartsWithoutAListener(t *testing.T) {
-	r, _ := startProduction(t)
-	login := NewLogin(r.gateway)
+	r := startProduction(t)
+	login := New(r.gateway)
 
 	t.Cleanup(func() { endLogins(login) })
 
@@ -470,7 +470,7 @@ func TestLoginHandsTheCallbackToUpstream(t *testing.T) {
 	params := productionParams(t)
 	params.Config.ProxyURL = "http://" + net127(freePort(t))
 	r := startWith(t, params)
-	login := NewLogin(r.gateway)
+	login := New(r.gateway)
 
 	t.Cleanup(func() { endLogins(login) })
 

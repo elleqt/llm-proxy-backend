@@ -254,7 +254,9 @@ func detailSemantics(providerKey string) (bool, bool, bool) {
 		}
 	}
 
-	for _, marker := range [...]string{"openai", gateway.CodexProviderKey, gateway.XAIProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+	for _, marker := range [...]string{
+		"openai", gateway.CodexProviderKey, gateway.XAIProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter",
+	} {
 		if strings.Contains(key, marker) {
 			return true, true, true
 		}

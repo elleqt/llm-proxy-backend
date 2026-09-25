@@ -25,6 +25,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/login"
 	gwusage "github.com/elleqt/llm-proxy-backend/internal/infra/gateway/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
@@ -253,7 +254,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (Providers.Remove).
-		Providers:    app.NewProviders(gw, gateway.NewLogin(gw), sink, meters, audit, clock, logs),
+		Providers:    app.NewProviders(gw, login.New(gw), sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,

@@ -1,4 +1,7 @@
-package gateway
+// Package login runs vendor sign-ins (Claude, ChatGPT) for an administrator
+// who is not at the gateway's console, through upstream's management handler
+// called directly, and adds the resulting accounts through the gateway.
+package login
 
 import (
 	"cmp"
@@ -18,6 +21,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/gin-gonic/gin"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -68,7 +72,7 @@ type loginFlow struct {
 	start    func(*gin.Context)
 }
 
-// Login runs vendor sign-ins for an administrator who is not at the gateway's
+// Service runs vendor sign-ins for an administrator who is not at the gateway's
 // console, on upstream's embedder path: sdk/api's management handler
 // (NewHandlerWithoutConfigFilePath) is called directly, never routed.
 //
@@ -99,7 +103,7 @@ type loginFlow struct {
 // upstream another way (a file planted in the auth directory, which needs the
 // session's state) consumes upstream's session, and CompleteLogin then finds
 // it no longer pending: login_expired, nothing added.
-type Login struct {
+type Service struct {
 	add     func(context.Context, *coreauth.Auth) (*coreauth.Auth, error)
 	authDir string
 	flows   map[string]loginFlow
@@ -113,31 +117,31 @@ type Login struct {
 	sessions map[string]*pendingLogin
 }
 
-var _ app.VendorLogins = (*Login)(nil)
+var _ app.VendorLogins = (*Service)(nil)
 
-// NewLogin serves Claude and Codex sign-ins for gw under their policy names.
+// New serves Claude and Codex sign-ins for gw under their policy names.
 // Upstream's handler gets gw's configuration as it is now, with the auth
 // directory made absolute: its proxy settings reach the code exchange, and a
 // configuration pushed later does not.
-func NewLogin(gw *Gateway) *Login {
+func New(gw *gateway.Gateway) *Service {
 	var cfg cliproxyconfig.Config
 	if current := gw.CurrentConfig(); current != nil {
 		cfg = *current
 	}
 
-	cfg.AuthDir = gw.authDir
-	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, gw.coreAuth)
-	login := newLogin(gw.AddAccount, gw.authDir, map[string]loginFlow{
-		PolicyProvider("claude"):         {upstream: "anthropic", start: h.RequestAnthropicToken},
-		PolicyProvider(CodexProviderKey): {upstream: CodexProviderKey, start: h.RequestCodexToken},
+	cfg.AuthDir = gw.AuthDir()
+	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, gw.CoreAuthManager())
+	login := newLogin(gw.AddAccount, gw.AuthDir(), map[string]loginFlow{
+		gateway.PolicyProvider("claude"):                 {upstream: "anthropic", start: h.RequestAnthropicToken},
+		gateway.PolicyProvider(gateway.CodexProviderKey): {upstream: gateway.CodexProviderKey, start: h.RequestCodexToken},
 	})
 	h.SetPostAuthHook(login.deliver)
 
 	return login
 }
 
-func newLogin(add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error), authDir string, flows map[string]loginFlow) *Login {
-	return &Login{
+func newLogin(add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error), authDir string, flows map[string]loginFlow) *Service {
+	return &Service{
 		add:        add,
 		authDir:    authDir,
 		flows:      flows,
@@ -155,7 +159,7 @@ type pendingLogin struct {
 	upstream  string
 	expiresAt time.Time
 	timer     *time.Timer
-	// claimed is set, under Login.mu, by the one CompleteLogin that owns the
+	// claimed is set, under Service.mu, by the one CompleteLogin that owns the
 	// session, or by its expiry.
 	claimed bool
 	// result receives the record upstream's exchange produced.
@@ -164,7 +168,7 @@ type pendingLogin struct {
 
 // StartLogin starts a sign-in for provider, a policy name ("claude",
 // "chatgpt"), and returns its session with the authorisation URL.
-func (l *Login) StartLogin(ctx context.Context, provider string) (app.VendorLogin, error) {
+func (l *Service) StartLogin(ctx context.Context, provider string) (app.VendorLogin, error) {
 	flow, ok := l.flows[provider]
 	if !ok {
 		return app.VendorLogin{}, fmt.Errorf("%w: %q", app.ErrUnsupportedProvider, provider)
@@ -263,7 +267,7 @@ func requestLogin(ctx context.Context, start func(*gin.Context), sessionID strin
 // administrator can paste again. Otherwise the session is claimed, once: an
 // unknown, expired or already claimed session is ErrLoginExpired. A vendor
 // refusal is ErrLoginFailed.
-func (l *Login) CompleteLogin(ctx context.Context, sessionID, callbackURL string) (app.VendorAccount, error) {
+func (l *Service) CompleteLogin(ctx context.Context, sessionID, callbackURL string) (app.VendorAccount, error) {
 	cb, err := parseCallback(callbackURL)
 	if err != nil {
 		return app.VendorAccount{}, err
@@ -312,13 +316,13 @@ func (l *Login) CompleteLogin(ctx context.Context, sessionID, callbackURL string
 		return app.VendorAccount{}, err
 	}
 
-	return vendorAccount(stored), nil
+	return gateway.VendorAccount(stored), nil
 }
 
 // deliver is upstream's post-auth hook. It runs on upstream's exchange
 // goroutine with the start request's headers in ctx, and never lets upstream
 // save the record.
-func (l *Login) deliver(ctx context.Context, auth *coreauth.Auth) error {
+func (l *Service) deliver(ctx context.Context, auth *coreauth.Auth) error {
 	var id string
 	if info := coreauth.GetRequestInfo(ctx); info != nil {
 		id = info.Headers.Get(loginSessionHeader)
@@ -343,7 +347,7 @@ func (l *Login) deliver(ctx context.Context, auth *coreauth.Auth) error {
 // expire ends an unclaimed login once its time is up. Marking it claimed and
 // withdrawing it happen under one lock, so no CompleteLogin can claim it
 // meanwhile.
-func (l *Login) expire(id string, pending *pendingLogin) {
+func (l *Service) expire(id string, pending *pendingLogin) {
 	l.mu.Lock()
 
 	unclaimed := l.sessions[id] == pending && !pending.claimed
@@ -362,7 +366,7 @@ func (l *Login) expire(id string, pending *pendingLogin) {
 // finish ends a login: its slot frees, and upstream's session is completed,
 // which stops its waiter and makes its pre-save guard drop an exchange still
 // in flight. Safe to call more than once.
-func (l *Login) finish(id string, pending *pendingLogin) {
+func (l *Service) finish(id string, pending *pendingLogin) {
 	l.mu.Lock()
 	if l.sessions[id] == pending {
 		delete(l.sessions, id)
@@ -382,7 +386,7 @@ func (l *Login) finish(id string, pending *pendingLogin) {
 
 // await waits, bounded, for upstream's exchange: the record through the
 // hook, or a failure in upstream's session status.
-func (l *Login) await(ctx context.Context, pending *pendingLogin, cb callback, callbackURL string) (*coreauth.Auth, error) {
+func (l *Service) await(ctx context.Context, pending *pendingLogin, cb callback, callbackURL string) (*coreauth.Auth, error) {
 	tick := time.NewTicker(l.poll)
 	defer tick.Stop()
 

@@ -37,7 +37,7 @@ func TestAccountCardShowsTheStoredLastRefresh(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := vendorAccount(&tc.auth).LastRefreshedAt
+			got := VendorAccount(&tc.auth).LastRefreshedAt
 			require.True(t, got.Equal(tc.want), "LastRefreshedAt = %v, want %v", got, tc.want)
 		})
 	}
