@@ -393,4 +393,22 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	if cfg.Port != 8317 || len(cfg.OpenAICompatibility) != 1 || cfg.RequestRetry != 0 {
 		t.Fatalf("boot config = port %d, compat %d, request-retry %d", cfg.Port, len(cfg.OpenAICompatibility), cfg.RequestRetry)
 	}
+	aliases := cfg.OAuthModelAlias["claude"]
+	if len(aliases) != 3 || aliases[1].Name != "claude-sonnet-4-5-20250929" ||
+		aliases[1].Alias != "claude-sonnet-4-5" || !aliases[1].Fork {
+		t.Fatalf("default aliases = %#v", aliases)
+	}
+}
+
+func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {
+	f := newSettingsFixture(t, "")
+	f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
+
+	view, err := f.svc.Get(context.Background(), newAdmin())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !strings.Contains(view.YAML, "oauth-model-alias:") || !strings.Contains(view.YAML, "claude-opus-4-5") {
+		t.Fatalf("Get YAML = %q, want the default document", view.YAML)
+	}
 }
