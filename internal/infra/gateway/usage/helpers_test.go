@@ -85,7 +85,7 @@ type running struct {
 // serves requests. It is stopped before the test ends.
 func startWith(t *testing.T, params gateway.Params) *running {
 	t.Helper()
-	// A non-empty MANAGEMENT_PASSWORD makes New refuse to build, because it
+	// A non-empty MANAGEMENT_PASSWORD makes gateway.New refuse to build, because it
 	// would enable upstream's management surface; pin it so no test depends on
 	// the ambient environment.
 	t.Setenv("MANAGEMENT_PASSWORD", "")

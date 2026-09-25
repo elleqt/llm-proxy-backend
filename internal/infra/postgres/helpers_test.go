@@ -1,3 +1,9 @@
+// Package postgres_test exercises the repositories against a real Postgres: the
+// tests here cover several repositories at once, each repository's own tests
+// live beside it.
+//
+// External test package on purpose: the container harness lives in pgtest, which
+// imports postgres, so an internal test file here would be an import cycle.
 package postgres_test
 
 import (
@@ -6,8 +12,6 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/stretchr/testify/require"
 )
-
-// Helpers shared by this package's tests, as in internal/infra/postgres's own tests.
 
 func mustPolicy(t *testing.T, rules ...string) access.Policy {
 	t.Helper()

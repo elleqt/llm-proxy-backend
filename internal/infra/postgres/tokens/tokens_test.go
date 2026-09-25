@@ -1,7 +1,3 @@
-// Package postgres_test exercises the repositories against a real Postgres.
-//
-// External test package on purpose: the container harness lives in pgtest, which
-// imports postgres, so an internal test file here would be an import cycle.
 package tokens_test
 
 import (

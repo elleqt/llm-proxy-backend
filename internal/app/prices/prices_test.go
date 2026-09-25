@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pricesFixture is a Prices whose stores are mocks backed by the fields below, so a
+// pricesFixture is a prices.Service whose stores are mocks backed by the fields below, so a
 // test reads what was stored, what the sink holds and what was reported.
 type pricesFixture struct {
 	repo    *mocks.PriceRepo
