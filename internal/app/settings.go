@@ -206,7 +206,7 @@ func NewSettings(repo SettingsRepo, gateway ConfigPusher, audit AuditSink, clock
 // document is the administrator's to edit, and a redacted copy sent back whole would
 // overwrite the proxy credentials.
 func (s *Settings) Get(ctx context.Context, actor identity.User) (SettingsView, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return SettingsView{}, err
 	}
 
@@ -228,7 +228,7 @@ func (s *Settings) Get(ctx context.Context, actor identity.User) (SettingsView, 
 // stored, and a stored one is always what runs. If persisting fails, the previous
 // configuration is pushed back. The audit record carries the redacted diff.
 func (s *Settings) Update(ctx context.Context, actor identity.User, req SettingsUpdate) (SettingsUpdateResult, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return SettingsUpdateResult{}, err
 	}
 

@@ -141,7 +141,7 @@ func (p *Prices) Load(ctx context.Context) error {
 
 // Get returns the effective list and the catalog's status.
 func (p *Prices) Get(_ context.Context, actor identity.User) (PriceList, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
 
@@ -156,7 +156,7 @@ func (p *Prices) Get(_ context.Context, actor identity.User) (PriceList, error) 
 // number and every (provider, model) must be named once; the first entry that is
 // not is an *InvalidInputError naming it as "[index].field".
 func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelPrice) (PriceList, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
 
@@ -199,7 +199,7 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 // returned status and the prices in force are kept. ErrCatalogDisabled when no
 // catalog is configured.
 func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return PriceList{}, err
 	}
 
@@ -455,8 +455,6 @@ func sameRates(left, right []ModelPrice) bool {
 
 	return true
 }
-
-type priceKey struct{ provider, model string }
 
 // entriesLocked is the effective list: the catalog's prices, each manual price
 // replacing the catalog's for its model. p.mu must be held.

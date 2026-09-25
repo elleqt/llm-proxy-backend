@@ -46,7 +46,7 @@ func NewProviders(
 // List returns every account the gateway holds with the latest quota windows
 // its vendor reported.
 func (s *Providers) List(_ context.Context, actor identity.User) ([]VendorAccount, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return nil, err
 	}
 
@@ -65,7 +65,7 @@ func (s *Providers) List(_ context.Context, actor identity.User) ([]VendorAccoun
 
 // StartLogin begins a vendor sign-in for provider, a policy-facing name.
 func (s *Providers) StartLogin(ctx context.Context, actor identity.User, provider string) (VendorLogin, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return VendorLogin{}, err
 	}
 
@@ -84,7 +84,7 @@ func (s *Providers) StartLogin(ctx context.Context, actor identity.User, provide
 // ended on and returns the account it added. The URL carries the vendor's
 // authorisation code: it goes to the gateway and nowhere else.
 func (s *Providers) CompleteLogin(ctx context.Context, actor identity.User, sessionID, callbackURL string) (VendorAccount, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return VendorAccount{}, err
 	}
 
@@ -108,7 +108,7 @@ func (s *Providers) CompleteLogin(ctx context.Context, actor identity.User, sess
 
 // SetDisabled disables or re-enables account id and returns it as it now is.
 func (s *Providers) SetDisabled(ctx context.Context, actor identity.User, id string, disabled bool) (VendorAccount, error) {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return VendorAccount{}, err
 	}
 
@@ -135,7 +135,7 @@ func (s *Providers) SetDisabled(ctx context.Context, actor identity.User, id str
 // Remove removes account id from the gateway and its storage, then forgets its
 // quota snapshot and metric series.
 func (s *Providers) Remove(ctx context.Context, actor identity.User, id string) error {
-	if err := requireAdmin(actor); err != nil {
+	if err := RequireAdmin(actor); err != nil {
 		return err
 	}
 

@@ -39,3 +39,6 @@ func (t *PriceTable) Price(provider, model string) (ModelPrice, bool) {
 
 	return p, ok
 }
+
+// priceKey identifies a price: one model of one provider.
+type priceKey struct{ provider, model string }

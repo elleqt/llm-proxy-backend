@@ -105,7 +105,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	}
 	// An old password that signs in between the unblock and the reset gets a session
 	// the reset ends; after the reset it no longer signs in.
-	out.Password, err = resetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, user.ID, now)
+	out.Password, err = ResetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, user.ID, now)
 	if err != nil {
 		return Recovered{}, err
 	}
@@ -117,7 +117,7 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 	out.User.MustChangePassword = true
 
 	if err := r.record(ctx, "user.password_reset", user.ID, now,
-		map[string]any{"via": "cli", auditExpiresAt: out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
+		map[string]any{"via": "cli", AuditExpiresAt: out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
 		return Recovered{}, err
 	}
 
