@@ -87,7 +87,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 				observe.AuthFailed(AuthInvalid)
 			}
 			if authErr.HTTPStatusCode() >= http.StatusInternalServerError {
-				log.Error("policy gate: authentication failed", slog.Any("err", authErr))
+				log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: authentication failed", slog.Any("err", authErr))
 			}
 			c.AbortWithStatusJSON(authErr.HTTPStatusCode(), gin.H{"error": authErr.Message})
 			return
@@ -112,7 +112,8 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 				// in the background, where a deadline would cut the reply.
 				var err error
 				if deadline, err = setBodyReadDeadline(c); err != nil {
-					log.Error("policy gate: request body deadline could not be set", slog.Any("err", err))
+					log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: request body deadline could not be set",
+						slog.Any("err", err))
 					abortWithError(c, http.StatusInternalServerError, "server_error", "request body cannot be received")
 					return
 				}
@@ -202,7 +203,8 @@ func serveListing(c *gin.Context, list listing, admitted func(string) bool, log 
 	}
 	c.Writer.Header().Del("Content-Length")
 	if err != nil {
-		log.Error("policy gate: filtering a listing failed", slog.String("route", c.FullPath()), slog.Any("err", err))
+		log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: filtering a listing failed",
+			slog.String("route", c.FullPath()), slog.Any("err", err))
 		abortWithError(c, http.StatusBadGateway, "server_error", "model list unavailable")
 		return
 	}

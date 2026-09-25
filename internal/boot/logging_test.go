@@ -87,8 +87,9 @@ func TestLogrusLevelsKeepTheirSeverity(t *testing.T) {
 	}
 }
 
-// The version label prefers what the build injected, then the module version a
-// tagged go install records, then the commit a checkout build was made from.
+// The version label prefers what the build injected, then a clean tag go build
+// stamped, then the commit the build was made from: a pseudo-version or a dirty
+// tree names no release.
 func TestVersionPrecedence(t *testing.T) {
 	vcs := []debug.BuildSetting{{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}}
 	for _, c := range []struct {
@@ -99,6 +100,9 @@ func TestVersionPrecedence(t *testing.T) {
 		{"injected wins", "0.1.2", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.1"}, Settings: vcs}, "0.1.2"},
 		{"module version", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.1"}, Settings: vcs}, "v0.1.1"},
 		{"checkout build", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: vcs}, "01234567"},
+		{"untagged commit", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.4-0.20260925101010-0123456789ab"}, Settings: vcs}, "01234567"},
+		{"untagged dirty", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.4-0.20260925101010-0123456789ab+dirty"}, Settings: vcs}, "01234567"},
+		{"dirty tag", "", &debug.BuildInfo{Main: debug.Module{Version: "v0.1.2+dirty"}, Settings: vcs}, "01234567"},
 		{"no commit", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, "unknown"},
 		{"no build info", "", nil, "unknown"},
 	} {

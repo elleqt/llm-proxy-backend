@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 
 	"github.com/sirupsen/logrus"
@@ -79,7 +81,10 @@ func (b logrusBridge) Fire(e *logrus.Entry) error {
 		pc = e.Caller.PC
 	}
 	r := slog.NewRecord(e.Time, lvl, strings.TrimRight(e.Message, "\r\n"), pc)
-	for k, v := range e.Data {
+	// In key order, as logrus's own formatters write them: lines from one
+	// callsite then read and diff alike.
+	for _, k := range slices.Sorted(maps.Keys(e.Data)) {
+		v := e.Data[k]
 		if k == "request_id" && v == "--------" {
 			continue // upstream's placeholder for "no id"
 		}

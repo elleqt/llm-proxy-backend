@@ -1,13 +1,17 @@
 package boot
 
-import "runtime/debug"
+import (
+	"regexp"
+	"runtime/debug"
+	"strings"
+)
 
 // cliproxyModule is the module path of the embedded CLIProxyAPI.
 const cliproxyModule = "github.com/router-for-me/CLIProxyAPI/v7"
 
 // resolveVersion returns the label for logs and llmproxy_build_info: the
-// injected build version when set, else the module version, else the VCS
-// commit's short sha, else "unknown".
+// injected build version when set, else the module version when it names a
+// clean tag, else the VCS commit's short sha, else "unknown".
 func resolveVersion(injected string) string {
 	bi, _ := debug.ReadBuildInfo()
 	return versionOf(injected, bi)
@@ -22,9 +26,11 @@ func versionOf(injected string, bi *debug.BuildInfo) string {
 	if bi == nil {
 		return "unknown"
 	}
-	// A build from a checkout, rather than go install of a tagged module,
-	// reports "(devel)".
-	if v := bi.Main.Version; v != "" && v != "(devel)" {
+	// Since Go 1.24 go build in a checkout stamps the module version from VCS:
+	// a tag, or on an untagged commit a pseudo-version, with +dirty for
+	// uncommitted changes. Only a clean tag names the build better than its
+	// commit; without VCS information the version is "(devel)".
+	if v := bi.Main.Version; v != "" && v != "(devel)" && !pseudoVersion.MatchString(v) && !strings.HasSuffix(v, "+dirty") {
 		return v
 	}
 	for _, s := range bi.Settings {
@@ -34,6 +40,10 @@ func versionOf(injected string, bi *debug.BuildInfo) string {
 	}
 	return "unknown"
 }
+
+// pseudoVersion matches the timestamp and commit a pseudo-version carries
+// (v0.1.4-0.20260925101010-abdd1e6abcde); no tag of this module does.
+var pseudoVersion = regexp.MustCompile(`\d{14}-[0-9a-f]{12}`)
 
 // cliproxyVersion is the CLIProxyAPI module version from the binary's build info.
 func cliproxyVersion() string {
