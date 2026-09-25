@@ -130,3 +130,5 @@ const (
 	testMaxFailures = 5
 	testLockFor     = 15 * time.Minute
 )
+
+var settingsNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)

@@ -16,6 +16,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
@@ -211,7 +212,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 
 	env.deps.AdminUsers = adminusers.New(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
 		cheapHasher(), env.audit, env.clock, env.catalog, env.adminCfg)
-	env.deps.Settings = app.NewSettings(env.settings, env.gateway, env.audit, env.clock)
+	env.deps.Settings = settings.New(env.settings, env.gateway, env.audit, env.clock)
 
 	var priceSrc app.PriceCatalogSource = env.priceSrc
 	if env.noPriceCatalog {

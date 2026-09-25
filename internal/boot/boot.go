@@ -23,6 +23,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -159,7 +160,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	bootCfg, err := app.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
+	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
 	if err != nil {
 		return nil, fmt.Errorf("boot configuration: %w", err)
 	}
@@ -253,7 +254,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 				OIDCIssuer:             cfg.OIDC.Issuer,
 				GroupMappingConfigured: len(cfg.OIDC.GroupPolicy) > 0,
 			}),
-		Settings: app.NewSettings(settings, gw, audit, clock),
+		Settings: appsettings.New(settings, gw, audit, clock),
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (Providers.Remove).
@@ -347,7 +348,7 @@ func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, id
 }
 
 // ownedConfig is the gateway-owned part of the boot configuration, which the
-// stored settings document cannot set (app.LoadBootConfig): the proxied
+// stored settings document cannot set (appsettings.LoadBootConfig): the proxied
 // listener, the auth directory, the control panel off and websocket
 // authentication on, the boot-only vendors, and nothing else — no api-keys, no
 // management secret, plugins, home mode, pprof or discovery.

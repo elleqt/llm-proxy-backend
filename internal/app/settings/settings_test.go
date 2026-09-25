@@ -1,4 +1,4 @@
-package app_test
+package settings_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -24,7 +25,7 @@ type settingsFixture struct {
 	repo    *mocks.SettingsRepo
 	gateway *mocks.ConfigPusher
 	audit   *mocks.AuditSink
-	svc     *app.Settings
+	svc     *settings.Service
 	running *sdkconfig.Config
 }
 
@@ -48,7 +49,7 @@ func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 	boot := mocks.NewSettingsRepo(t)
 	boot.EXPECT().UpstreamDocument(mock.Anything).Return(runningDoc, nil).Once()
 
-	running, err := app.LoadBootConfig(context.Background(), boot, ownedDefaults())
+	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults())
 	require.NoError(t, err, "LoadBootConfig")
 
 	fixture := &settingsFixture{
@@ -57,13 +58,13 @@ func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 		audit:   mocks.NewAuditSink(t),
 		running: running,
 	}
-	fixture.svc = app.NewSettings(fixture.repo, fixture.gateway, fixture.audit, fixedClock{now: settingsNow})
+	fixture.svc = settings.New(fixture.repo, fixture.gateway, fixture.audit, fixedClock{now: settingsNow})
 
 	return fixture
 }
 
-func yamlUpdate(doc string, dryRun bool) app.SettingsUpdate {
-	return app.SettingsUpdate{YAML: &doc, DryRun: dryRun}
+func yamlUpdate(doc string, dryRun bool) settings.Update {
+	return settings.Update{YAML: &doc, DryRun: dryRun}
 }
 
 func wantSettingError(t *testing.T, err, kind error, field string) {
@@ -119,7 +120,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 	t.Run("stored document at boot", func(t *testing.T) {
 		repo := mocks.NewSettingsRepo(t)
 		repo.EXPECT().UpstreamDocument(mock.Anything).Return("api-keys: [master]\n", nil)
-		_, err := app.LoadBootConfig(context.Background(), repo, ownedDefaults())
+		_, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
 		wantSettingError(t, err, app.ErrForbiddenSetting, "api-keys")
 	})
 }
@@ -170,10 +171,10 @@ func TestSettingsYAMLAndFieldsAreMutuallyExclusive(t *testing.T) {
 	fixture := newSettingsFixture(t, "")
 	doc, retry := "request-retry: 1\n", 2
 
-	_, err := fixture.svc.Update(context.Background(), newAdmin(), app.SettingsUpdate{YAML: &doc, Fields: &app.SettingsPatch{RequestRetry: &retry}})
+	_, err := fixture.svc.Update(context.Background(), newAdmin(), settings.Update{YAML: &doc, Fields: &settings.Patch{RequestRetry: &retry}})
 	wantSettingError(t, err, app.ErrInvalidSettings, "fields")
 
-	_, err = fixture.svc.Update(context.Background(), newAdmin(), app.SettingsUpdate{DryRun: true})
+	_, err = fixture.svc.Update(context.Background(), newAdmin(), settings.Update{DryRun: true})
 	wantSettingError(t, err, app.ErrInvalidSettings, "yaml")
 }
 
@@ -332,8 +333,8 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 		})
 	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil)
 
-	res, err := fixture.svc.Update(context.Background(), admin, app.SettingsUpdate{
-		Fields: &app.SettingsPatch{RequestRetry: &retry, MaxRetryInterval: &interval},
+	res, err := fixture.svc.Update(context.Background(), admin, settings.Update{
+		Fields: &settings.Patch{RequestRetry: &retry, MaxRetryInterval: &interval},
 	})
 	require.NoError(t, err, "Update")
 
@@ -341,20 +342,20 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 		assert.Contains(t, persisted, want, "persisted document")
 	}
 
-	require.Equal(t, app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
+	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
 	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
 }
 
 func TestSettingsFieldPatchValidation(t *testing.T) {
 	neg, badURL := -1, "gopher://proxy.test"
-	for field, patch := range map[string]app.SettingsPatch{
+	for field, patch := range map[string]settings.Patch{
 		"requestRetry":     {RequestRetry: &neg},
 		"maxRetryInterval": {MaxRetryInterval: &neg},
 		"proxyURL":         {ProxyURL: &badURL},
 	} {
 		t.Run(field, func(t *testing.T) {
 			f := newSettingsFixture(t, "")
-			_, err := f.svc.Update(context.Background(), newAdmin(), app.SettingsUpdate{Fields: &patch})
+			_, err := f.svc.Update(context.Background(), newAdmin(), settings.Update{Fields: &patch})
 			wantSettingError(t, err, app.ErrInvalidSettings, field)
 		})
 	}
@@ -368,7 +369,7 @@ func TestSettingsGet(t *testing.T) {
 	got, err := fixture.svc.Get(context.Background(), newAdmin())
 	require.NoError(t, err, "Get")
 	require.Equal(t, stored, got.YAML, "Get YAML")
-	require.Equal(t, app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4}, got.Fields, "Get fields")
+	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4}, got.Fields, "Get fields")
 
 	_, err = fixture.svc.Get(context.Background(), identity.User{})
 	require.ErrorIs(t, err, app.ErrForbidden, "Get by nobody")
@@ -378,7 +379,7 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	repo := mocks.NewSettingsRepo(t)
 	repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
 
-	cfg, err := app.LoadBootConfig(context.Background(), repo, ownedDefaults())
+	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
 	require.NoError(t, err, "LoadBootConfig")
 	require.Equal(t, 8317, cfg.Port, "boot config port")
 	require.Len(t, cfg.OpenAICompatibility, 1, "boot config openai-compatibility")

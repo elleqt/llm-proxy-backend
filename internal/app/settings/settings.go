@@ -1,4 +1,4 @@
-package app
+package settings
 
 import (
 	"bytes"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/pmezard/go-difflib/difflib"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -20,11 +21,11 @@ import (
 )
 
 func forbidden(field string) error {
-	return &SettingError{Field: field, Reason: "owned by the gateway", Kind: ErrForbiddenSetting}
+	return &app.SettingError{Field: field, Reason: "owned by the gateway", Kind: app.ErrForbiddenSetting}
 }
 
 func invalid(field, reason string) error {
-	return &SettingError{Field: field, Reason: reason, Kind: ErrInvalidSettings}
+	return &app.SettingError{Field: field, Reason: reason, Kind: app.ErrInvalidSettings}
 }
 
 // ownedKeys are the top-level keys of the upstream configuration the gateway owns.
@@ -142,55 +143,55 @@ func checkOwnedUnset(cfg *sdkconfig.Config) error {
 	return nil
 }
 
-// SettingsFields are the typed form fields of the editable document.
-type SettingsFields struct {
+// Fields are the typed form fields of the editable document.
+type Fields struct {
 	ProxyURL         string
 	RequestRetry     int
 	MaxRetryInterval int // seconds
 }
 
-// SettingsView is the stored editable document and its typed fields.
-type SettingsView struct {
+// View is the stored editable document and its typed fields.
+type View struct {
 	YAML   string
-	Fields SettingsFields
+	Fields Fields
 }
 
-// SettingsPatch patches individual typed fields; a nil field is left as it is.
-type SettingsPatch struct {
+// Patch patches individual typed fields; a nil field is left as it is.
+type Patch struct {
 	ProxyURL         *string
 	RequestRetry     *int
 	MaxRetryInterval *int
 }
 
-// SettingsUpdate replaces the whole document (YAML) or patches typed fields
+// Update replaces the whole document (YAML) or patches typed fields
 // (Fields); exactly one of the two is set.
-type SettingsUpdate struct {
+type Update struct {
 	YAML   *string
-	Fields *SettingsPatch
+	Fields *Patch
 	DryRun bool
 }
 
-// SettingsUpdateResult is what an update did. Diff is the unified diff of the
+// UpdateResult is what an update did. Diff is the unified diff of the
 // running configuration's editable part against the proposed one, with proxy
 // credentials redacted; Settings is the proposed document, applied unless Applied
 // is false.
-type SettingsUpdateResult struct {
+type UpdateResult struct {
 	Applied  bool
 	Diff     string
-	Settings SettingsView
+	Settings View
 }
 
-// Settings edits the upstream configuration the gateway runs with.
+// Service edits the upstream configuration the gateway runs with.
 //
 // The stored document is the editable part only. The running configuration is that
 // document parsed by upstream, with every gateway-owned field (ownedFields) taken
 // from the configuration the gateway already runs — at boot, from the
 // composition root's defaults (LoadBootConfig).
-type Settings struct {
-	repo    SettingsRepo
-	gateway ConfigPusher
-	audit   AuditSink
-	clock   Clock
+type Service struct {
+	repo    app.SettingsRepo
+	gateway app.ConfigPusher
+	audit   app.AuditSink
+	clock   app.Clock
 
 	// mu serialises updates, so the stored document always matches the last
 	// configuration pushed: two interleaved updates could otherwise push in one
@@ -198,26 +199,26 @@ type Settings struct {
 	mu sync.Mutex
 }
 
-func NewSettings(repo SettingsRepo, gateway ConfigPusher, audit AuditSink, clock Clock) *Settings {
-	return &Settings{repo: repo, gateway: gateway, audit: audit, clock: clock}
+func New(repo app.SettingsRepo, gateway app.ConfigPusher, audit app.AuditSink, clock app.Clock) *Service {
+	return &Service{repo: repo, gateway: gateway, audit: audit, clock: clock}
 }
 
 // Get returns the stored document and its typed fields. Nothing is redacted: the
 // document is the administrator's to edit, and a redacted copy sent back whole would
 // overwrite the proxy credentials.
-func (s *Settings) Get(ctx context.Context, actor identity.User) (SettingsView, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return SettingsView{}, err
+func (s *Service) Get(ctx context.Context, actor identity.User) (View, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return View{}, err
 	}
 
 	doc, err := storedDocument(ctx, s.repo)
 	if err != nil {
-		return SettingsView{}, err
+		return View{}, err
 	}
 
 	cfg, err := parseDocument(doc)
 	if err != nil {
-		return SettingsView{}, fmt.Errorf("app: stored settings: %w", err)
+		return View{}, fmt.Errorf("app: stored settings: %w", err)
 	}
 
 	return view(doc, cfg), nil
@@ -227,13 +228,13 @@ func (s *Settings) Get(ctx context.Context, actor identity.User) (SettingsView, 
 // gateway and then persists it: a configuration the gateway refused is never
 // stored, and a stored one is always what runs. If persisting fails, the previous
 // configuration is pushed back. The audit record carries the redacted diff.
-func (s *Settings) Update(ctx context.Context, actor identity.User, req SettingsUpdate) (SettingsUpdateResult, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return SettingsUpdateResult{}, err
+func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (UpdateResult, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return UpdateResult{}, err
 	}
 
 	if err := req.validate(); err != nil {
-		return SettingsUpdateResult{}, err
+		return UpdateResult{}, err
 	}
 
 	s.mu.Lock()
@@ -241,17 +242,17 @@ func (s *Settings) Update(ctx context.Context, actor identity.User, req Settings
 
 	doc, err := s.proposedDocument(ctx, req)
 	if err != nil {
-		return SettingsUpdateResult{}, err
+		return UpdateResult{}, err
 	}
 
 	cfg, err := parseDocument(doc)
 	if err != nil {
-		return SettingsUpdateResult{}, err
+		return UpdateResult{}, err
 	}
 
 	running := s.gateway.CurrentConfig()
 	if running == nil {
-		return SettingsUpdateResult{}, ErrNoRunningConfig
+		return UpdateResult{}, app.ErrNoRunningConfig
 	}
 
 	settings := view(doc, cfg)
@@ -260,16 +261,16 @@ func (s *Settings) Update(ctx context.Context, actor identity.User, req Settings
 
 	diff, err := editableDiff(running, next)
 	if err != nil {
-		return SettingsUpdateResult{}, err
+		return UpdateResult{}, err
 	}
 
-	res := SettingsUpdateResult{Diff: diff, Settings: settings}
+	res := UpdateResult{Diff: diff, Settings: settings}
 	if req.DryRun {
 		return res, nil
 	}
 
 	if err := s.gateway.PushConfig(next); err != nil {
-		return SettingsUpdateResult{}, fmt.Errorf("app: push settings: %w", err)
+		return UpdateResult{}, fmt.Errorf("app: push settings: %w", err)
 	}
 
 	now := s.clock.Now()
@@ -282,22 +283,22 @@ func (s *Settings) Update(ctx context.Context, actor identity.User, req Settings
 		// applies it. The operator sees this error; repeating the update converges.
 		if errBack := s.gateway.PushConfig(running); errBack != nil {
 			//nolint:errorlint // The failed restore is reported, not wrapped: callers match the persist failure alone.
-			return SettingsUpdateResult{}, fmt.Errorf(
+			return UpdateResult{}, fmt.Errorf(
 				"app: settings applied but not persisted, and the previous configuration could not be restored (%v): %w",
 				errBack, err)
 		}
 
-		return SettingsUpdateResult{}, fmt.Errorf("app: persist settings (previous configuration restored): %w", err)
+		return UpdateResult{}, fmt.Errorf("app: persist settings (previous configuration restored): %w", err)
 	}
 
-	if err := s.audit.Record(ctx, AuditEvent{
+	if err := s.audit.Record(ctx, app.AuditEvent{
 		At:      now,
 		ActorID: actor.ID,
 		Action:  "settings.update",
 		Target:  "upstream",
 		Detail:  map[string]any{"diff": diff},
 	}); err != nil {
-		return SettingsUpdateResult{}, fmt.Errorf("app: settings.update applied but not audited: %w", err)
+		return UpdateResult{}, fmt.Errorf("app: settings.update applied but not audited: %w", err)
 	}
 
 	res.Applied = true
@@ -307,7 +308,7 @@ func (s *Settings) Update(ctx context.Context, actor identity.User, req Settings
 
 // proposedDocument is the document an update proposes: the one it carries whole,
 // or the stored one with its fields patched in.
-func (s *Settings) proposedDocument(ctx context.Context, req SettingsUpdate) (string, error) {
+func (s *Service) proposedDocument(ctx context.Context, req Update) (string, error) {
 	if req.YAML != nil {
 		return *req.YAML, nil
 	}
@@ -328,7 +329,7 @@ var errNoOwnedDefaults = errors.New("app: boot configuration needs the gateway-o
 // parsed by upstream, with every gateway-owned field taken from owned (listen
 // address, auth directory, the boot-only credential families). A stored document
 // that no longer passes the checks Update applies is an error, not ignored.
-func LoadBootConfig(ctx context.Context, repo SettingsRepo, owned *sdkconfig.Config) (*sdkconfig.Config, error) {
+func LoadBootConfig(ctx context.Context, repo app.SettingsRepo, owned *sdkconfig.Config) (*sdkconfig.Config, error) {
 	if owned == nil {
 		return nil, errNoOwnedDefaults
 	}
@@ -373,9 +374,9 @@ oauth-excluded-models:
 `
 
 // storedDocument is the stored document, or the default one when none was saved.
-func storedDocument(ctx context.Context, repo SettingsRepo) (string, error) {
+func storedDocument(ctx context.Context, repo app.SettingsRepo) (string, error) {
 	doc, err := repo.UpstreamDocument(ctx)
-	if errors.Is(err, ErrNotFound) {
+	if errors.Is(err, app.ErrNotFound) {
 		return defaultDocument, nil
 	}
 
@@ -386,8 +387,8 @@ func storedDocument(ctx context.Context, repo SettingsRepo) (string, error) {
 	return doc, nil
 }
 
-func view(doc string, cfg *sdkconfig.Config) SettingsView {
-	return SettingsView{YAML: doc, Fields: SettingsFields{
+func view(doc string, cfg *sdkconfig.Config) View {
+	return View{YAML: doc, Fields: Fields{
 		ProxyURL:         cfg.ProxyURL,
 		RequestRetry:     cfg.RequestRetry,
 		MaxRetryInterval: cfg.MaxRetryInterval,
@@ -396,7 +397,7 @@ func view(doc string, cfg *sdkconfig.Config) SettingsView {
 
 // validate refuses an update that carries both a document and fields, or neither,
 // and fields that do not validate.
-func (req SettingsUpdate) validate() error {
+func (req Update) validate() error {
 	switch {
 	case req.YAML != nil && req.Fields != nil:
 		return invalid("fields", "yaml and fields are mutually exclusive")
@@ -411,7 +412,7 @@ func (req SettingsUpdate) validate() error {
 	return nil
 }
 
-func (p SettingsPatch) validate() error {
+func (p Patch) validate() error {
 	if p.ProxyURL != nil {
 		if _, err := proxyutil.Parse(*p.ProxyURL); err != nil {
 			return invalid("proxyURL", err.Error())
@@ -431,7 +432,7 @@ func (p SettingsPatch) validate() error {
 
 // patchDocument sets the patched keys in doc, keeping every other key and its
 // comments.
-func patchDocument(doc string, patch SettingsPatch) (string, error) {
+func patchDocument(doc string, patch Patch) (string, error) {
 	root, err := documentRoot(doc)
 	if err != nil {
 		return "", err
