@@ -9,6 +9,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 )
@@ -33,7 +34,7 @@ type Deps struct {
 	// The administration API's services.
 	AdminUsers *adminusers.Service
 	Settings   *settings.Service
-	Prices     *app.Prices
+	Prices     *prices.Service
 	Providers  *app.Providers
 
 	Clock app.Clock

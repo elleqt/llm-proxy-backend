@@ -23,6 +23,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
@@ -135,7 +136,7 @@ type process struct {
 	catalogUpdates bool
 	sink           *gwusage.Sink
 	// prices checks the price catalog every catalogInterval while serving.
-	prices          *app.Prices
+	prices          *appprices.Service
 	catalogInterval time.Duration
 	// web is nil when LLMPROXY_WEB_ADDR is off.
 	web     *http.Server
@@ -187,7 +188,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, version)
 	}
 
-	priceList := app.NewPrices(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
+	priceList := appprices.New(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
 		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
 		return nil, fmt.Errorf("prices: %w", err)

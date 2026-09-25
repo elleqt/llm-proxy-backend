@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
@@ -141,7 +142,7 @@ func (rt *router) refreshPriceCatalog(rw http.ResponseWriter, req *http.Request)
 	writeJSON(rw, http.StatusOK, priceListOf(list))
 }
 
-func priceListOf(list app.PriceList) api.PriceList {
+func priceListOf(list appprices.List) api.PriceList {
 	prices := make([]api.PriceEntry, 0, len(list.Prices))
 	for _, price := range list.Prices {
 		entry := api.PriceEntry{

@@ -10,6 +10,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
@@ -208,7 +209,7 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 	table := &app.PriceTable{}
 	m := metrics.New(prometheus.NewRegistry())
 
-	prices := app.NewPrices(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
+	prices := appprices.New(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
 	require.NoError(t, prices.Load(context.Background()), "Load")
 
 	usage := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 1_000_000, TokensTotal: 1_000_000}

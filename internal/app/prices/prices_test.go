@@ -1,4 +1,4 @@
-package app_test
+package prices_test
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -26,7 +27,7 @@ type pricesFixture struct {
 	sink    *mocks.PriceSink
 	metrics *mocks.PriceCatalogMetrics
 	audit   *mocks.AuditSink
-	svc     *app.Prices
+	svc     *appprices.Service
 
 	mu            sync.Mutex
 	storedCatalog []app.ModelPrice
@@ -139,7 +140,7 @@ func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, sta
 		source = nil
 	}
 
-	fixture.svc = app.NewPrices(fixture.repo, fixture.catalog, source, fixture.sink, fixture.metrics, fixture.audit, fixedClock{now: settingsNow}, discardLogger{})
+	fixture.svc = appprices.New(fixture.repo, fixture.catalog, source, fixture.sink, fixture.metrics, fixture.audit, fixedClock{now: settingsNow}, discardLogger{})
 
 	return fixture
 }
@@ -169,7 +170,7 @@ func (f *pricesFixture) priced(t *testing.T) map[string]float64 {
 	return out
 }
 
-func (f *pricesFixture) get(t *testing.T) app.PriceList {
+func (f *pricesFixture) get(t *testing.T) appprices.List {
 	t.Helper()
 
 	list, err := f.svc.Get(context.Background(), newAdmin())
@@ -246,8 +247,8 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 	got, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{})
 	require.NoError(t, err, "Replace")
 	require.Len(t, got.Prices, 2, "after omitting the overrides: want the catalog's two rows")
-	require.Equal(t, app.PriceSourceCatalog, got.Prices[0].Source, "after omitting the overrides")
-	require.Equal(t, app.PriceSourceCatalog, got.Prices[1].Source, "after omitting the overrides")
+	require.Equal(t, appprices.SourceCatalog, got.Prices[0].Source, "after omitting the overrides")
+	require.Equal(t, appprices.SourceCatalog, got.Prices[1].Source, "after omitting the overrides")
 
 	priced := fixture.priced(t)
 	require.Equal(t, 3.0, priced["claude/claude-sonnet-5"], "sink: want sonnet back at the catalog's 3")
@@ -260,29 +261,29 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 // assertOverriddenList checks the admin view while a manual sonnet price and a
 // private model override a two-row catalog: each entry names its source, and a
 // manual entry shadowing a catalog row carries that row's rates behind it.
-func assertOverriddenList(t *testing.T, list app.PriceList) {
+func assertOverriddenList(t *testing.T, list appprices.List) {
 	t.Helper()
 
 	require.Len(t, list.Prices, 3, "Get: want 3 entries")
 
-	byModel := map[string]app.PriceEntry{}
+	byModel := map[string]appprices.Entry{}
 	for _, e := range list.Prices {
 		byModel[e.Model] = e
 	}
 
 	sonnetEntry := byModel["claude-sonnet-5"]
-	require.Equal(t, app.PriceSourceManual, sonnetEntry.Source, "sonnet source")
+	require.Equal(t, appprices.SourceManual, sonnetEntry.Source, "sonnet source")
 	require.Equal(t, 2.0, sonnetEntry.Input, "sonnet input")
 	require.NotNil(t, sonnetEntry.Catalog, "sonnet: want the catalog's rates behind it")
 	require.Equal(t, 3.0, sonnetEntry.Catalog.Input, "sonnet catalog input")
 
 	gptEntry := byModel["gpt-6"]
-	require.Equal(t, app.PriceSourceCatalog, gptEntry.Source, "gpt-6 source")
+	require.Equal(t, appprices.SourceCatalog, gptEntry.Source, "gpt-6 source")
 	require.Nil(t, gptEntry.Catalog, "gpt-6: the catalog's own row has no catalog rates behind it")
 	require.True(t, gptEntry.UpdatedAt.Equal(earlier), "gpt-6 updated at %v, want %v", gptEntry.UpdatedAt, earlier)
 
 	privateEntry := byModel["claude-private"]
-	require.Equal(t, app.PriceSourceManual, privateEntry.Source, "private source")
+	require.Equal(t, appprices.SourceManual, privateEntry.Source, "private source")
 	require.Nil(t, privateEntry.Catalog, "private: want no catalog rates")
 
 	require.Equal(t, 2, list.Catalog.Models, "catalog status models")

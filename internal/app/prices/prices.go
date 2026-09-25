@@ -1,4 +1,4 @@
-package app
+package prices
 
 import (
 	"cmp"
@@ -13,27 +13,28 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 )
 
-// PriceSource says where a price in force comes from.
-type PriceSource string
+// Source says where a price in force comes from.
+type Source string
 
 const (
-	// PriceSourceCatalog is a price the price catalog set.
-	PriceSourceCatalog PriceSource = "catalog"
-	// PriceSourceManual is an administrator's override; it wins over the catalog.
-	PriceSourceManual PriceSource = "manual"
+	// SourceCatalog is a price the price catalog set.
+	SourceCatalog Source = "catalog"
+	// SourceManual is an administrator's override; it wins over the catalog.
+	SourceManual Source = "manual"
 )
 
-// PriceEntry is one price in force. Catalog is set on a manual entry whose model
+// Entry is one price in force. Catalog is set on a manual entry whose model
 // the catalog also prices: the catalog's price, which removing the override
 // restores.
-type PriceEntry struct {
-	ModelPrice
+type Entry struct {
+	app.ModelPrice
 
-	Source  PriceSource
-	Catalog *ModelPrice
+	Source  Source
+	Catalog *app.ModelPrice
 }
 
 // CatalogStatus is the price catalog as the administrator sees it. A zero time
@@ -47,10 +48,10 @@ type CatalogStatus struct {
 	LastError string
 }
 
-// PriceList is the effective price list, ordered by provider then model, and
+// List is the effective price list, ordered by provider then model, and
 // the catalog's status.
-type PriceList struct {
-	Prices  []PriceEntry
+type List struct {
+	Prices  []Entry
 	Catalog CatalogStatus
 }
 
@@ -61,7 +62,7 @@ const (
 	catalogFailed    = "failed"
 )
 
-// Prices maintains the price list the metrics cost estimate uses: the price
+// Service maintains the price list the metrics cost estimate uses: the price
 // catalog's prices with the administrator's manual overrides on top. Both lists
 // live in the database and in memory here; sink holds the effective list the
 // metrics read, set at boot (Load), on every Replace and on every catalog change,
@@ -71,17 +72,17 @@ const (
 // Catalog checks (RunCatalog on a schedule, Refresh on demand) run one at a time.
 // A failed check records why and keeps the prices in force; a catalog that prices
 // nothing of ours is a failed check, so it can never wipe them.
-type Prices struct {
-	repo    PriceRepo
-	catalog PriceCatalogRepo
+type Service struct {
+	repo    app.PriceRepo
+	catalog app.PriceCatalogRepo
 	// source is nil when the catalog is disabled: then the stored catalog
 	// prices are not in force, and only manual prices are.
-	source  PriceCatalogSource
-	sink    PriceSink
-	metrics PriceCatalogMetrics
-	audit   AuditSink
-	clock   Clock
-	log     InfoLogger
+	source  app.PriceCatalogSource
+	sink    app.PriceSink
+	metrics app.PriceCatalogMetrics
+	audit   app.AuditSink
+	clock   app.Clock
+	log     app.InfoLogger
 
 	// checking holds a token while a catalog check runs. It is never taken
 	// under mu, and mu is never held across a fetch: reading the list does not
@@ -91,16 +92,16 @@ type Prices struct {
 	// mu guards the fields below and serialises every write, so the sink ends up
 	// holding the effective list of the last one.
 	mu            sync.Mutex
-	manual        []ModelPrice
-	catalogPrices []ModelPrice
-	state         CatalogState
+	manual        []app.ModelPrice
+	catalogPrices []app.ModelPrice
+	state         app.CatalogState
 }
 
-// NewPrices builds the service. source is nil when no catalog is configured.
-func NewPrices(repo PriceRepo, catalog PriceCatalogRepo, source PriceCatalogSource, sink PriceSink,
-	metrics PriceCatalogMetrics, audit AuditSink, clock Clock, log InfoLogger,
-) *Prices {
-	return &Prices{
+// New builds the service. source is nil when no catalog is configured.
+func New(repo app.PriceRepo, catalog app.PriceCatalogRepo, source app.PriceCatalogSource, sink app.PriceSink,
+	metrics app.PriceCatalogMetrics, audit app.AuditSink, clock app.Clock, log app.InfoLogger,
+) *Service {
+	return &Service{
 		repo: repo, catalog: catalog, source: source, sink: sink, metrics: metrics,
 		audit: audit, clock: clock, log: log, checking: make(chan struct{}, 1),
 	}
@@ -108,15 +109,15 @@ func NewPrices(repo PriceRepo, catalog PriceCatalogRepo, source PriceCatalogSour
 
 // Load reads the stored lists and hands the effective one to the sink. The
 // composition root calls it at boot, before RunCatalog.
-func (p *Prices) Load(ctx context.Context) error {
+func (p *Service) Load(ctx context.Context) error {
 	manual, err := p.repo.List(ctx)
 	if err != nil {
 		return fmt.Errorf("app: load prices: %w", err)
 	}
 
 	var (
-		catalog []ModelPrice
-		state   CatalogState
+		catalog []app.ModelPrice
+		state   app.CatalogState
 	)
 	if p.source != nil {
 		if catalog, err = p.catalog.List(ctx); err != nil {
@@ -140,9 +141,9 @@ func (p *Prices) Load(ctx context.Context) error {
 }
 
 // Get returns the effective list and the catalog's status.
-func (p *Prices) Get(_ context.Context, actor identity.User) (PriceList, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return PriceList{}, err
+func (p *Service) Get(_ context.Context, actor identity.User) (List, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return List{}, err
 	}
 
 	p.mu.Lock()
@@ -155,13 +156,13 @@ func (p *Prices) Get(_ context.Context, actor identity.User) (PriceList, error) 
 // to the catalog's price, or has none. Every rate must be a finite, non-negative
 // number and every (provider, model) must be named once; the first entry that is
 // not is an *InvalidInputError naming it as "[index].field".
-func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelPrice) (PriceList, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return PriceList{}, err
+func (p *Service) Replace(ctx context.Context, actor identity.User, list []app.ModelPrice) (List, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return List{}, err
 	}
 
 	if err := validatePrices(list); err != nil {
-		return PriceList{}, err
+		return List{}, err
 	}
 
 	p.mu.Lock()
@@ -169,7 +170,7 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 
 	now := p.clock.Now()
 	if err := p.repo.Replace(ctx, list, now); err != nil {
-		return PriceList{}, fmt.Errorf("app: replace prices: %w", err)
+		return List{}, fmt.Errorf("app: replace prices: %w", err)
 	}
 	// The sink gets the list as submitted: it is what was stored, and a failed
 	// read-back below must not leave the metrics pricing with the old list.
@@ -178,18 +179,18 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 
 	stored, err := p.repo.List(ctx)
 	if err != nil {
-		return PriceList{}, fmt.Errorf("app: prices replaced; read back: %w", err)
+		return List{}, fmt.Errorf("app: prices replaced; read back: %w", err)
 	}
 
 	p.manual = stored
-	if err := p.audit.Record(ctx, AuditEvent{
+	if err := p.audit.Record(ctx, app.AuditEvent{
 		At:      now,
 		ActorID: actor.ID,
 		Action:  "prices.replace",
 		Target:  "model_prices",
 		Detail:  map[string]any{"count": len(list)},
 	}); err != nil {
-		return PriceList{}, fmt.Errorf("app: prices.replace applied but not audited: %w", err)
+		return List{}, fmt.Errorf("app: prices.replace applied but not audited: %w", err)
 	}
 
 	return p.listLocked(), nil
@@ -198,18 +199,18 @@ func (p *Prices) Replace(ctx context.Context, actor identity.User, list []ModelP
 // Refresh checks the catalog now. A failed check is not an error: it shows in the
 // returned status and the prices in force are kept. ErrCatalogDisabled when no
 // catalog is configured.
-func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return PriceList{}, err
+func (p *Service) Refresh(ctx context.Context, actor identity.User) (List, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return List{}, err
 	}
 
 	if p.source == nil {
-		return PriceList{}, ErrCatalogDisabled
+		return List{}, app.ErrCatalogDisabled
 	}
 
 	res, err := p.check(ctx)
 	if err != nil {
-		return PriceList{}, err
+		return List{}, err
 	}
 
 	detail := map[string]any{"outcome": res.outcome, "models": res.models}
@@ -217,14 +218,14 @@ func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, e
 		detail["error"] = res.failure
 	}
 
-	if err := p.audit.Record(ctx, AuditEvent{
+	if err := p.audit.Record(ctx, app.AuditEvent{
 		At:      p.clock.Now(),
 		ActorID: actor.ID,
 		Action:  "prices.refresh",
 		Target:  "price_catalog",
 		Detail:  detail,
 	}); err != nil {
-		return PriceList{}, fmt.Errorf("app: prices.refresh done but not audited: %w", err)
+		return List{}, fmt.Errorf("app: prices.refresh done but not audited: %w", err)
 	}
 
 	p.mu.Lock()
@@ -236,7 +237,7 @@ func (p *Prices) Refresh(ctx context.Context, actor identity.User) (PriceList, e
 // RunCatalog checks the catalog at once and then every interval until ctx ends.
 // The composition root runs it after Load; it returns at once when no catalog is
 // configured.
-func (p *Prices) RunCatalog(ctx context.Context, interval time.Duration) {
+func (p *Service) RunCatalog(ctx context.Context, interval time.Duration) {
 	if p.source == nil {
 		return
 	}
@@ -268,7 +269,7 @@ type checkResult struct {
 // check fetches the catalog and applies what it says. A catalog that cannot be
 // read or priced is a failed check, recorded and returned as a result; the error
 // is for a failure to store the outcome, or ctx ending first.
-func (p *Prices) check(ctx context.Context) (checkResult, error) {
+func (p *Service) check(ctx context.Context) (checkResult, error) {
 	select {
 	case p.checking <- struct{}{}:
 	case <-ctx.Done():
@@ -282,7 +283,7 @@ func (p *Prices) check(ctx context.Context) (checkResult, error) {
 	since := p.state.Validators
 	if p.state.Fingerprint != p.source.Fingerprint() {
 		// Stored by another URL or parser: this one must read the whole catalog.
-		since = CatalogValidators{}
+		since = app.CatalogValidators{}
 	}
 	p.mu.Unlock()
 
@@ -314,17 +315,17 @@ var (
 // acceptCatalog refuses a fetched list the prices in force must not be replaced
 // with: an empty one, which would unprice every model, one that prices every
 // model at zero, which would zero the cost estimate, or an invalid one.
-func acceptCatalog(prices []ModelPrice) error {
+func acceptCatalog(prices []app.ModelPrice) error {
 	if len(prices) == 0 {
 		return errCatalogEmpty
 	}
 
-	if !slices.ContainsFunc(prices, func(p ModelPrice) bool { return p.Input > 0 || p.Output > 0 }) {
+	if !slices.ContainsFunc(prices, func(p app.ModelPrice) bool { return p.Input > 0 || p.Output > 0 }) {
 		return errCatalogZero
 	}
 
 	if err := validatePrices(prices); err != nil {
-		if ie, ok := errors.AsType[*InvalidInputError](err); ok {
+		if ie, ok := errors.AsType[*app.InvalidInputError](err); ok {
 			return fmt.Errorf("%w (%s)", errCatalogInvalidPrice, ie.Field)
 		}
 
@@ -351,7 +352,7 @@ func clip(text string) string {
 	return text[:cut]
 }
 
-func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, error) {
+func (p *Service) recordFailure(ctx context.Context, why string) (checkResult, error) {
 	why = clip(why)
 
 	p.metrics.ObservePriceCatalogFailure()
@@ -372,7 +373,7 @@ func (p *Prices) recordFailure(ctx context.Context, why string) (checkResult, er
 
 // recordSuccess stores what a successful fetch found. A store that refuses it
 // makes the check a failed one: the prices and the state in force stay.
-func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (checkResult, error) {
+func (p *Service) recordSuccess(ctx context.Context, fetched app.CatalogFetch) (checkResult, error) {
 	now := p.clock.Now()
 	p.mu.Lock()
 	state := p.state
@@ -435,12 +436,12 @@ func (p *Prices) recordSuccess(ctx context.Context, fetched CatalogFetch) (check
 
 // sameRates reports whether two price lists price the same models at the same
 // rates, whatever their order and UpdatedAt.
-func sameRates(left, right []ModelPrice) bool {
+func sameRates(left, right []app.ModelPrice) bool {
 	if len(left) != len(right) {
 		return false
 	}
 
-	byKey := make(map[priceKey]ModelPrice, len(left))
+	byKey := make(map[priceKey]app.ModelPrice, len(left))
 	for _, mp := range left {
 		mp.UpdatedAt = time.Time{}
 		byKey[priceKey{mp.Provider, mp.Model}] = mp
@@ -456,19 +457,22 @@ func sameRates(left, right []ModelPrice) bool {
 	return true
 }
 
+// priceKey identifies a price: one model of one provider.
+type priceKey struct{ provider, model string }
+
 // entriesLocked is the effective list: the catalog's prices, each manual price
 // replacing the catalog's for its model. p.mu must be held.
-func (p *Prices) entriesLocked() []PriceEntry {
-	out := make([]PriceEntry, 0, len(p.catalogPrices)+len(p.manual))
+func (p *Service) entriesLocked() []Entry {
+	out := make([]Entry, 0, len(p.catalogPrices)+len(p.manual))
 
 	at := make(map[priceKey]int, len(p.catalogPrices))
 	for _, c := range p.catalogPrices {
 		at[priceKey{c.Provider, c.Model}] = len(out)
-		out = append(out, PriceEntry{ModelPrice: c, Source: PriceSourceCatalog})
+		out = append(out, Entry{ModelPrice: c, Source: SourceCatalog})
 	}
 
 	for _, m := range p.manual {
-		entry := PriceEntry{ModelPrice: m, Source: PriceSourceManual}
+		entry := Entry{ModelPrice: m, Source: SourceManual}
 		if i, ok := at[priceKey{m.Provider, m.Model}]; ok {
 			c := out[i].ModelPrice
 			entry.Catalog = &c
@@ -480,7 +484,7 @@ func (p *Prices) entriesLocked() []PriceEntry {
 		out = append(out, entry)
 	}
 
-	slices.SortFunc(out, func(a, b PriceEntry) int {
+	slices.SortFunc(out, func(a, b Entry) int {
 		return cmp.Or(strings.Compare(a.Provider, b.Provider), strings.Compare(a.Model, b.Model))
 	})
 
@@ -488,10 +492,10 @@ func (p *Prices) entriesLocked() []PriceEntry {
 }
 
 // publish hands the effective list to the sink. p.mu must be held.
-func (p *Prices) publish() {
+func (p *Service) publish() {
 	entries := p.entriesLocked()
 
-	prices := make([]ModelPrice, len(entries))
+	prices := make([]app.ModelPrice, len(entries))
 	for i, e := range entries {
 		prices[i] = e.ModelPrice
 	}
@@ -500,20 +504,20 @@ func (p *Prices) publish() {
 }
 
 // listLocked is the list Get answers. p.mu must be held.
-func (p *Prices) listLocked() PriceList {
+func (p *Service) listLocked() List {
 	status := CatalogStatus{Enabled: p.source != nil}
 	if status.Enabled {
 		status.CheckedAt, status.ChangedAt = p.state.CheckedAt, p.state.ChangedAt
 		status.Models, status.LastError = len(p.catalogPrices), p.state.LastError
 	}
 
-	return PriceList{Prices: p.entriesLocked(), Catalog: status}
+	return List{Prices: p.entriesLocked(), Catalog: status}
 }
 
-func validatePrices(list []ModelPrice) error {
+func validatePrices(list []app.ModelPrice) error {
 	seen := make(map[priceKey]struct{}, len(list))
 	for index, mp := range list {
-		field := func(name string) error { return &InvalidInputError{Field: fmt.Sprintf("[%d].%s", index, name)} }
+		field := func(name string) error { return &app.InvalidInputError{Field: fmt.Sprintf("[%d].%s", index, name)} }
 		if strings.TrimSpace(mp.Provider) == "" {
 			return field("provider")
 		}
@@ -533,7 +537,7 @@ func validatePrices(list []ModelPrice) error {
 
 		k := priceKey{mp.Provider, mp.Model}
 		if _, dup := seen[k]; dup {
-			return &InvalidInputError{Field: fmt.Sprintf("[%d]", index)}
+			return &app.InvalidInputError{Field: fmt.Sprintf("[%d]", index)}
 		}
 
 		seen[k] = struct{}{}

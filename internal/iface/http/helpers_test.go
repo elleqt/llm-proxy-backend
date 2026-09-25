@@ -16,6 +16,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -219,7 +220,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		priceSrc = nil
 	}
 
-	env.deps.Prices = app.NewPrices(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
+	env.deps.Prices = prices.New(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
 	env.deps.Providers = app.NewProviders(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
 	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 
