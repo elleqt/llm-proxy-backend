@@ -22,8 +22,8 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 **Layering:** imports point inward only.
 
 - `internal/domain` imports nothing internal and does no I/O.
-- `internal/app` imports only `domain`, plus CLIProxyAPI `sdk/config` types. `internal/app/ports.go` declares every interface services depend on: repos, sinks, `Clock`, `Logger`, `ConfigPusher`.
-- `internal/infra/*` and `internal/iface/http` import `app` and implement its ports. Each implementation carries an assertion like `var _ app.UsageRepo = (*UsageRepo)(nil)`.
+- `internal/app` imports only `domain`, plus CLIProxyAPI `sdk/config` types. Root `app` holds what services share and never imports a subpackage: `ports.go` declares every interface services depend on (repos, sinks, `Clock`, `Logger`, `ConfigPusher`) and the port sentinels, `errors.go` the other refusals. Each service is its own subpackage (`app/auth`, `app/tokens`, `app/adminusers`, …) with a `Service` type and a `New` constructor.
+- `internal/infra/*` and `internal/iface/http` import `app` and implement its ports. Each implementation carries an assertion like `var _ app.UsageRepo = (*Repo)(nil)`.
 - `internal/boot/boot.go` is the composition root. `build()` wires `New*` constructors by hand; there is no DI container. Constructors validate their dependencies and return an error.
 
 **Proxied request** (`internal/infra/gateway`):
@@ -31,7 +31,7 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 1. `policyGate` (`policy_gate.go`) runs first and denies by default. `classify` looks the route up in the static `routes` table (`routes.go`); a route that is not listed gets a 404.
 2. The Content-Encoding gate runs next, then `authenticate` (`access_provider.go`) resolves the key through `app.TokenResolver`. The principal is cached on the context so upstream's `AccessProvider.Authenticate` does not hit the DB again.
 3. On model routes, the body is buffered under the process-wide `bodyBudget` (`body_budget.go`). `model_extract.go` finds the model, then `access.Routed` and `Policy.Covers` enforce the allow-list.
-4. `c.Next()` hands off to upstream, which calls the vendor. When the call finishes, upstream calls `UsageSink.HandleUsage`, which puts the record on a channel. A single worker prices it, batch-inserts it into Postgres and updates metrics.
+4. `c.Next()` hands off to upstream, which calls the vendor. When the call finishes, upstream calls `usage.Sink.HandleUsage` (`gateway/usage`), which puts the record on a channel. A single worker prices it, batch-inserts it into Postgres and updates metrics.
 
 **Web request** (`internal/iface/http/router.go`): stdlib `http.ServeMux` with hand-written handlers. Middleware order: `recoverPanics` → `limitBody` → `requireJSON` → `loadSession` → per-route rate limit, then session and admin guards. Route access comes from the `anonymous`, `restrictedAllowed`, `signInLimited` and `adminOnly` tables, so a new endpoint goes into `routes()` and into the right table.
 
@@ -46,9 +46,9 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 
 - `cmd/gateway/`: entry point. `gateway` serves; `gateway reset-password <email> [--unblock]` recovers an account offline.
 - `internal/domain/{access,identity,credentials}`: policy rules, argon2id hashes, `sk-` token generation and hashing.
-- `internal/app/`: services and ports. `mocks/` is generated.
-- `internal/infra/gateway/`: the CLIProxyAPI embedding. `faketest/` holds behavioural vendor fakes.
-- `internal/infra/postgres/`: repos, `migrations/`, and the `pgtest/` container helper.
+- `internal/app/`: ports and shared kernels in the root, one subpackage per service. `mocks/` is generated.
+- `internal/infra/gateway/`: the CLIProxyAPI embedding and request-path core; leaf subpackages `gate` (refusal observer), `usage` (usage sink) and `login` (vendor sign-ins). `faketest/` holds behavioural vendor fakes.
+- `internal/infra/postgres/`: the pool, `migrations/` and shared SQL helpers in the root, one subpackage per repository (`users`, `tokens`, …), and the `pgtest/` container helper.
 - `internal/iface/http/`: web API handlers. `api/api.gen.go` is generated.
 - `api/openapi.yaml`: web API contract and source of truth. It covers `/api/*` only, not the proxied API.
 - `test/e2e/`: full-process tests across all listeners.
@@ -81,11 +81,11 @@ The full variable reference is in `internal/config/config.go` and the README.
 ## Code Conventions & Common Patterns
 
 - **Error messages** are prefixed with the package name: `errors.New("app: not found")`, `"web: ..."`, `"config: ..."`. Wrap errors with `%w`.
-- **Sentinel errors** live in `internal/app/ports.go`. Typed errors such as `*app.InvalidInputError` carry the field name.
+- **Sentinel errors** live in `internal/app/ports.go`, the other refusals in `internal/app/errors.go`. Typed errors such as `*app.InvalidInputError` carry the field name.
 - **HTTP error mapping** happens only in the `appRefusals` table in `internal/iface/http/errors.go`, matched with `errors.Is`. Unmatched errors become a 500.
 - **Web error body:** every web error is JSON `api.Error{code,message,field?}` written by `writeError`. Clients key on `code`, so treat codes as contract.
 - **SQL:** raw SQL in documented string constants; no ORM or sqlc. Multi-row writes use `pgx.Batch`. Multi-row reads scan into a postgres-local row struct tagged `db:"<column>"` with `pgx.RowToStructByName` and convert to the app/domain type (which stay tag-free); hand-written `pgx.CollectableRow` scan closures are rejected by lint (`forbidigo`).
-- **Unique violations** become `app.ErrConflict` through `asConflict()`, so callers never import pgx.
+- **Unique violations** become `app.ErrConflict` through `postgres.AsConflict()`, so callers never import pgx.
 - **Time** always goes through `app.Clock`. The app layer logs through `app.Logger`, which takes `slog.Attr` values only (`slog.Any("err", err)`), never loose key/value pairs. Boot bridges upstream's logrus into the same slog handler (`internal/boot/logging.go`); logrus is there only for upstream.
 - **Config** is env-only with the `LLMPROXY_` prefix and fails fast in `config.Load()`. Errors name the variable and never echo its value. Secrets use the self-redacting `config.Secret`.
 - **Comments:** every package has a doc comment. Comments are full sentences that explain invariants and reasons; match that style.
@@ -114,9 +114,9 @@ The full variable reference is in `internal/config/config.go` and the README.
 - `internal/boot/boot.go`: wiring, `Run`, `serve`, and shutdown order.
 - `internal/config/config.go`: every `LLMPROXY_*` variable, its default and its validation.
 - `internal/app/ports.go`: interfaces and sentinel errors.
-- `internal/infra/gateway/{policy_gate,routes,access_provider,usage_sink,body_budget,model_extract}.go`: the proxy control plane.
+- `internal/infra/gateway/{policy_gate,routes,access_provider,body_budget,model_extract}.go` and `gateway/usage/sink.go`: the proxy control plane.
 - `internal/iface/http/{router,errors}.go`: web routing, access tables and error mapping.
-- `internal/infra/postgres/migrate.go`: embedded goose migrations and `asConflict`.
+- `internal/infra/postgres/migrate.go`: embedded goose migrations and `AsConflict`.
 - Codegen config: `api/openapi.yaml`, `internal/iface/http/api/codegen.yaml` (models only) and `.mockery.yaml`.
 - `.github/workflows/ci.yml`, `Makefile`, `Dockerfile`, `docker-compose{,.minimal,.build}.yml`, `RELEASING.md`.
 
@@ -135,11 +135,11 @@ The full variable reference is in `internal/config/config.go` and the README.
 - **Assertions:** testify only. `require` where the test cannot go on (the old `t.Fatal`), `assert` where it should report and continue (the old `t.Error`); inside goroutines, HTTP handlers and mock callbacks always `assert`. Expected value first (`require.Equal(t, want, got)`), and the specific assertion over `True` (`NoError`, `ErrorIs`, `Len`, `Contains`, …). An identity check on a sentinel, where a wrapped error must fail, is `require.Same`. Lint rejects `t.Fatal*`, `t.Error*`, `t.Fail*` (`forbidigo`) and checks testify usage (`testifylint`).
 - **Mocks:** strict mockery testify mocks: `users := mocks.NewUserRepo(t); users.EXPECT().ByID(mock.Anything, id).Return(u, nil)`. An unexpected call fails the test, so a test of a refused path sets no expectations. Tests use table-driven `t.Run` for pure logic.
 - **Test packages:**
-  - `internal/app` tests use `package app_test`, because the mocks import `app`; shared doubles live in `helpers_test.go`.
-  - Postgres tests are black-box (`postgres_test`), with `export_test.go` exposing test-only hooks.
+  - `internal/app` tests use external test packages (`app_test`, `auth_test`, …), because the mocks import `app`; each package's shared doubles live in its `helpers_test.go`.
+  - Postgres tests are black-box (`postgres_test`, `users_test`, …), with `export_test.go` exposing test-only hooks.
   - `gateway` and `http` tests are white-box.
 - **Database tests:** `pgtest.NewTestPool(t)` starts a fresh migrated `postgres:17-alpine` container on every call. There is no DSN override and no skip path.
-- **`internal/infra/gateway`:** never call `t.Parallel()`, because tests mutate process-global state.
+- **`internal/infra/gateway` and its subpackages:** never call `t.Parallel()`, because tests mutate process-global state.
 - **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process.
 - **Timestamps:** use a frozen `mocks.NewClock(t)` for exact timestamps.
 - **Coverage expectations:** every behaviour needs an automated test; checking by hand with curl isn't acceptance. There is no coverage threshold.
