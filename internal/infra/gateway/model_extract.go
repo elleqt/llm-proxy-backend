@@ -149,7 +149,7 @@ func imageRouteModel(model string) string {
 	}
 
 	switch strings.ToLower(prefix) {
-	case "", xaiProviderKey, "x-ai", "grok":
+	case "", XAIProviderKey, "x-ai", "grok":
 	default:
 		return model
 	}

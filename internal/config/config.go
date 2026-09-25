@@ -135,7 +135,7 @@ type OIDC struct {
 	RequiredGroup string
 	AllowSignUp   bool
 	// DefaultPolicy and GroupPolicy hold rule strings as written. Their syntax is
-	// checked by app.NewOIDCService, which owns what they mean.
+	// checked by auth.NewOIDC, which owns what they mean.
 	DefaultPolicy []string
 	GroupPolicy   map[string][]string
 	GroupsClaim   string
@@ -444,7 +444,7 @@ func loadOIDC() (OIDC, error) {
 }
 
 // parseGroupPolicy reads `group=rule,rule;group=rule`. Only the structure is checked
-// here; rule syntax is app.NewOIDCService's.
+// here; rule syntax is auth.NewOIDC's.
 func parseGroupPolicy(raw string) (map[string][]string, error) {
 	entries := splitList(raw, ";")
 	if len(entries) == 0 {

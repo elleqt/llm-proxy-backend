@@ -13,7 +13,15 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
+	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
@@ -121,7 +129,7 @@ type testEnv struct {
 	quota          *mocks.VendorQuota
 	acctMet        *mocks.AccountMetrics
 	// adminCfg is the federated sign-in the administration API is built with.
-	adminCfg app.AdminUsersConfig
+	adminCfg adminusers.Config
 	deps     Deps
 	handler  http.Handler
 }
@@ -130,8 +138,8 @@ type envOption func(*testEnv)
 
 // withOIDC turns federated sign-in on, with the identity provider a mock.
 func withOIDC(env *testEnv) {
-	svc, err := app.NewOIDCService(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, app.OIDCConfig{AllowSignUp: false})
-	require.NoError(env.t, err, "NewOIDCService")
+	svc, err := auth.NewOIDC(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, auth.OIDCConfig{AllowSignUp: false})
+	require.NoError(env.t, err, "NewOIDC")
 
 	env.deps.OIDC = svc
 	env.deps.OIDCDisplayName = "Example SSO"
@@ -145,7 +153,7 @@ func withInsecureCookies(e *testEnv) { e.deps.CookieSecure = false }
 // withoutPriceCatalog configures no price catalog source.
 func withoutPriceCatalog(e *testEnv) { e.noPriceCatalog = true }
 
-func withAdminConfig(cfg app.AdminUsersConfig) envOption {
+func withAdminConfig(cfg adminusers.Config) envOption {
 	return func(e *testEnv) { e.adminCfg = cfg }
 }
 
@@ -191,11 +199,11 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	}
 
 	env.deps = Deps{
-		Auth: app.NewAuthService(env.users, env.pwds, app.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
+		Auth: auth.New(env.users, env.pwds, auth.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
-		Tokens:       app.NewTokenService(env.users, env.tokens, env.audit, env.clock, env.log),
-		Usage:        app.NewUsageService(env.usage),
-		Models:       app.NewModelsService(env.catalog),
+		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
+		Usage:        usage.New(env.usage),
+		Models:       models.New(env.catalog),
 		LocalLogin:   true,
 		Clock:        env.clock,
 		Log:          env.log,
@@ -206,17 +214,17 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		o(env)
 	}
 
-	env.deps.AdminUsers = app.NewAdminUsers(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
+	env.deps.AdminUsers = adminusers.New(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
 		cheapHasher(), env.audit, env.clock, env.catalog, env.adminCfg)
-	env.deps.Settings = app.NewSettings(env.settings, env.gateway, env.audit, env.clock)
+	env.deps.Settings = settings.New(env.settings, env.gateway, env.audit, env.clock)
 
 	var priceSrc app.PriceCatalogSource = env.priceSrc
 	if env.noPriceCatalog {
 		priceSrc = nil
 	}
 
-	env.deps.Prices = app.NewPrices(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
-	env.deps.Providers = app.NewProviders(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
+	env.deps.Prices = prices.New(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
+	env.deps.Providers = providers.New(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
 	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	h, err := NewRouter(env.deps)
@@ -250,8 +258,8 @@ func admin() identity.User {
 // signedIn makes the store hold a live session for u and returns its cookie.
 func (e *testEnv) signedIn(u identity.User) *http.Cookie {
 	id := "session-of-" + u.ID.String()
-	e.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
-		Return(app.Session{IDHash: app.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil).Maybe()
+	e.sessions.EXPECT().ByHash(mock.Anything, auth.HashSessionID(id)).
+		Return(app.Session{IDHash: auth.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil).Maybe()
 	e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil).Maybe()
 
 	return &http.Cookie{Name: sessionCookieName, Value: id}

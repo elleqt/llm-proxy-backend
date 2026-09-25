@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -264,7 +265,7 @@ func TestUpdateUserRefusals(t *testing.T) {
 		},
 		{
 			"policy owned by the identity provider",
-			[]envOption{withAdminConfig(app.AdminUsersConfig{GroupMappingConfigured: true})},
+			[]envOption{withAdminConfig(adminusers.Config{GroupMappingConfigured: true})},
 			func(e *testEnv, _ identity.User) uuid.UUID {
 				e.users.EXPECT().ByID(mock.Anything, idp.ID).Return(idp, nil)
 
@@ -355,10 +356,10 @@ func TestRenewInvitation(t *testing.T) {
 	path := "/api/admin/users/" + user.ID.String() + "/invitation"
 
 	t.Run("invited", func(t *testing.T) {
-		env := newEnv(t, withAdminConfig(app.AdminUsersConfig{OIDCIssuer: issuer}))
+		env := newEnv(t, withAdminConfig(adminusers.Config{OIDCIssuer: issuer}))
 		env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		env.idents.EXPECT().Invite(mock.Anything, user.ID, app.Invitation{
-			Issuer: issuer, Email: user.Email, ExpiresAt: env.clock.Now().Add(app.InvitationTTL),
+			Issuer: issuer, Email: user.Email, ExpiresAt: env.clock.Now().Add(adminusers.InvitationTTL),
 		}).Return(nil)
 
 		rec := env.do(http.MethodPost, path, "", withCookie(env.signedIn(admin())))
@@ -368,7 +369,7 @@ func TestRenewInvitation(t *testing.T) {
 	// Two renewals for one address race on the invitation's unique index; the one
 	// that loses finds the account freshly invited, which is what it asked for.
 	t.Run("a concurrent renewal won", func(t *testing.T) {
-		e := newEnv(t, withAdminConfig(app.AdminUsersConfig{OIDCIssuer: issuer}))
+		e := newEnv(t, withAdminConfig(adminusers.Config{OIDCIssuer: issuer}))
 		e.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		e.idents.EXPECT().Invite(mock.Anything, user.ID, mock.Anything).Return(app.ErrConflict)
 
@@ -377,7 +378,7 @@ func TestRenewInvitation(t *testing.T) {
 		require.Zero(t, rec.Body.Len(), "body %s", rec.Body)
 	})
 	t.Run("already linked", func(t *testing.T) {
-		e := newEnv(t, withAdminConfig(app.AdminUsersConfig{OIDCIssuer: issuer}))
+		e := newEnv(t, withAdminConfig(adminusers.Config{OIDCIssuer: issuer}))
 		e.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		e.idents.EXPECT().Invite(mock.Anything, user.ID, mock.Anything).Return(app.ErrAlreadyLinked)
 		apiError(t, e.do(http.MethodPost, path, "", withCookie(e.signedIn(admin()))), http.StatusConflict, codeAlreadyLinked)
@@ -483,7 +484,7 @@ func TestActivityReportsServedRequestsAsSuccessful(t *testing.T) {
 	tokenID := uuid.New()
 	at := env.clock.Now().Add(-time.Minute)
 	env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
-	env.activity.EXPECT().RecentUsage(mock.Anything, user.ID, app.DefaultActivityLimit).Return([]app.UsageEvent{
+	env.activity.EXPECT().RecentUsage(mock.Anything, user.ID, adminusers.DefaultActivityLimit).Return([]app.UsageEvent{
 		{
 			At: at, TokenID: tokenID, Provider: "claude", Model: "m", Stream: true, TokensTotal: 42, LatencyMS: 1500,
 			Cost: app.UsageCost{InputUSD: 0.5, OutputUSD: 1, CacheSavingsUSD: -2, Priced: true},
@@ -495,7 +496,7 @@ func TestActivityReportsServedRequestsAsSuccessful(t *testing.T) {
 		},
 		{At: at, Provider: "claude", Model: "m", Failed: true, Cost: app.UsageCost{UnpricedTokens: 5}},
 	}, nil)
-	env.activity.EXPECT().RecentAudit(mock.Anything, user.ID, app.DefaultActivityLimit).Return([]app.AuditEvent{
+	env.activity.EXPECT().RecentAudit(mock.Anything, user.ID, adminusers.DefaultActivityLimit).Return([]app.AuditEvent{
 		{At: at, ActorID: self.ID, Action: "token.issue", Target: "token/" + tokenID.String(), Detail: map[string]any{"label": "ci"}},
 		{At: at, Action: "auth.sign_in"},
 	}, nil)
@@ -544,8 +545,8 @@ func TestActivityLimit(t *testing.T) {
 	t.Run("the largest page", func(t *testing.T) {
 		e := newEnv(t)
 		e.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
-		e.activity.EXPECT().RecentUsage(mock.Anything, user.ID, app.MaxActivityLimit).Return(nil, nil)
-		e.activity.EXPECT().RecentAudit(mock.Anything, user.ID, app.MaxActivityLimit).Return(nil, nil)
+		e.activity.EXPECT().RecentUsage(mock.Anything, user.ID, adminusers.MaxActivityLimit).Return(nil, nil)
+		e.activity.EXPECT().RecentAudit(mock.Anything, user.ID, adminusers.MaxActivityLimit).Return(nil, nil)
 
 		rec := e.do(http.MethodGet, path+"200", "", withCookie(e.signedIn(admin())))
 		require.JSONEq(t, `{"audit":[],"requests":[]}`, rec.Body.String(), "want empty arrays")

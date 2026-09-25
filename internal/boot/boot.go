@@ -21,13 +21,34 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
+	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/login"
+	gwusage "github.com/elleqt/llm-proxy-backend/internal/infra/gateway/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgactivity "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	pgidentities "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
+	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
+	pgsessions "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgsettings "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/settings"
+	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
+	pgusage "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -127,9 +148,9 @@ type process struct {
 	// catalogUpdates starts upstream's model catalogue updaters once the gateway
 	// runs (LLMPROXY_MODEL_CATALOG_UPDATES).
 	catalogUpdates bool
-	sink           *gateway.UsageSink
+	sink           *gwusage.Sink
 	// prices checks the price catalog every catalogInterval while serving.
-	prices          *app.Prices
+	prices          *appprices.Service
 	catalogInterval time.Duration
 	// web is nil when LLMPROXY_WEB_ADDR is off.
 	web     *http.Server
@@ -141,10 +162,10 @@ type process struct {
 func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) (*process, error) {
-	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
-	tokens, sessions := postgres.NewTokenRepo(pool), postgres.NewSessionRepo(pool)
-	audit, usage := postgres.NewAuditSink(pool), postgres.NewUsageRepo(pool)
-	settings := postgres.NewSettingsRepo(pool)
+	users, passwords := pgusers.New(pool), pgpasswords.New(pool)
+	tokens, sessions := pgtokens.New(pool), pgsessions.New(pool)
+	audit, usage := pgaudit.New(pool), pgusage.New(pool)
+	settings := pgsettings.New(pool)
 	clock, logs := systemClock{}, processLog{logger}
 	// One hasher, so LLMPROXY_PASSWORD_HASH_CONCURRENCY bounds every derivation in
 	// the process: sign-in, bootstrap and administrators' resets alike.
@@ -154,7 +175,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	bootCfg, err := app.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
+	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
 	if err != nil {
 		return nil, fmt.Errorf("boot configuration: %w", err)
 	}
@@ -171,7 +192,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
 	//nolint:contextcheck // the sink's goroutine lives until Drain, not for a boot context
-	sink := gateway.NewUsageSink(usage, tokens, users, prices, meters, clock, logs)
+	sink := gwusage.New(usage, tokens, users, prices, meters, clock, logs)
 
 	registerSinkCounters(registry, sink)
 	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
@@ -181,7 +202,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, version)
 	}
 
-	priceList := app.NewPrices(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
+	priceList := appprices.New(pgprices.New(pool), pgprices.NewCatalogRepo(pool), catalogSource,
 		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
 		return nil, fmt.Errorf("prices: %w", err)
@@ -224,35 +245,35 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return proc, nil
 	}
 
-	idents := postgres.NewIdentityRepo(pool)
+	idents := pgidentities.New(pool)
 
 	oidcService, err := newOIDCService(ctx, cfg.OIDC, users, idents, sessions, audit, clock)
 	if err != nil {
 		return nil, err
 	}
 
-	tokenService := app.NewTokenService(users, tokens, audit, clock, logs)
+	tokenService := apptokens.New(users, tokens, audit, clock, logs)
 
 	router, err := webapi.NewRouter(webapi.Deps{
-		Auth: app.NewAuthService(users, passwords,
-			app.NewThrottle(postgres.NewLoginAttemptRepo(pool), signInFailures, signInLockout, clock),
+		Auth: auth.New(users, passwords,
+			auth.NewThrottle(pgloginattempts.New(pool), signInFailures, signInLockout, clock),
 			hasher, sessions, audit, clock),
 		Tokens:          tokenService,
 		OIDC:            oidcService,
 		OIDCDisplayName: cfg.OIDC.DisplayName,
 		LocalLogin:      cfg.Web.LocalLogin,
-		Usage:           app.NewUsageService(usage),
-		Models:          app.NewModelsService(gw.Catalog()),
-		AdminUsers: app.NewAdminUsers(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
-			tokenService, hasher, audit, clock, gw.Catalog(), app.AdminUsersConfig{
+		Usage:           appusage.New(usage),
+		Models:          models.New(gw.Catalog()),
+		AdminUsers: adminusers.New(users, passwords, idents, sessions, pgactivity.New(pool),
+			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,
 				GroupMappingConfigured: len(cfg.OIDC.GroupPolicy) > 0,
 			}),
-		Settings: app.NewSettings(settings, gw, audit, clock),
+		Settings: appsettings.New(settings, gw, audit, clock),
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
-		// series in these metrics (Providers.Remove).
-		Providers:    app.NewProviders(gw, gateway.NewLogin(gw), sink, meters, audit, clock, logs),
+		// series in these metrics (providers.Service.Remove).
+		Providers:    providers.New(gw, login.New(gw), sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,
@@ -270,7 +291,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 // registerSinkCounters exposes the usage sink's dropped records and recovered
 // panics as counters on registry.
-func registerSinkCounters(registry *prometheus.Registry, sink *gateway.UsageSink) {
+func registerSinkCounters(registry *prometheus.Registry, sink *gwusage.Sink) {
 	registry.MustRegister(
 		prometheus.NewCounterFunc(prometheus.CounterOpts{
 			Namespace: "llmproxy", Name: "usage_dropped_total",
@@ -312,7 +333,7 @@ func bootstrapAdmin(ctx context.Context, cfg config.Config, out io.Writer, users
 // the federated sign-in on it; it returns nil while OIDC is off.
 func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, idents app.IdentityRepo,
 	sessions app.SessionRepo, audit app.AuditSink, clock app.Clock,
-) (*app.OIDCService, error) {
+) (*auth.OIDC, error) {
 	if !cfg.Enabled() {
 		return nil, nil //nolint:nilnil // OIDC off is no service and no error
 	}
@@ -328,7 +349,7 @@ func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, id
 		return nil, fmt.Errorf("identity provider: %w", err)
 	}
 
-	service, err := app.NewOIDCService(users, idents, sessions, idp, audit, clock, app.OIDCConfig{
+	service, err := auth.NewOIDC(users, idents, sessions, idp, audit, clock, auth.OIDCConfig{
 		RequiredGroup: cfg.RequiredGroup,
 		AllowSignUp:   cfg.AllowSignUp,
 		DefaultPolicy: cfg.DefaultPolicy,
@@ -342,7 +363,7 @@ func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, id
 }
 
 // ownedConfig is the gateway-owned part of the boot configuration, which the
-// stored settings document cannot set (app.LoadBootConfig): the proxied
+// stored settings document cannot set (appsettings.LoadBootConfig): the proxied
 // listener, the auth directory, the control panel off and websocket
 // authentication on, the boot-only vendors, and nothing else — no api-keys, no
 // management secret, plugins, home mode, pprof or discovery.

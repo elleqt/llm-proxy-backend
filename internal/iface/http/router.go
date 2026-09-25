@@ -7,30 +7,38 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/models"
+	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
+	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
+	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 )
 
 // Deps is what the web API is built from.
 type Deps struct {
-	Auth   *app.AuthService
-	Tokens *app.TokenService
+	Auth   *auth.Service
+	Tokens *tokens.Service
 	// OIDC is nil when federated sign-in is not configured; /api/auth/config then
 	// says so and /api/auth/oidc/start answers oidc_disabled.
-	OIDC *app.OIDCService
+	OIDC *auth.OIDC
 	// OIDCDisplayName is the sign-in button's label; empty leaves it to the client.
 	OIDCDisplayName string
 	// LocalLogin offers sign-in with an email and a password. Off, the login form is
 	// not offered and POST /api/auth/login answers as an unknown route does.
 	LocalLogin bool
 	// Usage serves the cabinet's consumption chart.
-	Usage *app.UsageService
+	Usage *usage.Service
 	// Models serves the cabinet's list of the models the caller may use.
-	Models *app.ModelsService
+	Models *models.Service
 
 	// The administration API's services.
-	AdminUsers *app.AdminUsers
-	Settings   *app.Settings
-	Prices     *app.Prices
-	Providers  *app.Providers
+	AdminUsers *adminusers.Service
+	Settings   *settings.Service
+	Prices     *prices.Service
+	Providers  *providers.Service
 
 	Clock app.Clock
 	Log   app.Logger

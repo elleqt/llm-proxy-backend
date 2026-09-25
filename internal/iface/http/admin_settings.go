@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
+	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
 
@@ -41,9 +43,9 @@ func (rt *router) updateSettings(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	update := app.SettingsUpdate{YAML: body.Yaml, DryRun: body.DryRun != nil && *body.DryRun}
+	update := settings.Update{YAML: body.Yaml, DryRun: body.DryRun != nil && *body.DryRun}
 	if f := body.Fields; f != nil {
-		update.Fields = &app.SettingsPatch{ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval}
+		update.Fields = &settings.Patch{ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval}
 	}
 
 	res, err := rt.Settings.Update(req.Context(), actor.user, update)
@@ -56,7 +58,7 @@ func (rt *router) updateSettings(rw http.ResponseWriter, req *http.Request) {
 	writeJSON(rw, http.StatusOK, api.SettingsUpdateResult{Applied: res.Applied, Diff: res.Diff, Settings: settingsOf(res.Settings)})
 }
 
-func settingsOf(v app.SettingsView) api.Settings {
+func settingsOf(v settings.View) api.Settings {
 	f := v.Fields
 	out := api.Settings{Yaml: v.YAML}
 	out.Fields.ProxyURL = &f.ProxyURL
@@ -140,7 +142,7 @@ func (rt *router) refreshPriceCatalog(rw http.ResponseWriter, req *http.Request)
 	writeJSON(rw, http.StatusOK, priceListOf(list))
 }
 
-func priceListOf(list app.PriceList) api.PriceList {
+func priceListOf(list appprices.List) api.PriceList {
 	prices := make([]api.PriceEntry, 0, len(list.Prices))
 	for _, price := range list.Prices {
 		entry := api.PriceEntry{

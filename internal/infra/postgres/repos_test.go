@@ -8,8 +8,13 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -21,7 +26,7 @@ import (
 func TestSupportingRepos(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users := postgres.NewUserRepo(pool)
+	users := pgusers.New(pool)
 
 	newUser := func(t *testing.T, name string) uuid.UUID {
 		t.Helper()
@@ -33,7 +38,7 @@ func TestSupportingRepos(t *testing.T) {
 	}
 
 	t.Run("Passwords", func(t *testing.T) {
-		repo := postgres.NewPasswordRepo(pool)
+		repo := passwords.New(pool)
 		id := newUser(t, "password-holder")
 
 		// No password is the normal state of a service or IdP-only account, and it is
@@ -61,7 +66,7 @@ func TestSupportingRepos(t *testing.T) {
 	})
 
 	t.Run("Sessions", func(t *testing.T) {
-		repo := postgres.NewSessionRepo(pool)
+		repo := sessions.New(pool)
 		id := newUser(t, "session-holder")
 
 		live := app.Session{
@@ -128,7 +133,7 @@ func TestSupportingRepos(t *testing.T) {
 	})
 
 	t.Run("Identities", func(t *testing.T) {
-		repo := postgres.NewIdentityRepo(pool)
+		repo := identities.New(pool)
 		id := newUser(t, "federated-person")
 
 		const issuer, subject = "issuer-a", "subject-1"
@@ -158,7 +163,7 @@ func TestSupportingRepos(t *testing.T) {
 	})
 
 	t.Run("PendingIdentities", func(t *testing.T) {
-		repo := postgres.NewIdentityRepo(pool)
+		repo := identities.New(pool)
 		invited := newUser(t, "invited-person")
 		expired := newUser(t, "stale-invite")
 
@@ -181,7 +186,7 @@ func TestSupportingRepos(t *testing.T) {
 	})
 
 	t.Run("LoginAttempts", func(t *testing.T) {
-		repo := postgres.NewLoginAttemptRepo(pool)
+		repo := loginattempts.New(pool)
 
 		const (
 			email = "throttled@example.com"
@@ -224,7 +229,7 @@ func TestSupportingRepos(t *testing.T) {
 	// lands on exactly the limit-th one. A read followed by a write would hand several
 	// attempts the same count and let the burst run past the limit.
 	t.Run("LoginAttemptsChargeIsAtomicUnderABurst", func(t *testing.T) {
-		repo := postgres.NewLoginAttemptRepo(pool)
+		repo := loginattempts.New(pool)
 
 		const (
 			email        = "burst@example.com"
@@ -281,7 +286,7 @@ func TestSupportingRepos(t *testing.T) {
 	// failures in the new window leave the address unlocked, the limit-th locks it
 	// again with a new window.
 	t.Run("LoginAttemptsLapsedLockRestartsTheCount", func(t *testing.T) {
-		repo := postgres.NewLoginAttemptRepo(pool)
+		repo := loginattempts.New(pool)
 
 		const (
 			email = "lapsed@example.com"
@@ -316,7 +321,7 @@ func TestSupportingRepos(t *testing.T) {
 	// Failures that never reached the limit are stale once the last one is a window
 	// old: the next charge starts at 1. A second short of that, they still count.
 	t.Run("LoginAttemptsStaleCountRestarts", func(t *testing.T) {
-		repo := postgres.NewLoginAttemptRepo(pool)
+		repo := loginattempts.New(pool)
 
 		const limit = 3
 
@@ -341,7 +346,7 @@ func TestSupportingRepos(t *testing.T) {
 	})
 
 	t.Run("Audit", func(t *testing.T) {
-		sink := postgres.NewAuditSink(pool)
+		sink := audit.New(pool)
 		actor := newUser(t, "auditor")
 
 		at := time.Now().UTC().Truncate(time.Second)

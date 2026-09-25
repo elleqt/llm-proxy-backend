@@ -8,9 +8,15 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	apprecovery "github.com/elleqt/llm-proxy-backend/internal/app/recovery"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
+	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
+	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
+	pgsessions "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/sessions"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 )
 
 // Refusals ResetPassword explains to the operator. Each is the whole message, or
@@ -30,7 +36,7 @@ type ResetPasswordOptions struct {
 	// Email is the account's sign-in address, in any case.
 	Email string
 	// Unblock also unblocks a blocked administrator when no other active
-	// administrator exists (app.Recovery.ResetPassword).
+	// administrator exists (apprecovery.Service.ResetPassword).
 	Unblock bool
 	// Output receives the temporary password banner, and nothing else. The command
 	// passes os.Stdout. Required.
@@ -69,10 +75,10 @@ func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 	}
 	defer pool.Close()
 
-	recovery := app.NewRecovery(postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool),
-		postgres.NewSessionRepo(pool), postgres.NewLoginAttemptRepo(pool),
+	recovery := apprecovery.New(pgusers.New(pool), pgpasswords.New(pool),
+		pgsessions.New(pool), pgloginattempts.New(pool),
 		app.NewPasswordHasher(cfg.PasswordHashConcurrency, identity.HashPassword, identity.VerifyPassword),
-		postgres.NewAuditSink(pool), systemClock{})
+		pgaudit.New(pool), systemClock{})
 	out, err := recovery.ResetPassword(ctx, opts.Email, opts.Unblock)
 
 	var blocked *app.BlockedError
@@ -103,7 +109,7 @@ func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 
 // printResetPassword shows the temporary password once, in the bootstrap banner's
 // style (printBootstrapPassword).
-func printResetPassword(out io.Writer, recovered app.Recovered) {
+func printResetPassword(out io.Writer, recovered apprecovery.Recovered) {
 	unblocked := ""
 	if recovered.Unblocked {
 		unblocked = "  The account was blocked and is now unblocked.\n"

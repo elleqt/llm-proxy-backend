@@ -159,6 +159,22 @@ linters:
           - err113
           - wrapcheck
         path: _test\.go
+      # One service per subpackage over a shared root: a service passes the
+      # refusals of the root's kernels and of a sibling service through
+      # unchanged, as it did when they shared a package, because callers and
+      # tests match them by identity (require.Same).
+      - linters:
+          - wrapcheck
+        path: ^internal/app/
+        text: 'external package is unwrapped: sig: func \(?\*?github\.com/elleqt/llm-proxy-backend/internal/app[./]'
+      # One repository per subpackage over a shared root: AsConflict and a
+      # sibling's transactional writer return errors already mapped onto app's
+      # sentinels (matched by identity) or prefixed "postgres:", passed through
+      # unchanged as when they shared a package.
+      - linters:
+          - wrapcheck
+        path: ^internal/infra/postgres/
+        text: 'external package is unwrapped: sig: func \(?\*?github\.com/elleqt/llm-proxy-backend/internal/infra/postgres[./]'
     paths:
       - \.gen\.go$
       - mocks

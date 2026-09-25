@@ -9,6 +9,7 @@ import (
 	"os"
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
@@ -43,9 +44,9 @@ import (
 //
 // observe is told of every 401 and every policy or route refusal; nil observes
 // nothing. log receives the gate's own failures; nil discards them.
-func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver, log *slog.Logger) gin.HandlerFunc {
+func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer, log *slog.Logger) gin.HandlerFunc {
 	if observe == nil {
-		observe = noGateObserver{}
+		observe = gate.NopObserver{}
 	}
 
 	if log == nil {
@@ -55,7 +56,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 	return func(ginCtx *gin.Context) {
 		matched := classify(ginCtx.Request.Method, ginCtx.FullPath())
 		if matched.kind == routeDenied {
-			observe.Denied("", "", DenyRouteNotAllowed)
+			observe.Denied("", "", gate.DenyRouteNotAllowed)
 			ginCtx.AbortWithStatus(http.StatusNotFound)
 
 			return
@@ -119,9 +120,9 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 
 		model, providers := access.Routed(catalog, requested)
 		if !policy.Covers(model, providers) {
-			reason := DenyModelNotAllowed
+			reason := gate.DenyModelNotAllowed
 			if len(providers) == 0 {
-				reason = DenyUnknownModel
+				reason = gate.DenyUnknownModel
 			}
 
 			observe.Denied(principal.Owner, model, reason)
@@ -137,12 +138,12 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 // refuseAuthentication answers a request authenticate refused, with
 // upstream's status and body, telling observe of a missing or invalid
 // credential and log of a failure on the gateway's side.
-func refuseAuthentication(ginCtx *gin.Context, authErr *sdkaccess.AuthError, observe GateObserver, log *slog.Logger) {
+func refuseAuthentication(ginCtx *gin.Context, authErr *sdkaccess.AuthError, observe gate.Observer, log *slog.Logger) {
 	switch authErr.Code {
 	case sdkaccess.AuthErrorCodeNoCredentials:
-		observe.AuthFailed(AuthMissing)
+		observe.AuthFailed(gate.AuthMissing)
 	case sdkaccess.AuthErrorCodeInvalidCredential:
-		observe.AuthFailed(AuthInvalid)
+		observe.AuthFailed(gate.AuthInvalid)
 	case sdkaccess.AuthErrorCodeNotHandled, sdkaccess.AuthErrorCodeInternal:
 		// Not a credential the client got wrong: nothing to observe.
 	}

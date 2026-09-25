@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	appauth "github.com/elleqt/llm-proxy-backend/internal/app/auth"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
@@ -85,13 +86,13 @@ func TestLoginSetsTheSessionCookieAndDescribesTheUser(t *testing.T) {
 	require.Equal(t, user.Email, *me.Email, "me email")
 
 	cookie := cookieNamed(t, rec, sessionCookieName)
-	require.Equal(t, stored.IDHash, app.HashSessionID(cookie.Value), "the cookie does not carry the id of the session that was stored")
+	require.Equal(t, stored.IDHash, appauth.HashSessionID(cookie.Value), "the cookie does not carry the id of the session that was stored")
 
 	require.True(t, cookie.HttpOnly, "cookie HttpOnly")
 	require.True(t, cookie.Secure, "cookie Secure")
 	require.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "cookie SameSite")
 	require.Equal(t, "/", cookie.Path, "cookie Path")
-	require.Equal(t, int(app.SessionTTL/time.Second), cookie.MaxAge, "MaxAge is not the session TTL")
+	require.Equal(t, int(appauth.SessionTTL/time.Second), cookie.MaxAge, "MaxAge is not the session TTL")
 	require.NotContains(t, rec.Body.String(), cookie.Value, "the session id is in the response body")
 }
 
@@ -145,7 +146,7 @@ func TestLogoutEndsTheSessionAndClearsTheCookie(t *testing.T) {
 	e := newEnv(t, auditInto(&events))
 	user := person("person@example.com")
 	cookie := e.signedIn(user)
-	e.sessions.EXPECT().Delete(mock.Anything, app.HashSessionID(cookie.Value)).Return(nil)
+	e.sessions.EXPECT().Delete(mock.Anything, appauth.HashSessionID(cookie.Value)).Return(nil)
 
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(cookie))
 	require.Equal(t, http.StatusNoContent, rec.Code, "status")
@@ -198,7 +199,7 @@ func TestPasswordChange(t *testing.T) {
 		env.pwds.EXPECT().Set(mock.Anything, sess.UserID, "plain:a long new password", (*time.Time)(nil)).Return(nil)
 		env.users.EXPECT().SetMustChangePassword(mock.Anything, sess.UserID, false).Return(nil)
 		// Every other session of the account ends; the one that changed it stays.
-		env.sessions.EXPECT().DeleteByUserExcept(mock.Anything, sess.UserID, app.HashSessionID(cookie.Value)).Return(nil)
+		env.sessions.EXPECT().DeleteByUserExcept(mock.Anything, sess.UserID, appauth.HashSessionID(cookie.Value)).Return(nil)
 
 		rec := env.do(http.MethodPost, "/api/auth/password", `{"newPassword":"a long new password"}`, withCookie(cookie))
 		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
@@ -239,8 +240,8 @@ func TestPasswordChange(t *testing.T) {
 		blocked.Status = identity.StatusBlocked
 
 		const id = "the-session"
-		env.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
-			Return(app.Session{IDHash: app.HashSessionID(id), UserID: user.ID, ExpiresAt: env.clock.Now().Add(time.Hour)}, nil)
+		env.sessions.EXPECT().ByHash(mock.Anything, appauth.HashSessionID(id)).
+			Return(app.Session{IDHash: appauth.HashSessionID(id), UserID: user.ID, ExpiresAt: env.clock.Now().Add(time.Hour)}, nil)
 		env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil).Once()
 		env.users.EXPECT().ByID(mock.Anything, user.ID).Return(blocked, nil).Once()
 		rec := env.do(http.MethodPost, "/api/auth/password",

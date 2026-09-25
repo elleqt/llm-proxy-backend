@@ -27,8 +27,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/settings"
+	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -123,7 +124,7 @@ func (o *output) String() string {
 // process is the running service and the handles a test needs.
 type process struct {
 	pool                       *pgxpool.Pool
-	users                      *postgres.UserRepo
+	users                      *pgusers.Repo
 	out                        *output
 	apiURL, webURL, metricsURL string
 	browser                    *http.Client // a browser: a cookie jar on the web listener
@@ -154,13 +155,13 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 
 	pool := pgtest.NewTestPool(t)
 	if settingsDoc != "" {
-		err := postgres.NewSettingsRepo(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now())
+		err := settings.New(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now())
 		require.NoError(t, err, "store settings")
 	}
 
 	proc := &process{
 		pool:       pool,
-		users:      postgres.NewUserRepo(pool),
+		users:      pgusers.New(pool),
 		out:        &output{t: t},
 		adminEmail: "admin@example.com",
 		a:          vendor{policyName: "vendora", alias: "e2e-model-a", fake: &faketest.Vendor{Payload: []byte(vendorPayload)}},

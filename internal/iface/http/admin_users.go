@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
@@ -104,7 +105,7 @@ func (rt *router) createUser(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	in := app.NewUser{Kind: identity.Kind(body.Kind), DisplayName: body.DisplayName, Policy: body.Policy}
+	in := adminusers.NewUser{Kind: identity.Kind(body.Kind), DisplayName: body.DisplayName, Policy: body.Policy}
 	if body.Email != nil {
 		in.Email = *body.Email
 	}
@@ -169,7 +170,7 @@ func (rt *router) updateUser(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	ch := app.UserChanges{DisplayName: body.DisplayName, Policy: body.Policy}
+	ch := adminusers.UserChanges{DisplayName: body.DisplayName, Policy: body.Policy}
 	if body.Role != nil {
 		role := identity.Role(*body.Role)
 		ch.Role = &role
@@ -306,13 +307,13 @@ func (rt *router) getUserActivity(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	limit := app.DefaultActivityLimit
+	limit := adminusers.DefaultActivityLimit
 
 	if raw := req.URL.Query().Get("limit"); raw != "" {
 		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 || parsed > app.MaxActivityLimit {
+		if err != nil || parsed < 1 || parsed > adminusers.MaxActivityLimit {
 			writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "limit",
-				"limit must be an integer from 1 to "+strconv.Itoa(app.MaxActivityLimit))
+				"limit must be an integer from 1 to "+strconv.Itoa(adminusers.MaxActivityLimit))
 
 			return
 		}

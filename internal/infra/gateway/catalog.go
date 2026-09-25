@@ -70,7 +70,7 @@ func (c *Catalog) ProvidersFor(model string) []string {
 
 	names := make([]string, 0, len(keys))
 	for _, key := range keys {
-		if name := policyProvider(key); name != "" && !slices.Contains(names, name) {
+		if name := PolicyProvider(key); name != "" && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
@@ -123,36 +123,36 @@ func (c *Catalog) Models() map[string][]string {
 	return out
 }
 
-// openAICompatiblePrefix starts the upstream key of every named
+// OpenAICompatiblePrefix starts the upstream key of every named
 // openai-compatibility provider (internal/util/provider.go
 // OpenAICompatibleProviderKey).
-const openAICompatiblePrefix = "openai-compatible-"
+const OpenAICompatiblePrefix = "openai-compatible-"
 
 // Upstream keys of built-in providers the gateway names more than once.
 const (
-	// codexProviderKey is upstream's key for ChatGPT accounts, which policies
+	// CodexProviderKey is upstream's key for ChatGPT accounts, which policies
 	// call "chatgpt".
-	codexProviderKey = "codex"
-	// openAICompatibilityKey is upstream's key for an openai-compatibility
+	CodexProviderKey = "codex"
+	// OpenAICompatibilityKey is upstream's key for an openai-compatibility
 	// entry without a name of its own.
-	openAICompatibilityKey = "openai-compatibility"
-	// xaiProviderKey is upstream's key for xAI accounts, also the prefix an
+	OpenAICompatibilityKey = "openai-compatibility"
+	// XAIProviderKey is upstream's key for xAI accounts, also the prefix an
 	// xAI model name may carry.
-	xaiProviderKey = "xai"
+	XAIProviderKey = "xai"
 )
 
-// policyProvider is the one naming layer between upstream provider keys and
+// PolicyProvider is the one naming layer between upstream provider keys and
 // the provider names policies are written in: codex is "chatgpt", a named
 // openai-compatibility provider is its configured name, and every other key is
 // its own name. Registry keys are already lower case. A key that would map to
 // no name ("openai-compatible-" alone) keeps its own, so every provider
 // serving a model is named and checked; admit refuses such an entry anyway.
-func policyProvider(key string) string {
-	if key == codexProviderKey {
+func PolicyProvider(key string) string {
+	if key == CodexProviderKey {
 		return "chatgpt"
 	}
 
-	if name := strings.TrimPrefix(key, openAICompatiblePrefix); name != "" {
+	if name := strings.TrimPrefix(key, OpenAICompatiblePrefix); name != "" {
 		return name
 	}
 
@@ -167,11 +167,11 @@ func compatProviderKey(name string) string {
 	key := strings.ToLower(strings.TrimSpace(name))
 	switch {
 	case key == "":
-		return openAICompatibilityKey
-	case key == openAICompatibilityKey || strings.HasPrefix(key, openAICompatiblePrefix):
+		return OpenAICompatibilityKey
+	case key == OpenAICompatibilityKey || strings.HasPrefix(key, OpenAICompatiblePrefix):
 		return key
 	default:
-		return openAICompatiblePrefix + key
+		return OpenAICompatiblePrefix + key
 	}
 }
 
@@ -181,7 +181,7 @@ func compatProviderKey(name string) string {
 func compatNameRefused(name string) bool {
 	key := compatProviderKey(name)
 
-	return strings.TrimPrefix(key, openAICompatiblePrefix) == "" || reservedProviderName(policyProvider(key))
+	return strings.TrimPrefix(key, OpenAICompatiblePrefix) == "" || reservedProviderName(PolicyProvider(key))
 }
 
 // builtinProviders are the upstream keys of the providers upstream serves
@@ -191,16 +191,16 @@ func compatNameRefused(name string) bool {
 // itself, is reserved: an openai-compatibility entry going by it would share
 // every grant written for the built-in provider.
 var builtinProviders = []string{
-	codexProviderKey, "claude", "gemini", "gemini-interactions", "vertex", "aistudio",
-	"antigravity", "kimi", "kimi-ai", "kimi.ai", "kimi.com", xaiProviderKey, "devin",
-	"meta", "home", openAICompatibilityKey,
+	CodexProviderKey, "claude", "gemini", "gemini-interactions", "vertex", "aistudio",
+	"antigravity", "kimi", "kimi-ai", "kimi.ai", "kimi.com", XAIProviderKey, "devin",
+	"meta", "home", OpenAICompatibilityKey,
 }
 
 // reservedProviderName reports whether name, a policy name, is one a built-in
 // provider goes by or its upstream key.
 func reservedProviderName(name string) bool {
 	for _, key := range builtinProviders {
-		if name == key || name == policyProvider(key) {
+		if name == key || name == PolicyProvider(key) {
 			return true
 		}
 	}
