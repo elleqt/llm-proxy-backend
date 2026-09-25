@@ -3,12 +3,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 type IdentityRepo struct{ pool *pgxpool.Pool }
@@ -22,15 +22,18 @@ func NewIdentityRepo(pool *pgxpool.Pool) *IdentityRepo { return &IdentityRepo{po
 // would let two different subjects collapse onto one account.
 func (r *IdentityRepo) BySubject(ctx context.Context, issuer, subject string) (uuid.UUID, error) {
 	var id uuid.UUID
+
 	err := r.pool.QueryRow(ctx,
 		`SELECT user_id FROM user_identities WHERE issuer = $1 AND subject = $2`,
 		issuer, subject).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, app.ErrNotFound
 	}
+
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, fmt.Errorf("postgres: identity by subject: %w", err)
 	}
+
 	return id, nil
 }
 
@@ -46,6 +49,7 @@ func (r *IdentityRepo) Link(ctx context.Context, userID uuid.UUID, issuer, subje
 	_, err := r.pool.Exec(ctx,
 		`INSERT INTO user_identities (user_id, issuer, subject) VALUES ($1, $2, $3)`,
 		userID, issuer, subject)
+
 	return asConflict(err)
 }
 
@@ -56,6 +60,7 @@ func (r *IdentityRepo) Link(ctx context.Context, userID uuid.UUID, issuer, subje
 // how the provider capitalises it.
 func (r *IdentityRepo) PendingByEmail(ctx context.Context, issuer, email string) (uuid.UUID, error) {
 	var id uuid.UUID
+
 	err := r.pool.QueryRow(ctx,
 		`SELECT user_id FROM pending_identities
 		 WHERE issuer = $1 AND lower(expected_email) = lower($2) AND expires_at > now()`,
@@ -63,9 +68,11 @@ func (r *IdentityRepo) PendingByEmail(ctx context.Context, issuer, email string)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, app.ErrNotFound
 	}
+
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, fmt.Errorf("postgres: pending identity by email: %w", err)
 	}
+
 	return id, nil
 }
 
@@ -73,13 +80,20 @@ func (r *IdentityRepo) PendingByEmail(ctx context.Context, issuer, email string)
 // that is already gone is not an error: the call is the tail of a link operation that
 // may legitimately be retried.
 func (r *IdentityRepo) ConsumePending(ctx context.Context, userID uuid.UUID) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM pending_identities WHERE user_id = $1`, userID)
-	return err
+	if _, err := r.pool.Exec(ctx, `DELETE FROM pending_identities WHERE user_id = $1`, userID); err != nil {
+		return fmt.Errorf("postgres: consume pending identity: %w", err)
+	}
+
+	return nil
 }
 
 // Invite writes an invitation in its own transaction; see invite.
 func (r *IdentityRepo) Invite(ctx context.Context, userID uuid.UUID, inv app.Invitation) error {
-	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return invite(ctx, tx, userID, inv) })
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return invite(ctx, tx, userID, inv) }); err != nil {
+		return fmt.Errorf("postgres: invite: %w", err)
+	}
+
+	return nil
 }
 
 // invite writes an invitation, replacing whatever stood in its way:
@@ -104,8 +118,9 @@ func invite(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.Invitation
 		`DELETE FROM pending_identities
 		 WHERE user_id = $1 OR (issuer = $2 AND lower(expected_email) = lower($3))`,
 		userID, inv.Issuer, inv.Email); err != nil {
-		return err
+		return fmt.Errorf("postgres: delete stale invitations: %w", err)
 	}
+
 	tag, err := tx.Exec(ctx,
 		`INSERT INTO pending_identities (user_id, issuer, expected_email, expires_at)
 		 SELECT $1::uuid, $2::text, $3::text, $4::timestamptz
@@ -114,8 +129,10 @@ func invite(ctx context.Context, tx pgx.Tx, userID uuid.UUID, inv app.Invitation
 	if err != nil {
 		return asConflict(err)
 	}
+
 	if tag.RowsAffected() == 0 {
 		return app.ErrAlreadyLinked
 	}
+
 	return nil
 }

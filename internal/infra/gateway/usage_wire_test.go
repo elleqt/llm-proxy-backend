@@ -5,13 +5,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
@@ -20,6 +15,11 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/require"
 )
 
 // usageWireChild marks the fresh test process TestProxiedRequestWritesOneLedgerRow
@@ -38,12 +38,8 @@ const usageWireChild = "LLMPROXY_USAGE_WIRE_CHILD"
 // test's gateway has stopped no record would ever reach this sink.
 func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 	if os.Getenv(usageWireChild) == "" {
-		cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
-		cmd.Env = append(os.Environ(), usageWireChild+"=1")
-		out, err := cmd.CombinedOutput()
-		if err != nil || !strings.Contains(string(out), "--- PASS: "+t.Name()) {
-			t.Fatalf("in a fresh process: %v\n%s", err, out)
-		}
+		rerunInFreshProcess(t)
+
 		return
 	}
 
@@ -56,20 +52,16 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Role: identity.RoleUser, Status: identity.StatusActive, Policy: mustPolicy("fakevendor:*"),
 		PolicySource: identity.PolicyLocal, CreatedAt: time.Now().UTC(),
 	}
-	if err := users.Create(ctx, alice); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
-	tok, secret, err := credentials.Generate(alice.ID, "laptop")
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	if err := tokens.Create(ctx, tok); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
+	require.NoError(t, users.Create(ctx, alice), "create user")
 
-	m := metrics.New(prometheus.NewRegistry())
-	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, m, wallClock{}, discardLog{})
-	w := startOnTheWireWith(t, &faketest.Vendor{
+	tok, secret, err := credentials.Generate(alice.ID, "laptop")
+	require.NoError(t, err, "generate token")
+
+	require.NoError(t, tokens.Create(ctx, tok), "create token")
+
+	meter := metrics.New(prometheus.NewRegistry())
+	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
+	wire := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +
 			`"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`),
@@ -79,20 +71,9 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Resolver:    app.NewTokenResolver(users, tokens),
 	})
 
-	if resp, body := w.postMessages(t, secret, false); resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", resp.StatusCode, body)
-	}
+	status, _, body := wire.postMessages(t, secret, false)
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
 
-	rows := func(userID, tokenID uuid.UUID) int {
-		t.Helper()
-		flushed(t, sink)
-		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE user_id = $1 OR token_id = $2`,
-			userID, tokenID).Scan(&n); err != nil {
-			t.Fatalf("count: %v", err)
-		}
-		return n
-	}
 	// Upstream publishes usage records asynchronously, through one queue
 	// delivered in order (usage/manager.go). So once a later request's row is
 	// written, every record the first request published has reached the sink
@@ -102,27 +83,19 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Role: identity.RoleUser, Status: identity.StatusActive, Policy: mustPolicy("fakevendor:*"),
 		PolicySource: identity.PolicyLocal, CreatedAt: time.Now().UTC(),
 	}
-	if err := users.Create(ctx, later); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
+	require.NoError(t, users.Create(ctx, later), "create user")
+
 	laterTok, laterSecret, err := credentials.Generate(later.ID, "desktop")
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-	if err := tokens.Create(ctx, laterTok); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
-	if resp, body := w.postMessages(t, laterSecret, false); resp.StatusCode != http.StatusOK {
-		t.Fatalf("later POST /v1/messages = %d (%s), want 200", resp.StatusCode, body)
-	}
-	for deadline := time.Now().Add(10 * time.Second); rows(later.ID, laterTok.ID) == 0; time.Sleep(20 * time.Millisecond) {
-		if time.Now().After(deadline) {
-			t.Fatal("no ledger row for the later request")
-		}
-	}
-	if n := rows(alice.ID, tok.ID); n != 1 {
-		t.Fatalf("ledger holds %d rows for the request, want exactly 1", n)
-	}
+	require.NoError(t, err, "generate token")
+
+	require.NoError(t, tokens.Create(ctx, laterTok), "create token")
+
+	status, _, body = wire.postMessages(t, laterSecret, false)
+	require.Equal(t, http.StatusOK, status, "later POST /v1/messages (%s)", body)
+
+	awaitLedgerRow(t, pool, sink, later.ID, laterTok.ID)
+
+	require.Equal(t, 1, ledgerRows(t, pool, sink, alice.ID, tok.ID), "ledger rows for the request")
 
 	var (
 		userID, tokenID        *uuid.UUID
@@ -130,29 +103,67 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		total                  int64
 		failed                 bool
 	)
-	if err := pool.QueryRow(ctx, `SELECT user_id, token_id, provider, model, alias, tokens_total, failed
-		FROM usage_events WHERE user_id = $1`, alice.ID).Scan(&userID, &tokenID, &provider, &model, &alias, &total, &failed); err != nil {
-		t.Fatalf("read row: %v", err)
-	}
-	if userID == nil || *userID != alice.ID || tokenID == nil || *tokenID != tok.ID {
-		t.Fatalf("row attributed to user %v token %v, want %s / %s", userID, tokenID, alice.ID, tok.ID)
-	}
+
+	err = pool.QueryRow(ctx, `SELECT user_id, token_id, provider, model, alias, tokens_total, failed
+		FROM usage_events WHERE user_id = $1`, alice.ID).Scan(&userID, &tokenID, &provider, &model, &alias, &total, &failed)
+	require.NoError(t, err, "read row")
+
+	require.NotNil(t, userID, "row's user")
+	require.Equal(t, alice.ID, *userID, "row's user")
+	require.NotNil(t, tokenID, "row's token")
+	require.Equal(t, tok.ID, *tokenID, "row's token")
 	// The vendor is the openai-compatibility entry "fakevendor": upstream keys it
 	// openai-compatible-fakevendor, policies name it fakevendor.
-	if provider != "fakevendor" || model != w.model || alias != w.alias || total != 7 || failed {
-		t.Fatalf("row provider=%q model=%q alias=%q tokens_total=%d failed=%t; want fakevendor, %q, %q, the vendor's 7 tokens and success",
-			provider, model, alias, total, failed, w.model, w.alias)
-	}
+	require.Equal(t, "fakevendor", provider, "row provider")
+	require.Equal(t, wire.model, model, "row model")
+	require.Equal(t, wire.alias, alias, "row alias")
+	require.Equal(t, int64(7), total, "row tokens_total, want the vendor's 7 tokens")
+	require.False(t, failed, "row failed")
 
 	stamped, err := tokens.ByID(ctx, tok.ID)
-	if err != nil {
-		t.Fatalf("token: %v", err)
-	}
-	if stamped.LastUsedAt == nil {
-		t.Fatal("the token's last use was not stamped")
-	}
-	body := scrape(t, m)
-	if !strings.Contains(body, `user="alice@example.com"} 1`) {
-		t.Fatalf("no requests_total series for alice:\n%s", body)
+	require.NoError(t, err, "token")
+	require.NotNil(t, stamped.LastUsedAt, "the token's last use was not stamped")
+
+	require.Contains(t, scrape(t, meter), `user="alice@example.com"} 1`, "no requests_total series for alice")
+}
+
+// rerunInFreshProcess runs the calling test alone in a fresh test process,
+// with usageWireChild set, and fails unless it passes there.
+func rerunInFreshProcess(t *testing.T) {
+	t.Helper()
+
+	cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+
+	cmd.Env = append(os.Environ(), usageWireChild+"=1")
+
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "in a fresh process:\n%s", out)
+	require.Contains(t, string(out), "--- PASS: "+t.Name(), "in a fresh process")
+}
+
+// ledgerRows waits until sink has processed every record handed to it, then
+// counts the ledger rows attributed to userID or tokenID.
+func ledgerRows(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, tokenID uuid.UUID) int {
+	t.Helper()
+	flushed(t, sink)
+
+	var count int
+
+	err := pool.QueryRow(t.Context(), `SELECT count(*) FROM usage_events WHERE user_id = $1 OR token_id = $2`,
+		userID, tokenID).Scan(&count)
+	require.NoError(t, err, "count")
+
+	return count
+}
+
+// awaitLedgerRow waits up to 10s for a ledger row attributed to userID or
+// tokenID to appear.
+func awaitLedgerRow(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, tokenID uuid.UUID) {
+	t.Helper()
+
+	for deadline := time.Now().Add(10 * time.Second); ledgerRows(t, pool, sink, userID, tokenID) == 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			require.Fail(t, "no ledger row for the later request")
+		}
 	}
 }

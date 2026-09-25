@@ -38,6 +38,7 @@ func withCaller(ctx context.Context, c caller) context.Context {
 // callerFrom returns the validated caller on ctx, if there is one.
 func callerFrom(ctx context.Context) (caller, bool) {
 	c, ok := ctx.Value(callerCtxKey{}).(caller)
+
 	return c, ok
 }
 
@@ -54,12 +55,13 @@ type cookies struct {
 // off). SameSite=Lax is what makes the cabinet's state-changing endpoints safe from a
 // cross-site form post while still letting a person follow a link into the
 // application and arrive signed in. Max-Age is what is left of the session's window.
-func (c cookies) setSession(w http.ResponseWriter, s app.Session) {
+func (c cookies) setSession(w http.ResponseWriter, sess app.Session) {
+	//nolint:gosec // HttpOnly and Lax are set; Secure is the deployment's CookieSecure, off only for plain-http development.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
-		Value:    s.ID,
+		Value:    sess.ID,
 		Path:     "/",
-		MaxAge:   max(1, int(s.ExpiresAt.Sub(c.clock.Now())/time.Second)),
+		MaxAge:   max(1, int(sess.ExpiresAt.Sub(c.clock.Now())/time.Second)),
 		HttpOnly: true,
 		Secure:   c.secure,
 		SameSite: http.SameSiteLaxMode,
@@ -69,6 +71,7 @@ func (c cookies) setSession(w http.ResponseWriter, s app.Session) {
 // clearSession retires the cookie on sign-out. The attributes have to match the ones
 // it was set with or the browser keeps the original.
 func (c cookies) clearSession(w http.ResponseWriter) {
+	//nolint:gosec // Mirrors setSession's attributes; Secure is the deployment's CookieSecure, off only for plain-http development.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
 		Value:    "",
@@ -88,22 +91,24 @@ func (c cookies) clearSession(w http.ResponseWriter) {
 // signed in and not. Which sessions are valid, and whether one is restricted, is
 // app.AuthService.ResolveSession's to decide.
 func loadSession(auth *app.AuthService, log app.Logger, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(sessionCookieName)
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		cookie, err := req.Cookie(sessionCookieName)
 		if err != nil || cookie.Value == "" {
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, req)
+
 			return
 		}
-		s, user, err := auth.ResolveSession(r.Context(), cookie.Value)
+
+		sess, user, err := auth.ResolveSession(req.Context(), cookie.Value)
 		switch {
 		case errors.Is(err, app.ErrNotFound):
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, req)
 		case err != nil:
 			// A failure of the lookup, not a verdict on the request: it must
 			// not be mistaken for one.
-			internalError(w, r, log, err)
+			internalError(rw, req, log, err)
 		default:
-			next.ServeHTTP(w, r.WithContext(withCaller(r.Context(), caller{session: s, user: user})))
+			next.ServeHTTP(rw, req.WithContext(withCaller(req.Context(), caller{session: sess, user: user})))
 		}
 	})
 }
@@ -111,12 +116,14 @@ func loadSession(auth *app.AuthService, log app.Logger, next http.Handler) http.
 // requireSession admits any live session, restricted or not. It guards only the
 // routes a person holding a temporary password still has to reach (restrictedAllowed).
 func requireSession(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := callerFrom(r.Context()); !ok {
-			writeError(w, http.StatusUnauthorized, codeUnauthenticated, "no valid session")
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if _, ok := callerFrom(req.Context()); !ok {
+			writeError(rw, http.StatusUnauthorized, codeUnauthenticated, "no valid session")
+
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	})
 }
 
@@ -128,12 +135,14 @@ func requireSession(next http.Handler) http.Handler {
 // the password is changed. 403 and not 401 because the caller is authenticated; there
 // is nothing to sign in again for.
 func requireFullSession(next http.Handler) http.Handler {
-	return requireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c, _ := callerFrom(r.Context()); c.session.Restricted {
-			writeError(w, http.StatusForbidden, codePasswordChangeRequired, "the temporary password must be changed first")
+	return requireSession(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if c, _ := callerFrom(req.Context()); c.session.Restricted {
+			writeError(rw, http.StatusForbidden, codePasswordChangeRequired, "the temporary password must be changed first")
+
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	}))
 }
 
@@ -143,12 +152,14 @@ func requireFullSession(next http.Handler) http.Handler {
 // application services check the role again; this guard is what keeps a
 // non-administrator from learning which admin routes and ids exist.
 func requireAdmin(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if c, _ := callerFrom(r.Context()); c.user.Role != identity.RoleAdmin {
-			writeError(w, http.StatusNotFound, codeNotFound, "no such endpoint")
+	return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if c, _ := callerFrom(req.Context()); c.user.Role != identity.RoleAdmin {
+			writeError(rw, http.StatusNotFound, codeNotFound, "no such endpoint")
+
 			return
 		}
-		next.ServeHTTP(w, r)
+
+		next.ServeHTTP(rw, req)
 	})
 }
 

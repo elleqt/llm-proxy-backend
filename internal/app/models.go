@@ -20,33 +20,41 @@ func NewModelsService(catalog ModelCatalog) *ModelsService { return &ModelsServi
 // provider serving it. Providers come in name order with their models sorted, and
 // a provider with no admitted model is left out.
 //
-// The policy is the one u carries: the session middleware loads the user on every
+// The policy is the one user carries: the session middleware loads the user on every
 // request, as the gate loads a key's owner, so an administrator's edit shows on
 // the next call.
-func (s *ModelsService) Allowed(u identity.User) []CatalogProvider {
+func (s *ModelsService) Allowed(user identity.User) []CatalogProvider {
 	out := []CatalogProvider{}
-	if len(u.Policy) == 0 {
+	if len(user.Policy) == 0 {
 		return out
 	}
+
 	admitted := map[string]bool{}
+
 	for name, models := range s.catalog.Models() {
 		var allowed []string
+
 		for _, model := range models {
 			ok, seen := admitted[model]
 			if !seen {
-				ok = u.Policy.Admits(s.catalog, model)
+				ok = user.Policy.Admits(s.catalog, model)
 				admitted[model] = ok
 			}
+
 			if ok {
 				allowed = append(allowed, model)
 			}
 		}
+
 		if len(allowed) == 0 {
 			continue
 		}
+
 		slices.Sort(allowed)
 		out = append(out, CatalogProvider{Name: name, Models: allowed})
 	}
+
 	slices.SortFunc(out, func(a, b CatalogProvider) int { return strings.Compare(a.Name, b.Name) })
+
 	return out
 }

@@ -30,6 +30,20 @@ const MaxBody = 64 << 20
 // into different prices, so validators stored by an older build are not sent.
 const parserVersion = 2
 
+// The sentinels below carry the fixed part of each error message; where a call
+// site appends detail, the full text still reads as one sentence. The messages
+// are shown to operators verbatim, so they keep no package prefix.
+var (
+	errInvalidURL       = errors.New("the catalog URL is not valid")
+	errFetch            = errors.New("the catalog could not be fetched")
+	errRead             = errors.New("the catalog could not be read")
+	errUnconditional304 = errors.New("the catalog answered 304 to an unconditional request")
+	errStatus           = errors.New("the catalog answered")
+	errTooLarge         = fmt.Errorf("the catalog is larger than %d MiB", MaxBody>>20)
+	errNotObject        = errors.New("the catalog is not a JSON object")
+	errSection          = errors.New("the catalog's")
+)
+
 // sections maps the catalog's provider sections onto our provider names, in
 // precedence order: a model an earlier section prices is not taken from a later
 // one. openai-codex is what the chatgpt accounts serve; openai only fills in the
@@ -58,6 +72,7 @@ func New(url, version string) *Source {
 			version = bi.Main.Version
 		}
 	}
+
 	return &Source{
 		url:       url,
 		userAgent: "llm-proxy/" + cmp.Or(version, "unknown") + " (price catalog)",
@@ -69,57 +84,69 @@ func New(url, version string) *Source {
 // which may carry credentials, is not.
 func (s *Source) Fingerprint() string {
 	sum := sha256.Sum256(fmt.Appendf(nil, "%d %s", parserVersion, s.url))
+
 	return hex.EncodeToString(sum[:])
 }
 
 // Fetch downloads the catalog unless it has not changed since the validators.
 func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.CatalogFetch, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, http.NoBody)
 	if err != nil {
-		return app.CatalogFetch{}, errors.New("the catalog URL is not valid")
+		return app.CatalogFetch{}, errInvalidURL
 	}
+
 	req.Header.Set("User-Agent", s.userAgent)
 	req.Header.Set("Accept", "application/json")
+
 	if since.ETag != "" {
 		req.Header.Set("If-None-Match", since.ETag)
 	}
+
 	if since.LastModified != "" {
 		req.Header.Set("If-Modified-Since", since.LastModified)
 	}
+
 	resp, err := s.client.Do(req)
 	if err != nil {
 		// *url.Error names the URL; the cause alone is what went wrong.
-		var ue *url.Error
-		if errors.As(err, &ue) {
+		if ue, ok := errors.AsType[*url.Error](err); ok {
 			err = ue.Err
 		}
-		return app.CatalogFetch{}, fmt.Errorf("the catalog could not be fetched: %v", err)
+
+		//nolint:errorlint // Transport errors are reported as text, not part of the fetch's error contract.
+		return app.CatalogFetch{}, fmt.Errorf("%w: %v", errFetch, err)
 	}
+
 	defer func() { _ = resp.Body.Close() }()
 
 	// The status code alone: the reason phrase is whatever the server sent.
 	switch {
 	case resp.StatusCode == http.StatusNotModified && since == (app.CatalogValidators{}):
 		// Nothing to be unchanged from: a cache in the way answered for someone else.
-		return app.CatalogFetch{}, errors.New("the catalog answered 304 to an unconditional request")
+		return app.CatalogFetch{}, errUnconditional304
 	case resp.StatusCode == http.StatusNotModified:
 		return app.CatalogFetch{Unchanged: true}, nil
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return app.CatalogFetch{}, fmt.Errorf("the catalog answered %d", resp.StatusCode)
+		return app.CatalogFetch{}, fmt.Errorf("%w %d", errStatus, resp.StatusCode)
 	case resp.ContentLength > MaxBody:
-		return app.CatalogFetch{}, fmt.Errorf("the catalog is larger than %d MiB", MaxBody>>20)
+		return app.CatalogFetch{}, errTooLarge
 	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxBody+1))
 	if err != nil {
-		return app.CatalogFetch{}, fmt.Errorf("the catalog could not be read: %v", err)
+		//nolint:errorlint // Transport errors are reported as text, not part of the fetch's error contract.
+		return app.CatalogFetch{}, fmt.Errorf("%w: %v", errRead, err)
 	}
+
 	if len(body) > MaxBody {
-		return app.CatalogFetch{}, fmt.Errorf("the catalog is larger than %d MiB", MaxBody>>20)
+		return app.CatalogFetch{}, errTooLarge
 	}
+
 	prices, err := Parse(body)
 	if err != nil {
 		return app.CatalogFetch{}, err
 	}
+
 	return app.CatalogFetch{
 		Prices:     prices,
 		Validators: app.CatalogValidators{ETag: resp.Header.Get("ETag"), LastModified: resp.Header.Get("Last-Modified")},
@@ -145,43 +172,55 @@ type entry struct {
 func Parse(doc []byte) ([]app.ModelPrice, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(doc, &top); err != nil {
-		return nil, errors.New("the catalog is not a JSON object")
+		return nil, errNotObject
 	}
+
 	type key struct{ provider, model string }
+
 	seen := make(map[key]bool)
+
 	var out []app.ModelPrice
+
 	for _, sec := range sections {
 		raw, ok := top[sec.section]
 		if !ok {
 			continue
 		}
+
 		var models map[string]json.RawMessage
 		if err := json.Unmarshal(raw, &models); err != nil {
-			return nil, fmt.Errorf("the catalog's %s section is not a JSON object", sec.section)
+			return nil, fmt.Errorf("%w %s section is not a JSON object", errSection, sec.section)
 		}
+
 		for model, rawEntry := range models {
-			k := key{sec.provider, model}
-			if seen[k] || !modelID(model) {
+			entryKey := key{sec.provider, model}
+			if seen[entryKey] || !modelID(model) {
 				continue
 			}
+
 			var e entry
 			if json.Unmarshal(rawEntry, &e) != nil || e.Cost == nil || e.Cost.Input == nil || e.Cost.Output == nil {
 				continue
 			}
-			c := e.Cost
-			if !rate(*c.Input) || !rate(*c.Output) || !rate(c.CacheRead) || !rate(c.CacheWrite) {
+
+			cost := e.Cost
+			if !rate(*cost.Input) || !rate(*cost.Output) || !rate(cost.CacheRead) || !rate(cost.CacheWrite) {
 				continue
 			}
-			seen[k] = true
+
+			seen[entryKey] = true
+
 			out = append(out, app.ModelPrice{
 				Provider: sec.provider, Model: model,
-				Input: *c.Input, Output: *c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite,
+				Input: *cost.Input, Output: *cost.Output, CacheRead: cost.CacheRead, CacheWrite: cost.CacheWrite,
 			})
 		}
 	}
+
 	slices.SortFunc(out, func(a, b app.ModelPrice) int {
 		return cmp.Or(strings.Compare(a.Provider, b.Provider), strings.Compare(a.Model, b.Model))
 	})
+
 	return out, nil
 }
 

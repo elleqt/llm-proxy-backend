@@ -8,10 +8,9 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 )
 
 // policyGate is the proxied listener's default-deny guard, first in the
@@ -48,168 +47,258 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe GateObserver,
 	if observe == nil {
 		observe = noGateObserver{}
 	}
+
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return func(c *gin.Context) {
-		r := classify(c.Request.Method, c.FullPath())
-		if r.kind == routeDenied {
+
+	return func(ginCtx *gin.Context) {
+		matched := classify(ginCtx.Request.Method, ginCtx.FullPath())
+		if matched.kind == routeDenied {
 			observe.Denied("", "", DenyRouteNotAllowed)
-			c.AbortWithStatus(http.StatusNotFound)
+			ginCtx.AbortWithStatus(http.StatusNotFound)
+
 			return
 		}
 		// No encoded body leaves the gate (encoding.go): it is decoded below
 		// on the routes whose handler would decode it, and refused on all
 		// others before anything else is done with the request.
-		encoding, encoded := contentEncoding(c.Request)
-		decodes := r.kind == routeModel && r.decodes != nil && r.decodes(c)
+		encoding, encoded := contentEncoding(ginCtx.Request)
+
+		decodes := matched.kind == routeModel && matched.decodes != nil && matched.decodes(ginCtx)
 		if encoded && !decodes {
-			abortWithError(c, http.StatusUnsupportedMediaType, "invalid_request_error", "unsupported content encoding")
-			return
-		}
-		if r.kind != routeModel {
-			// Public and listing routes read no body.
-			setBody(c.Request, nil)
-			c.Request.Body = http.NoBody
-		}
-		if r.kind == routePublic {
-			c.Next()
+			abortWithError(ginCtx, http.StatusUnsupportedMediaType, "invalid_request_error", "unsupported content encoding")
+
 			return
 		}
 
-		ctx := c.Request.Context()
-		principal, policy, source, authErr := authenticate(ctx, resolver, c.Request)
-		if authErr != nil {
-			switch authErr.Code {
-			case sdkaccess.AuthErrorCodeNoCredentials:
-				observe.AuthFailed(AuthMissing)
-			case sdkaccess.AuthErrorCodeInvalidCredential:
-				observe.AuthFailed(AuthInvalid)
-			}
-			if authErr.HTTPStatusCode() >= http.StatusInternalServerError {
-				log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: authentication failed", slog.Any("err", authErr))
-			}
-			c.AbortWithStatusJSON(authErr.HTTPStatusCode(), gin.H{"error": authErr.Message})
+		if matched.kind != routeModel {
+			// Public and listing routes read no body.
+			setBody(ginCtx.Request, nil)
+			ginCtx.Request.Body = http.NoBody
+		}
+
+		if matched.kind == routePublic {
+			ginCtx.Next()
+
 			return
 		}
-		c.Request = c.Request.WithContext(withPrincipal(ctx, principal, source))
+
+		ctx := ginCtx.Request.Context()
+
+		principal, policy, source, authErr := authenticate(ctx, resolver, ginCtx.Request)
+		if authErr != nil {
+			refuseAuthentication(ginCtx, authErr, observe, log)
+
+			return
+		}
+
+		ginCtx.Request = ginCtx.Request.WithContext(withPrincipal(ctx, principal, source))
 
 		var requested string
-		if r.kind == routeModel {
-			limit := r.bodyLimitFor(c)
-			length := bodyLength(c.Request)
-			if length > limit {
-				abortWithError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
-				return
-			}
-			if c.Request.Body == nil {
-				c.Request.Body = http.NoBody
-			}
-			body := &limitedBody{ReadCloser: http.MaxBytesReader(c.Writer, c.Request.Body, limit)}
-			var deadline *bodyDeadline
-			if length != 0 {
-				// Without a body the server already reads the connection
-				// in the background, where a deadline would cut the reply.
-				var err error
-				if deadline, err = setBodyReadDeadline(c); err != nil {
-					log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: request body deadline could not be set",
-						slog.Any("err", err))
-					abortWithError(c, http.StatusInternalServerError, "server_error", "request body cannot be received")
-					return
-				}
-			}
-			// Decoding is charged a whole maxJSONBody on top of the body.
-			most := limit
-			if encoded {
-				most += maxJSONBody
-			}
-			held := newBodyCharge(principal.UserID, most)
+
+		if matched.kind == routeModel {
+			limit := matched.bodyLimitFor(ginCtx)
+
+			held := newBodyCharge(principal.UserID, bodyChargeCeiling(limit, encoded))
 			// Held until the handler is done with the body, even if it
 			// panics.
 			defer held.release()
-			raw, err := bufferBody(ctx, held, body, length, limit)
-			if deadline.stop() {
-				err = errors.Join(err, os.ErrDeadlineExceeded)
-			}
-			if err == nil && encoded {
-				raw, err = decodeRequestBody(ctx, raw, encoding, held)
-			}
-			switch {
-			case errors.Is(err, errBodyShare):
-				c.Header("Retry-After", "1")
-				abortWithError(c, http.StatusTooManyRequests, "rate_limit_error", "too many large requests in flight for this account; retry")
-				return
-			case errors.Is(err, errBodyBusy):
-				abortWithError(c, http.StatusServiceUnavailable, "server_error", "too many request bodies in flight; retry")
-				return
-			case body.tooLarge || errors.Is(err, errBodyOverRead) || errors.Is(err, errDecodedTooLarge):
-				abortWithError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
-				return
-			case bodyTimedOut(err):
-				// The rest of the body may still arrive: the connection
-				// cannot carry another request.
-				c.Header("Connection", "close")
-				abortWithError(c, http.StatusRequestTimeout, "invalid_request_error", "request body not received in time")
-				return
-			case errors.Is(err, errUnreadableBody):
-				abortWithError(c, http.StatusBadRequest, "invalid_request_error", "request body cannot be decoded")
-				return
-			case err != nil:
-				abortWithError(c, http.StatusBadRequest, "invalid_request_error", "request body cannot be read")
+
+			var ok bool
+			if requested, ok = requestedModel(ginCtx, matched, held, limit, encoding, encoded, log); !ok {
 				return
 			}
-			if encoded {
-				setBody(c.Request, raw)
-			} else {
-				c.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			}
-			model, ok := r.model(c, raw)
-			if !ok {
-				abortWithError(c, http.StatusBadRequest, "invalid_request_error", "request must name exactly one model")
-				return
-			}
-			requested = model
 		}
-		if r.kind == routeListing {
-			serveListing(c, r.listing, func(model string) bool { return policy.Admits(catalog, model) }, log)
+
+		if matched.kind == routeListing {
+			serveListing(ginCtx, matched.listing, func(model string) bool { return policy.Admits(catalog, model) }, log)
+
 			return
 		}
+
 		model, providers := access.Routed(catalog, requested)
 		if !policy.Covers(model, providers) {
 			reason := DenyModelNotAllowed
 			if len(providers) == 0 {
 				reason = DenyUnknownModel
 			}
+
 			observe.Denied(principal.Owner, model, reason)
-			abortWithError(c, http.StatusForbidden, "permission_error", "model "+requested+" is not allowed")
+			abortWithError(ginCtx, http.StatusForbidden, "permission_error", "model "+requested+" is not allowed")
+
 			return
 		}
-		c.Next()
+
+		ginCtx.Next()
 	}
+}
+
+// refuseAuthentication answers a request authenticate refused, with
+// upstream's status and body, telling observe of a missing or invalid
+// credential and log of a failure on the gateway's side.
+func refuseAuthentication(ginCtx *gin.Context, authErr *sdkaccess.AuthError, observe GateObserver, log *slog.Logger) {
+	switch authErr.Code {
+	case sdkaccess.AuthErrorCodeNoCredentials:
+		observe.AuthFailed(AuthMissing)
+	case sdkaccess.AuthErrorCodeInvalidCredential:
+		observe.AuthFailed(AuthInvalid)
+	case sdkaccess.AuthErrorCodeNotHandled, sdkaccess.AuthErrorCodeInternal:
+		// Not a credential the client got wrong: nothing to observe.
+	}
+
+	if authErr.HTTPStatusCode() >= http.StatusInternalServerError {
+		log.LogAttrs(ginCtx.Request.Context(), slog.LevelError, "policy gate: authentication failed", slog.Any("err", authErr))
+	}
+
+	ginCtx.AbortWithStatusJSON(authErr.HTTPStatusCode(), gin.H{"error": authErr.Message})
+}
+
+// bodyChargeCeiling is the most a model route's body may be charged: its
+// limit, and decoding an encoded one a whole maxJSONBody on top of it.
+func bodyChargeCeiling(limit int64, encoded bool) int64 {
+	if encoded {
+		return limit + maxJSONBody
+	}
+
+	return limit
+}
+
+// requestedModel receives a model route's body — within limit, in time and
+// under held, decoded from encoding when encoded — puts it back on the
+// request for the handler, and returns the one model it names. It answers
+// the request itself, and reports false, when the body or its model is
+// refused.
+func requestedModel(ginCtx *gin.Context, matched route, held *bodyCharge, limit int64,
+	encoding string, encoded bool, log *slog.Logger,
+) (string, bool) {
+	raw, ok := receiveBody(ginCtx, held, limit, encoding, encoded, log)
+	if !ok {
+		return "", false
+	}
+
+	model, ok := matched.model(ginCtx, raw)
+	if !ok {
+		abortWithError(ginCtx, http.StatusBadRequest, "invalid_request_error", "request must name exactly one model")
+
+		return "", false
+	}
+
+	return model, true
+}
+
+// receiveBody reads the request's body whole, as requestedModel describes,
+// and leaves it identity-encoded on the request. It answers the request
+// itself, and reports false, when the body is refused.
+func receiveBody(ginCtx *gin.Context, held *bodyCharge, limit int64,
+	encoding string, encoded bool, log *slog.Logger,
+) ([]byte, bool) {
+	ctx := ginCtx.Request.Context()
+
+	length := bodyLength(ginCtx.Request)
+	if length > limit {
+		abortWithError(ginCtx, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
+
+		return nil, false
+	}
+
+	if ginCtx.Request.Body == nil {
+		ginCtx.Request.Body = http.NoBody
+	}
+
+	body := &limitedBody{ReadCloser: http.MaxBytesReader(ginCtx.Writer, ginCtx.Request.Body, limit)}
+
+	var deadline *bodyDeadline
+
+	if length != 0 {
+		// Without a body the server already reads the connection
+		// in the background, where a deadline would cut the reply.
+		var err error
+		if deadline, err = setBodyReadDeadline(ginCtx); err != nil {
+			log.LogAttrs(ctx, slog.LevelError, "policy gate: request body deadline could not be set",
+				slog.Any("err", err))
+			abortWithError(ginCtx, http.StatusInternalServerError, "server_error", "request body cannot be received")
+
+			return nil, false
+		}
+	}
+
+	raw, err := bufferBody(ctx, held, body, length, limit)
+	if deadline.stop() {
+		err = errors.Join(err, os.ErrDeadlineExceeded)
+	}
+
+	if err == nil && encoded {
+		raw, err = decodeRequestBody(ctx, raw, encoding, held)
+	}
+
+	if abortBodyError(ginCtx, body, err) {
+		return nil, false
+	}
+
+	if encoded {
+		setBody(ginCtx.Request, raw)
+	} else {
+		ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
+	}
+
+	return raw, true
+}
+
+// abortBodyError answers a request whose body could not be received or
+// decoded, by what went wrong, and reports whether it did; a nil err answers
+// nothing.
+func abortBodyError(ginCtx *gin.Context, body *limitedBody, err error) bool {
+	switch {
+	case errors.Is(err, errBodyShare):
+		ginCtx.Header("Retry-After", "1")
+		abortWithError(ginCtx, http.StatusTooManyRequests, "rate_limit_error", "too many large requests in flight for this account; retry")
+	case errors.Is(err, errBodyBusy):
+		abortWithError(ginCtx, http.StatusServiceUnavailable, "server_error", "too many request bodies in flight; retry")
+	case body.tooLarge || errors.Is(err, errBodyOverRead) || errors.Is(err, errDecodedTooLarge):
+		abortWithError(ginCtx, http.StatusRequestEntityTooLarge, "invalid_request_error", "request body too large")
+	case bodyTimedOut(err):
+		// The rest of the body may still arrive: the connection
+		// cannot carry another request.
+		ginCtx.Header("Connection", "close")
+		abortWithError(ginCtx, http.StatusRequestTimeout, "invalid_request_error", "request body not received in time")
+	case errors.Is(err, errUnreadableBody):
+		abortWithError(ginCtx, http.StatusBadRequest, "invalid_request_error", "request body cannot be decoded")
+	case err != nil:
+		abortWithError(ginCtx, http.StatusBadRequest, "invalid_request_error", "request body cannot be read")
+	default:
+		return false
+	}
+
+	return true
 }
 
 // serveListing runs the handler with its response held back, and sends what
 // list keeps of it. A list that is too large or not of the expected shape is
 // not sent: 502.
-func serveListing(c *gin.Context, list listing, admitted func(string) bool, log *slog.Logger) {
-	held := &bufferedWriter{ResponseWriter: c.Writer, status: http.StatusOK, limit: maxListingBody}
-	c.Writer = held
-	c.Next()
-	c.Writer = held.ResponseWriter
+func serveListing(ginCtx *gin.Context, list listing, admitted func(string) bool, log *slog.Logger) {
+	held := &bufferedWriter{ResponseWriter: ginCtx.Writer, status: http.StatusOK, limit: maxListingBody}
+	ginCtx.Writer = held
+	ginCtx.Next()
+	ginCtx.Writer = held.ResponseWriter
 
-	status, body, err := list(c, held.status, held.body.Bytes(), admitted)
+	status, body, err := list(ginCtx, held.status, held.body.Bytes(), admitted)
 	if held.overflow {
 		err = errListingTooLarge
 	}
-	c.Writer.Header().Del("Content-Length")
+
+	ginCtx.Writer.Header().Del("Content-Length")
+
 	if err != nil {
-		log.LogAttrs(c.Request.Context(), slog.LevelError, "policy gate: filtering a listing failed",
-			slog.String("route", c.FullPath()), slog.Any("err", err))
-		abortWithError(c, http.StatusBadGateway, "server_error", "model list unavailable")
+		log.LogAttrs(ginCtx.Request.Context(), slog.LevelError, "policy gate: filtering a listing failed",
+			slog.String("route", ginCtx.FullPath()), slog.Any("err", err))
+		abortWithError(ginCtx, http.StatusBadGateway, "server_error", "model list unavailable")
+
 		return
 	}
-	c.Writer.WriteHeader(status)
-	_, _ = c.Writer.Write(body)
+
+	ginCtx.Writer.WriteHeader(status)
+	_, _ = ginCtx.Writer.Write(body)
 }
 
 // limitedBody is a request body read through http.MaxBytesReader that
@@ -217,16 +306,18 @@ func serveListing(c *gin.Context, list listing, admitted func(string) bool, log 
 // reader hit it.
 type limitedBody struct {
 	io.ReadCloser
+
 	tooLarge bool
 }
 
 func (b *limitedBody) Read(p []byte) (int, error) {
-	n, err := b.ReadCloser.Read(p)
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
+	count, err := b.ReadCloser.Read(p)
+
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		b.tooLarge = true
 	}
-	return n, err
+
+	return count, err //nolint:wrapcheck // io.Reader contract: io.EOF must reach the caller unwrapped.
 }
 
 // abortWithError answers in the error shape upstream's handlers use.

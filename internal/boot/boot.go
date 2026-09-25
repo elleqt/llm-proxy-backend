@@ -20,10 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/prometheus/client_golang/prometheus"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -33,6 +29,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
 // Options is what the process takes from outside its environment variables.
@@ -90,8 +89,9 @@ func Run(ctx context.Context, opts Options) error {
 	// the configuration.
 	cfg, err := config.Load()
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // config errors name their package, and CI pins the startup message's text
 	}
+
 	version := resolveVersion(opts.Version)
 	h := newLogHandler(opts.Output, cfg.LogFormat, version)
 	logger := slog.New(h.WithAttrs([]slog.Attr{slog.String("component", componentOwn)}))
@@ -101,18 +101,21 @@ func Run(ctx context.Context, opts Options) error {
 	if err := postgres.Migrate(ctx, cfg.DatabaseURL); err != nil {
 		return fmt.Errorf("database migration: %w", err)
 	}
+
 	pool, err := postgres.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
 	defer pool.Close()
+
 	logger.Info("database migrated and connected")
 
-	p, err := build(ctx, cfg, opts, version, pool, logger)
+	proc, err := build(ctx, cfg, opts, version, pool, logger)
 	if err != nil {
 		return err
 	}
-	return p.serve(ctx, stop)
+
+	return proc.serve(ctx, stop)
 }
 
 // process is the built service, ready to serve.
@@ -136,7 +139,8 @@ type process struct {
 // build wires the services. version is the resolved build version, and logger
 // the process's own (component llmproxy).
 func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
-	logger *slog.Logger) (*process, error) {
+	logger *slog.Logger,
+) (*process, error) {
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 	tokens, sessions := postgres.NewTokenRepo(pool), postgres.NewSessionRepo(pool)
 	audit, usage := postgres.NewAuditSink(pool), postgres.NewUsageRepo(pool)
@@ -146,59 +150,49 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 	// the process: sign-in, bootstrap and administrators' resets alike.
 	hasher := app.NewPasswordHasher(cfg.PasswordHashConcurrency, identity.HashPassword, identity.VerifyPassword)
 
-	password, err := app.Bootstrap(ctx, users, passwords, hasher, cfg.BootstrapAdminEmail)
-	if err != nil {
+	if err := bootstrapAdmin(ctx, cfg, opts.Output, users, passwords, hasher, logs); err != nil {
 		return nil, err
-	}
-	if password != "" {
-		printBootstrapPassword(opts.Output, cfg.BootstrapAdminEmail, password)
-		if cfg.Web.Enabled() && !cfg.Web.LocalLogin {
-			logs.Warn("the bootstrap administrator signs in with a password, but LLMPROXY_LOCAL_LOGIN is false: "+
-				"set it to true until the administrator can sign in another way", slog.String("admin", cfg.BootstrapAdminEmail))
-		}
 	}
 
 	bootCfg, err := app.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("boot configuration: %w", err)
 	}
 
 	registry := prometheus.NewRegistry()
 	prices := &app.PriceTable{}
-	var g *gateway.Gateway
+
+	var gw *gateway.Gateway
+
 	meters := metrics.New(registry,
 		metrics.WithClock(clock),
 		metrics.WithVersion(version),
-		// g is set below, before anything is served.
-		metrics.WithKnownModel(func(model string) (string, bool) { return g.Catalog().KnownModel(model) }),
+		// gw is set below, before anything is served.
+		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
+	//nolint:contextcheck // the sink's goroutine lives until Drain, not for a boot context
 	sink := gateway.NewUsageSink(usage, tokens, users, prices, meters, clock, logs)
-	registry.MustRegister(
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: "llmproxy", Name: "usage_dropped_total",
-			Help: "Usage records dropped before reaching the ledger: the sink's queue was full, or the process was stopping.",
-		}, func() float64 { return float64(sink.Dropped()) }),
-		prometheus.NewCounterFunc(prometheus.CounterOpts{
-			Namespace: "llmproxy", Name: "usage_panics_total",
-			Help: "Panics the usage sink recovered from while recording usage.",
-		}, func() float64 { return float64(sink.Panics()) }),
-	)
+
+	registerSinkCounters(registry, sink)
 	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
 	// in force; the catalog's first check runs as serving starts.
 	var catalogSource app.PriceCatalogSource
 	if cfg.PriceCatalog.Enabled() {
 		catalogSource = pricecatalog.New(cfg.PriceCatalog.URL, version)
 	}
+
 	priceList := app.NewPrices(postgres.NewPriceRepo(pool), postgres.NewPriceCatalogRepo(pool), catalogSource,
 		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("prices: %w", err)
 	}
 
 	// The store's base directory and the gateway's auth directory are both
 	// bootCfg.AuthDir.
 	manager, store, cooldown := gateway.NewCoreAuthManager(bootCfg)
-	g, err = gateway.New(gateway.Params{
+
+	//nolint:contextcheck // handlers take each request's context; construction serves nothing yet
+	gw, err = gateway.New(gateway.Params{
 		Config: bootCfg,
 		// Required by upstream, which resolves its log directory from it; no
 		// file is created or read there.
@@ -216,9 +210,9 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("gateway: %w", err)
 	}
 
-	p := &process{
+	proc := &process{
 		log:             logger,
-		gateway:         g,
+		gateway:         gw,
 		apiAddr:         cfg.ListenAddr,
 		catalogUpdates:  cfg.ModelCatalogUpdates,
 		sink:            sink,
@@ -227,33 +221,18 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		metrics:         metricsServer(cfg.MetricsAddr, meters.Handler()),
 	}
 	if !cfg.Web.Enabled() {
-		return p, nil
+		return proc, nil
 	}
 
-	var oidcService *app.OIDCService
 	idents := postgres.NewIdentityRepo(pool)
-	if cfg.OIDC.Enabled() {
-		idp, err := oidc.New(ctx, oidc.Config{
-			Issuer:       cfg.OIDC.Issuer,
-			ClientID:     cfg.OIDC.ClientID,
-			ClientSecret: cfg.OIDC.ClientSecret,
-			RedirectURL:  cfg.OIDC.RedirectURL,
-			GroupsClaim:  cfg.OIDC.GroupsClaim,
-		})
-		if err != nil {
-			return nil, err
-		}
-		oidcService, err = app.NewOIDCService(users, idents, sessions, idp, audit, clock, app.OIDCConfig{
-			RequiredGroup: cfg.OIDC.RequiredGroup,
-			AllowSignUp:   cfg.OIDC.AllowSignUp,
-			DefaultPolicy: cfg.OIDC.DefaultPolicy,
-			GroupPolicy:   cfg.OIDC.GroupPolicy,
-		})
-		if err != nil {
-			return nil, err
-		}
+
+	oidcService, err := newOIDCService(ctx, cfg.OIDC, users, idents, sessions, audit, clock)
+	if err != nil {
+		return nil, err
 	}
+
 	tokenService := app.NewTokenService(users, tokens, audit, clock, logs)
+
 	router, err := webapi.NewRouter(webapi.Deps{
 		Auth: app.NewAuthService(users, passwords,
 			app.NewThrottle(postgres.NewLoginAttemptRepo(pool), signInFailures, signInLockout, clock),
@@ -263,17 +242,17 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		OIDCDisplayName: cfg.OIDC.DisplayName,
 		LocalLogin:      cfg.Web.LocalLogin,
 		Usage:           app.NewUsageService(usage),
-		Models:          app.NewModelsService(g.Catalog()),
+		Models:          app.NewModelsService(gw.Catalog()),
 		AdminUsers: app.NewAdminUsers(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
-			tokenService, hasher, audit, clock, g.Catalog(), app.AdminUsersConfig{
+			tokenService, hasher, audit, clock, gw.Catalog(), app.AdminUsersConfig{
 				OIDCIssuer:             cfg.OIDC.Issuer,
 				GroupMappingConfigured: len(cfg.OIDC.GroupPolicy) > 0,
 			}),
-		Settings: app.NewSettings(settings, g, audit, clock),
+		Settings: app.NewSettings(settings, gw, audit, clock),
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (Providers.Remove).
-		Providers:    app.NewProviders(g, gateway.NewLogin(g), sink, meters, audit, clock, logs),
+		Providers:    app.NewProviders(gw, gateway.NewLogin(gw), sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,
@@ -281,10 +260,85 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		SessionKey:   cfg.Web.SessionKey,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("web API: %w", err)
 	}
-	p.web = webapi.NewServer(cfg.Web.Addr, router)
-	return p, nil
+
+	proc.web = webapi.NewServer(cfg.Web.Addr, router)
+
+	return proc, nil
+}
+
+// registerSinkCounters exposes the usage sink's dropped records and recovered
+// panics as counters on registry.
+func registerSinkCounters(registry *prometheus.Registry, sink *gateway.UsageSink) {
+	registry.MustRegister(
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "llmproxy", Name: "usage_dropped_total",
+			Help: "Usage records dropped before reaching the ledger: the sink's queue was full, or the process was stopping.",
+		}, func() float64 { return float64(sink.Dropped()) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{
+			Namespace: "llmproxy", Name: "usage_panics_total",
+			Help: "Panics the usage sink recovered from while recording usage.",
+		}, func() float64 { return float64(sink.Panics()) }),
+	)
+}
+
+// bootstrapAdmin creates the bootstrap administrator when no administrator
+// exists (app.Bootstrap), and then shows its temporary password on out.
+func bootstrapAdmin(ctx context.Context, cfg config.Config, out io.Writer, users app.UserRepo,
+	passwords app.PasswordRepo, hasher *app.PasswordHasher, logs processLog,
+) error {
+	password, err := app.Bootstrap(ctx, users, passwords, hasher, cfg.BootstrapAdminEmail)
+	if err != nil {
+		return fmt.Errorf("bootstrap administrator: %w", err)
+	}
+
+	if password == "" {
+		return nil
+	}
+
+	printBootstrapPassword(out, cfg.BootstrapAdminEmail, password)
+
+	if cfg.Web.Enabled() && !cfg.Web.LocalLogin {
+		//nolint:contextcheck // the process log is not request-scoped and logs under no context
+		logs.Warn("the bootstrap administrator signs in with a password, but LLMPROXY_LOCAL_LOGIN is false: "+
+			"set it to true until the administrator can sign in another way", slog.String("admin", cfg.BootstrapAdminEmail))
+	}
+
+	return nil
+}
+
+// newOIDCService connects to the OpenID Connect identity provider and builds
+// the federated sign-in on it; it returns nil while OIDC is off.
+func newOIDCService(ctx context.Context, cfg config.OIDC, users app.UserRepo, idents app.IdentityRepo,
+	sessions app.SessionRepo, audit app.AuditSink, clock app.Clock,
+) (*app.OIDCService, error) {
+	if !cfg.Enabled() {
+		return nil, nil //nolint:nilnil // OIDC off is no service and no error
+	}
+
+	idp, err := oidc.New(ctx, oidc.Config{
+		Issuer:       cfg.Issuer,
+		ClientID:     cfg.ClientID,
+		ClientSecret: cfg.ClientSecret,
+		RedirectURL:  cfg.RedirectURL,
+		GroupsClaim:  cfg.GroupsClaim,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("identity provider: %w", err)
+	}
+
+	service, err := app.NewOIDCService(users, idents, sessions, idp, audit, clock, app.OIDCConfig{
+		RequiredGroup: cfg.RequiredGroup,
+		AllowSignUp:   cfg.AllowSignUp,
+		DefaultPolicy: cfg.DefaultPolicy,
+		GroupPolicy:   cfg.GroupPolicy,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("oidc sign-in: %w", err)
+	}
+
+	return service, nil
 }
 
 // ownedConfig is the gateway-owned part of the boot configuration, which the
@@ -302,6 +356,7 @@ func ownedConfig(cfg config.Config, compat []cliproxyconfig.OpenAICompatibility)
 		OpenAICompatibility: compat,
 	}
 	owned.RemoteManagement.DisableControlPanel = true
+
 	return owned
 }
 
@@ -309,6 +364,7 @@ func ownedConfig(cfg config.Config, compat []cliproxyconfig.OpenAICompatibility)
 func metricsServer(addr string, h http.Handler) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", h)
+
 	return &http.Server{
 		Addr:              addr,
 		Handler:           mux,
@@ -343,6 +399,8 @@ type server struct {
 //
 // Upstream's usage dispatch stops for good with the gateway, so the process
 // exits rather than restarting it.
+//
+//nolint:funlen // one linear start-and-stop sequence whose stage order and goroutine ownership are the contract
 func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	servers := []server{{"metrics", p.metrics}}
 	if p.web != nil {
@@ -350,27 +408,33 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 	}
 	// Bind before serving anything, so an address in use fails the start.
 	listeners := make([]net.Listener, 0, len(servers))
-	for _, s := range servers {
-		l, err := net.Listen("tcp", s.srv.Addr)
+	for _, entry := range servers {
+		// A signal during the bind must not fail it: the listener binds, then the
+		// ctx.Done() branch below stops cleanly. So the bind ignores cancellation.
+		listener, err := (&net.ListenConfig{}).Listen(context.WithoutCancel(ctx), "tcp", entry.srv.Addr)
 		if err != nil {
 			for _, bound := range listeners {
 				_ = bound.Close()
 			}
-			return fmt.Errorf("%s listener: %w", s.name, err)
+
+			return fmt.Errorf("%s listener: %w", entry.name, err)
 		}
-		listeners = append(listeners, l)
+
+		listeners = append(listeners, listener)
 	}
 
 	// The gateway is stopped by Shutdown below, not when ctx ends; its context
 	// only backs that up.
 	gatewayCtx, stopGateway := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopGateway()
+
 	gatewayDone := make(chan error, 1)
 	go func() { gatewayDone <- p.gateway.Run(gatewayCtx) }()
 	go func() {
 		if p.gateway.WaitReload(gatewayCtx) != nil {
 			return
 		}
+
 		p.log.Info("serving the proxied API", slog.String("addr", p.apiAddr))
 		// Upstream's binary starts the model catalogue updaters before its
 		// service; here they start once the service runs, under its context,
@@ -381,74 +445,96 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 			gateway.StartModelCatalogUpdaters(gatewayCtx)
 		}
 	}()
+
 	catalogCtx, stopCatalog := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopCatalog()
+
 	catalogDone := make(chan struct{})
 	go func() {
 		defer close(catalogDone)
+
 		p.prices.RunCatalog(catalogCtx, p.catalogInterval)
 	}()
 
 	failed := make(chan error, len(servers))
-	for i, s := range servers {
-		p.log.Info("serving listener", slog.String("listener", s.name), slog.String("addr", listeners[i].Addr().String()))
+	for i, entry := range servers {
+		p.log.Info("serving listener", slog.String("listener", entry.name), slog.String("addr", listeners[i].Addr().String()))
 		go func() {
-			if err := s.srv.Serve(listeners[i]); !errors.Is(err, http.ErrServerClosed) {
-				failed <- fmt.Errorf("%s listener: %w", s.name, err)
+			if err := entry.srv.Serve(listeners[i]); !errors.Is(err, http.ErrServerClosed) {
+				failed <- fmt.Errorf("%s listener: %w", entry.name, err)
 			}
 		}()
 	}
 
 	var cause error
+
 	gatewayReturned := false
+
 	select {
 	case <-ctx.Done():
 	case cause = <-failed:
 	case err := <-gatewayDone:
 		gatewayReturned = true
-		cause = fmt.Errorf("proxied listener stopped: %w", cmp.Or(err, errors.New("no error reported")))
+		cause = fmt.Errorf("proxied listener stopped: %w", cmp.Or(err, errNoErrorReported))
 	}
+
 	releaseSignals()
+
 	if cause != nil {
 		p.log.Info("stopping", slog.Any("cause", cause))
 	} else {
 		p.log.Info("stopping")
 	}
+
 	stopCatalog()
+
+	// Each stage's deadline counts from now, detached from ctx's cancellation:
+	// ctx may have ended, and the stop must run its course regardless.
 	var stopped sync.WaitGroup
-	for _, s := range servers {
+	for _, entry := range servers {
 		stopped.Go(func() {
-			sctx, cancel := context.WithTimeout(context.Background(), listenerGrace)
+			sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), listenerGrace)
 			defer cancel()
-			if err := s.srv.Shutdown(sctx); err != nil {
+
+			if err := entry.srv.Shutdown(sctx); err != nil {
 				p.log.Warn("listener shutdown incomplete; closing its remaining connections",
-					slog.String("listener", s.name), slog.Any("err", err))
-				_ = s.srv.Close()
+					slog.String("listener", entry.name), slog.Any("err", err))
+				_ = entry.srv.Close()
 			}
 		})
 	}
+
 	if !gatewayReturned {
-		dctx, cancel := context.WithTimeout(context.Background(), drainGrace)
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainGrace)
 		if err := p.gateway.Shutdown(dctx); err != nil {
 			cause = errors.Join(cause, fmt.Errorf("proxied listener: requests in flight were cut: %w", err))
 		}
+
 		cancel()
 		stopGateway()
+
 		if err := <-gatewayDone; err != nil && !errors.Is(err, context.Canceled) {
 			cause = errors.Join(cause, fmt.Errorf("proxied listener: %w", err))
 		}
 	}
+
 	stopped.Wait()
 	<-catalogDone
 
-	dctx, cancel := context.WithTimeout(context.Background(), sinkGrace)
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sinkGrace)
 	defer cancel()
+
 	if err := p.sink.Drain(dctx); err != nil {
 		p.log.Warn("usage records still queued were not all written", slog.Any("err", err))
 	}
+
 	p.log.Info("stopped")
-	return cause
+
+	return cause //nolint:wrapcheck // cause joins errors each already wrapped with its stage
 }
+
+// errNoErrorReported stands in for the error of a gateway that returned without one.
+var errNoErrorReported = errors.New("no error reported")
 
 // printBootstrapPassword shows the bootstrap administrator's temporary password
 // once, on the process's output and never through the logger: no log adapter,

@@ -10,14 +10,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 )
 
 // TestTokenRepo shares one container across its subtests: a pool costs roughly two
@@ -30,74 +30,62 @@ func TestTokenRepo(t *testing.T) {
 
 	newOwner := func(t *testing.T, name string) identity.User {
 		t.Helper()
+
 		owner := identity.NewService(uuid.New(), name, access.Policy{})
-		if err := users.Create(ctx, owner); err != nil {
-			t.Fatalf("create user: %v", err)
-		}
+		require.NoError(t, users.Create(ctx, owner), "create user")
+
 		return owner
 	}
 
 	t.Run("ByHashResolvesToken", func(t *testing.T) {
 		owner := newOwner(t, "chat-panel")
+
 		tok, secret, err := credentials.Generate(owner.ID, "panel")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 		got, err := tokens.ByHash(ctx, credentials.HashSecret(secret))
-		if err != nil {
-			t.Fatalf("ByHash: %v", err)
-		}
-		if got.ID != tok.ID || got.UserID != owner.ID {
-			t.Fatalf("ByHash returned %+v, want id %s owner %s", got, tok.ID, owner.ID)
-		}
-		if got.Label != tok.Label || got.Prefix != tok.Prefix {
-			t.Fatalf("ByHash returned label %q prefix %q, want %q / %q",
-				got.Label, got.Prefix, tok.Label, tok.Prefix)
-		}
-		if got.LastUsedAt != nil || got.RevokedAt != nil || got.RevokedBy != nil {
-			t.Fatalf("fresh token came back used or revoked: %+v", got)
-		}
+		require.NoError(t, err, "ByHash")
+
+		require.Equal(t, tok.ID, got.ID, "ByHash id")
+		require.Equal(t, owner.ID, got.UserID, "ByHash owner")
+		require.Equal(t, tok.Label, got.Label, "ByHash label")
+		require.Equal(t, tok.Prefix, got.Prefix, "ByHash prefix")
+		require.Nil(t, got.LastUsedAt, "fresh token came back used")
+		require.Nil(t, got.RevokedAt, "fresh token came back revoked")
+		require.Nil(t, got.RevokedBy, "fresh token came back revoked")
 	})
 
 	t.Run("ByHashUnknownIsNotFound", func(t *testing.T) {
 		// The application layer switches on app.ErrNotFound; a driver error leaking
 		// through here would make every caller import pgx to tell "no such token"
 		// from "the database is down".
-		if _, err := tokens.ByHash(ctx, "nope"); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("err = %v, want app.ErrNotFound", err)
-		}
+		_, err := tokens.ByHash(ctx, "nope")
+		require.ErrorIs(t, err, app.ErrNotFound)
 	})
 
 	t.Run("ByIDResolvesToken", func(t *testing.T) {
 		// The revoke path knows a token's id, not its secret, and has to load the row
 		// to check who owns it before it writes.
 		owner := newOwner(t, "id-lookup")
+
 		tok, _, err := credentials.Generate(owner.ID, "by-id")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 		got, err := tokens.ByID(ctx, tok.ID)
-		if err != nil {
-			t.Fatalf("ByID: %v", err)
-		}
-		if got.ID != tok.ID || got.UserID != owner.ID || got.Label != tok.Label {
-			t.Fatalf("ByID returned %+v, want id %s owner %s label %q",
-				got, tok.ID, owner.ID, tok.Label)
-		}
+		require.NoError(t, err, "ByID")
+
+		require.Equal(t, tok.ID, got.ID, "ByID id")
+		require.Equal(t, owner.ID, got.UserID, "ByID owner")
+		require.Equal(t, tok.Label, got.Label, "ByID label")
 	})
 
 	t.Run("ByIDUnknownIsNotFound", func(t *testing.T) {
-		if _, err := tokens.ByID(ctx, uuid.New()); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("err = %v, want app.ErrNotFound", err)
-		}
+		_, err := tokens.ByID(ctx, uuid.New())
+		require.ErrorIs(t, err, app.ErrNotFound)
 	})
 
 	t.Run("TouchLastUsedOnUnknownTokenIsNotAnError", func(t *testing.T) {
@@ -107,95 +95,76 @@ func TestTokenRepo(t *testing.T) {
 		// being served, or gateway availability starts depending on the tokens table.
 		// Making the two consistent is the obvious future edit; this is the test that
 		// must stop it.
-		if err := tokens.TouchLastUsed(ctx, uuid.New(), time.Now().UTC()); err != nil {
-			t.Fatalf("TouchLastUsed on a missing token = %v, want nil", err)
-		}
+		require.NoError(t, tokens.TouchLastUsed(ctx, uuid.New(), time.Now().UTC()), "TouchLastUsed on a missing token")
 	})
 
 	t.Run("TouchLastUsedPersists", func(t *testing.T) {
 		owner := newOwner(t, "batch-runner")
+
 		tok, _, err := credentials.Generate(owner.ID, "runner")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 		when := time.Now().UTC().Truncate(time.Second)
-		if err := tokens.TouchLastUsed(ctx, tok.ID, when); err != nil {
-			t.Fatalf("TouchLastUsed: %v", err)
-		}
+		require.NoError(t, tokens.TouchLastUsed(ctx, tok.ID, when), "TouchLastUsed")
+
 		list, err := tokens.ListByUser(ctx, owner.ID)
-		if err != nil {
-			t.Fatalf("ListByUser: %v", err)
-		}
-		if len(list) != 1 || list[0].LastUsedAt == nil || !list[0].LastUsedAt.Equal(when) {
-			t.Fatalf("last used not persisted: %+v", list)
-		}
+		require.NoError(t, err, "ListByUser")
+
+		require.Len(t, list, 1, "ListByUser")
+		require.NotNil(t, list[0].LastUsedAt, "last used not persisted")
+		require.True(t, list[0].LastUsedAt.Equal(when), "last used = %v, want %v", list[0].LastUsedAt, when)
 	})
 
 	t.Run("TouchLastUsedNeverMovesBackwards", func(t *testing.T) {
 		// Stamps arrive in the order requests complete, not start, and from
 		// several batches: an older one landing late must not rewind the stamp.
 		owner := newOwner(t, "streamer")
+
 		tok, _, err := credentials.Generate(owner.ID, "stream")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
+
 		later := time.Now().UTC().Truncate(time.Second)
 		for _, at := range []time.Time{later, later.Add(-5 * time.Minute)} {
-			if err := tokens.TouchLastUsed(ctx, tok.ID, at); err != nil {
-				t.Fatalf("TouchLastUsed(%v): %v", at, err)
-			}
+			require.NoError(t, tokens.TouchLastUsed(ctx, tok.ID, at), "TouchLastUsed(%v)", at)
 		}
+
 		got, err := tokens.ByID(ctx, tok.ID)
-		if err != nil {
-			t.Fatalf("ByID: %v", err)
-		}
-		if got.LastUsedAt == nil || !got.LastUsedAt.Equal(later) {
-			t.Fatalf("last used = %v, want %v: an older stamp moved it back", got.LastUsedAt, later)
-		}
+		require.NoError(t, err, "ByID")
+
+		require.NotNil(t, got.LastUsedAt, "last used not persisted")
+		require.True(t, got.LastUsedAt.Equal(later),
+			"last used = %v, want %v: an older stamp moved it back", got.LastUsedAt, later)
 	})
 
 	t.Run("SaveRoundTripsRevocation", func(t *testing.T) {
 		admin := newOwner(t, "admin-account")
 		owner := newOwner(t, "retired-agent")
+
 		tok, secret, err := credentials.Generate(owner.ID, "agent")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 		when := time.Now().UTC().Truncate(time.Second)
-		if err := tok.Revoke(admin.ID, when); err != nil {
-			t.Fatalf("Revoke: %v", err)
-		}
-		if err := tokens.Save(ctx, tok); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+		require.NoError(t, tok.Revoke(admin.ID, when), "Revoke")
+
+		require.NoError(t, tokens.Save(ctx, tok), "Save")
 
 		// A revoked token still resolves: authentication must be able to tell a
 		// revoked credential from an unknown one, and only the stored revocation
 		// fields carry that difference.
 		got, err := tokens.ByHash(ctx, credentials.HashSecret(secret))
-		if err != nil {
-			t.Fatalf("ByHash after revoke: %v", err)
-		}
-		if got.Active() {
-			t.Fatalf("revoked token came back active: %+v", got)
-		}
-		if got.RevokedAt == nil || !got.RevokedAt.Equal(when) {
-			t.Fatalf("revoked_at = %v, want %v", got.RevokedAt, when)
-		}
-		if got.RevokedBy == nil || *got.RevokedBy != admin.ID {
-			t.Fatalf("revoked_by = %v, want %s", got.RevokedBy, admin.ID)
-		}
+		require.NoError(t, err, "ByHash after revoke")
+
+		require.False(t, got.Active(), "revoked token came back active: %+v", got)
+		require.NotNil(t, got.RevokedAt, "revoked_at not stored")
+		require.True(t, got.RevokedAt.Equal(when), "revoked_at = %v, want %v", got.RevokedAt, when)
+		require.NotNil(t, got.RevokedBy, "revoked_by not stored")
+		require.Equal(t, admin.ID, *got.RevokedBy, "revoked_by")
 	})
 
 	// The limit counts live tokens only, holds under concurrent creates for one
@@ -204,28 +173,25 @@ func TestTokenRepo(t *testing.T) {
 		owner := newOwner(t, "busy-agent")
 		create := func() (credentials.Token, error) {
 			tok, _, err := credentials.Generate(owner.ID, "key")
-			if err != nil {
-				t.Fatalf("generate: %v", err)
-			}
+			require.NoError(t, err, "generate")
+
 			return tok, tokens.Create(ctx, tok)
 		}
+
 		revoked, err := create()
-		if err != nil {
-			t.Fatalf("create: %v", err)
-		}
-		if err := revoked.Revoke(owner.ID, time.Now()); err != nil {
-			t.Fatalf("Revoke: %v", err)
-		}
-		if err := tokens.Save(ctx, revoked); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
+		require.NoError(t, err, "create")
+
+		require.NoError(t, revoked.Revoke(owner.ID, time.Now()), "Revoke")
+
+		require.NoError(t, tokens.Save(ctx, revoked), "Save")
+
 		var first credentials.Token
-		for i := range app.MaxLiveTokensPerOwner - 3 {
+
+		for idx := range app.MaxLiveTokensPerOwner - 3 {
 			tok, err := create()
-			if err != nil {
-				t.Fatalf("create %d: %v", i, err)
-			}
-			if i == 0 {
+			require.NoError(t, err, "create %d", idx)
+
+			if idx == 0 {
 				first = tok
 			}
 		}
@@ -234,12 +200,13 @@ func TestTokenRepo(t *testing.T) {
 		errs := make(chan error, 8)
 		for range cap(errs) {
 			tok, _, err := credentials.Generate(owner.ID, "key")
-			if err != nil {
-				t.Fatalf("generate: %v", err)
-			}
+			require.NoError(t, err, "generate")
+
 			go func() { errs <- tokens.Create(ctx, tok) }()
 		}
+
 		var created, refused int
+
 		for range cap(errs) {
 			switch err := <-errs; {
 			case err == nil:
@@ -247,41 +214,33 @@ func TestTokenRepo(t *testing.T) {
 			case errors.Is(err, app.ErrTokenLimit):
 				refused++
 			default:
-				t.Fatalf("racing create: %v", err)
+				require.Failf(t, "racing create", "unexpected error: %v", err)
 			}
 		}
-		if created != 3 || refused != 5 {
-			t.Fatalf("racing creates: %d created, %d refused, want 3 and 5", created, refused)
-		}
 
-		if err := first.Revoke(owner.ID, time.Now()); err != nil {
-			t.Fatalf("Revoke: %v", err)
-		}
-		if err := tokens.Save(ctx, first); err != nil {
-			t.Fatalf("Save: %v", err)
-		}
-		if _, err := create(); err != nil {
-			t.Fatalf("create after a revocation: %v, want room for one", err)
-		}
-		if _, err := create(); !errors.Is(err, app.ErrTokenLimit) {
-			t.Fatalf("create past the limit: %v, want app.ErrTokenLimit", err)
-		}
+		require.Equal(t, 3, created, "racing creates: created")
+		require.Equal(t, 5, refused, "racing creates: refused")
+
+		require.NoError(t, first.Revoke(owner.ID, time.Now()), "Revoke")
+
+		require.NoError(t, tokens.Save(ctx, first), "Save")
+
+		_, err = create()
+		require.NoError(t, err, "create after a revocation: want room for one")
+
+		_, err = create()
+		require.ErrorIs(t, err, app.ErrTokenLimit, "create past the limit")
 	})
 
 	t.Run("CreateForUnknownOwnerIsNotFound", func(t *testing.T) {
 		tok, _, err := credentials.Generate(uuid.New(), "orphan")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-		if err := tokens.Create(ctx, tok); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("err = %v, want app.ErrNotFound", err)
-		}
+		require.NoError(t, err, "generate")
+
+		require.ErrorIs(t, tokens.Create(ctx, tok), app.ErrNotFound)
 	})
 
 	t.Run("SaveUnknownTokenIsNotFound", func(t *testing.T) {
 		unknown := credentials.Token{ID: uuid.New(), Label: "ghost"}
-		if err := tokens.Save(ctx, unknown); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("err = %v, want app.ErrNotFound", err)
-		}
+		require.ErrorIs(t, tokens.Save(ctx, unknown), app.ErrNotFound)
 	})
 }

@@ -7,9 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
 )
 
 // ErrBlocked is what a *BlockedError unwraps to.
@@ -41,7 +40,10 @@ type Recovery struct {
 	clock     Clock
 }
 
-func NewRecovery(users UserRepo, passwords PasswordRepo, sessions SessionRepo, attempts LoginAttemptRepo, hasher *PasswordHasher, audit AuditSink, clock Clock) *Recovery {
+func NewRecovery(
+	users UserRepo, passwords PasswordRepo, sessions SessionRepo, attempts LoginAttemptRepo,
+	hasher *PasswordHasher, audit AuditSink, clock Clock,
+) *Recovery {
 	return &Recovery{
 		users: users, passwords: passwords, sessions: sessions, attempts: attempts,
 		hasher: hasher, audit: audit, clock: clock,
@@ -74,53 +76,66 @@ type Recovered struct {
 // after it, the unblock is on record, and a retry finds the account active. Any
 // failure withholds the password: the caller retries, and a retry issues another.
 func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool) (Recovered, error) {
-	u, err := r.users.ByEmail(ctx, strings.TrimSpace(email))
+	user, err := r.users.ByEmail(ctx, strings.TrimSpace(email))
 	if err != nil {
-		return Recovered{}, err
+		return Recovered{}, fmt.Errorf("app: recover account: %w", err)
 	}
-	if u.Kind != identity.KindHuman {
+
+	if user.Kind != identity.KindHuman {
 		return Recovered{}, ErrNotLocal
 	}
-	out := Recovered{User: u}
-	if u.Status != identity.StatusActive {
+
+	out := Recovered{User: user}
+	if user.Status != identity.StatusActive {
 		canUnblock := false
-		if u.Role == identity.RoleAdmin {
-			other, err := r.otherActiveAdmin(ctx, u.ID)
+
+		if user.Role == identity.RoleAdmin {
+			other, err := r.otherActiveAdmin(ctx, user.ID)
 			if err != nil {
 				return Recovered{}, err
 			}
+
 			canUnblock = !other
 		}
+
 		if !unblock || !canUnblock {
 			return Recovered{}, &BlockedError{CanUnblock: canUnblock}
 		}
+
 		out.Unblocked = true
 	}
 
 	now := r.clock.Now().UTC()
+
 	if out.Unblocked {
 		active := identity.StatusActive
-		if err := r.users.Unblock(ctx, u.ID, AuditEvent{At: now, Action: "user.update", Target: u.ID.String(),
-			Detail: map[string]any{"via": "cli", "status": string(active)}}); err != nil {
-			return Recovered{}, fmt.Errorf("app: unblock %s: %w", u.ID, err)
+		if err := r.users.Unblock(ctx, user.ID, AuditEvent{
+			At: now, Action: "user.update", Target: user.ID.String(),
+			Detail: map[string]any{"via": "cli", "status": string(active)},
+		}); err != nil {
+			return Recovered{}, fmt.Errorf("app: unblock %s: %w", user.ID, err)
 		}
+
 		out.User.Status = active
 	}
 	// An old password that signs in between the unblock and the reset gets a session
 	// the reset ends; after the reset it no longer signs in.
-	out.Password, err = resetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, u.ID, now)
+	out.Password, err = resetPassword(ctx, r.users, r.passwords, r.sessions, r.hasher, user.ID, now)
 	if err != nil {
 		return Recovered{}, err
 	}
-	if err := r.attempts.Clear(ctx, u.Email); err != nil {
-		return Recovered{}, fmt.Errorf("app: password of %s reset but sign-in lockout not cleared: %w", u.ID, err)
+
+	if err := r.attempts.Clear(ctx, user.Email); err != nil {
+		return Recovered{}, fmt.Errorf("app: password of %s reset but sign-in lockout not cleared: %w", user.ID, err)
 	}
+
 	out.User.MustChangePassword = true
 
-	if err := r.record(ctx, "user.password_reset", u.ID, now,
-		map[string]any{"via": "cli", "expires_at": out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
+	if err := r.record(ctx, "user.password_reset", user.ID, now,
+		map[string]any{"via": "cli", auditExpiresAt: out.Password.ExpiresAt.Format(time.RFC3339)}); err != nil {
 		return Recovered{}, err
 	}
+
 	return out, nil
 }
 
@@ -128,13 +143,15 @@ func (r *Recovery) ResetPassword(ctx context.Context, email string, unblock bool
 func (r *Recovery) otherActiveAdmin(ctx context.Context, id uuid.UUID) (bool, error) {
 	all, err := r.users.List(ctx)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("app: find another administrator: %w", err)
 	}
+
 	for _, v := range all {
 		if v.User.ID != id && v.User.Role == identity.RoleAdmin && v.User.CanSignIn() {
 			return true, nil
 		}
 	}
+
 	return false, nil
 }
 
@@ -144,5 +161,6 @@ func (r *Recovery) record(ctx context.Context, action string, target uuid.UUID, 
 	if err := r.audit.Record(ctx, AuditEvent{At: at, Action: action, Target: target.String(), Detail: detail}); err != nil {
 		return fmt.Errorf("app: %s on %s applied but not audited: %w", action, target, err)
 	}
+
 	return nil
 }

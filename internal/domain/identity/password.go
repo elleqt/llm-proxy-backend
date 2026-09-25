@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
@@ -52,11 +53,14 @@ func HashPassword(plain string) (string, error) {
 	if plain == "" {
 		return "", ErrEmptyPassword
 	}
+
 	salt := make([]byte, argonSaltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", fmt.Errorf("identity: read salt: %w", err)
 	}
+
 	key := argon2.IDKey([]byte(plain), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+
 	return encodeHash(argonMemory, argonTime, argonThreads, salt, key), nil
 }
 
@@ -73,39 +77,63 @@ func encodeHash(memory, time uint32, threads uint8, salt, key []byte) string {
 // not parse is a false, never a panic and never a match: a corrupt or truncated row
 // must fail closed.
 func VerifyPassword(hash, plain string) bool {
-	memory, time, threads, salt, want, ok := decodeHash(hash)
+	decoded, ok := decodeHash(hash)
 	if !ok {
 		return false
 	}
-	got := argon2.IDKey([]byte(plain), salt, time, memory, threads, uint32(len(want)))
-	return subtle.ConstantTimeCompare(got, want) == 1
+	// argon2 takes the key length as a uint32. No stored key comes close to that
+	// bound, but one that did could not be reproduced, so it fails closed.
+	keyLen := uint64(len(decoded.key))
+	if keyLen > math.MaxUint32 {
+		return false
+	}
+
+	got := argon2.IDKey([]byte(plain), decoded.salt, decoded.time, decoded.memory, decoded.threads, uint32(keyLen))
+
+	return subtle.ConstantTimeCompare(got, decoded.key) == 1
 }
 
-func decodeHash(hash string) (memory, time uint32, threads uint8, salt, key []byte, ok bool) {
+// argonHash is a PHC string taken apart: the cost parameters, the salt and the
+// derived key it records.
+type argonHash struct {
+	memory, time uint32
+	threads      uint8
+	salt, key    []byte
+}
+
+func decodeHash(hash string) (argonHash, bool) {
 	parts := strings.Split(hash, "$")
 	// "", "argon2id", "v=19", "m=..,t=..,p=..", salt, key
 	if len(parts) != 6 || parts[0] != "" || parts[1] != "argon2id" {
-		return 0, 0, 0, nil, nil, false
+		return argonHash{}, false
 	}
+
 	var version int
 	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
-		return 0, 0, 0, nil, nil, false
+		return argonHash{}, false
 	}
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads); err != nil {
-		return 0, 0, 0, nil, nil, false
+
+	var decoded argonHash
+	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &decoded.memory, &decoded.time, &decoded.threads); err != nil {
+		return argonHash{}, false
 	}
 	// Zero parameters are not merely unusual, they make argon2.IDKey panic. A stored
 	// row is untrusted input here.
-	if memory == 0 || time == 0 || threads == 0 {
-		return 0, 0, 0, nil, nil, false
+	if decoded.memory == 0 || decoded.time == 0 || decoded.threads == 0 {
+		return argonHash{}, false
 	}
-	salt, err := b64.DecodeString(parts[4])
-	if err != nil || len(salt) == 0 {
-		return 0, 0, 0, nil, nil, false
+
+	var err error
+
+	decoded.salt, err = b64.DecodeString(parts[4])
+	if err != nil || len(decoded.salt) == 0 {
+		return argonHash{}, false
 	}
-	key, err = b64.DecodeString(parts[5])
-	if err != nil || len(key) == 0 {
-		return 0, 0, 0, nil, nil, false
+
+	decoded.key, err = b64.DecodeString(parts[5])
+	if err != nil || len(decoded.key) == 0 {
+		return argonHash{}, false
 	}
-	return memory, time, threads, salt, key, true
+
+	return decoded, true
 }

@@ -13,6 +13,18 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 )
 
+// Refusals ResetPassword explains to the operator. Each is the whole message, or
+// its part after or before the email address it names.
+var (
+	errSchemaOutdated = errors.New("the database schema is not up to date: start the server once, which migrates it, then run this again")
+	errNoAccount      = errors.New("no account signs in with")
+	errServiceAccount = errors.New("is a service account, which has no password")
+	errBlockedAdmin   = errors.New("is blocked, and no other administrator is active to unblock it: " +
+		"run this again with --unblock to unblock it too")
+	errBlocked = errors.New("is blocked: an administrator must unblock it on the web interface first " +
+		"(--unblock only applies to an administrator when no other administrator is active)")
+)
+
 // ResetPasswordOptions is what `gateway reset-password` was asked for.
 type ResetPasswordOptions struct {
 	// Email is the account's sign-in address, in any case.
@@ -39,16 +51,18 @@ type ResetPasswordOptions struct {
 func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 	cfg, err := config.LoadDatabase()
 	if err != nil {
-		return err
+		return err //nolint:wrapcheck // config errors name their package, and the operator-facing text is pinned by CI
 	}
 	// Neither error carries the DSN (see postgres.report).
 	migrated, err := postgres.Migrated(ctx, cfg.URL)
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
 	}
+
 	if !migrated {
-		return errors.New("the database schema is not up to date: start the server once, which migrates it, then run this again")
+		return errSchemaOutdated
 	}
+
 	pool, err := postgres.NewPool(ctx, cfg.URL)
 	if err != nil {
 		return fmt.Errorf("database: %w", err)
@@ -60,39 +74,42 @@ func ResetPassword(ctx context.Context, opts ResetPasswordOptions) error {
 		app.NewPasswordHasher(cfg.PasswordHashConcurrency, identity.HashPassword, identity.VerifyPassword),
 		postgres.NewAuditSink(pool), systemClock{})
 	out, err := recovery.ResetPassword(ctx, opts.Email, opts.Unblock)
+
 	var blocked *app.BlockedError
 	switch {
 	case errors.Is(err, app.ErrNotFound):
-		return fmt.Errorf("no account signs in with %s", opts.Email)
+		return fmt.Errorf("%w %s", errNoAccount, opts.Email)
 	case errors.Is(err, app.ErrNotLocal):
-		return fmt.Errorf("%s is a service account, which has no password", opts.Email)
+		return fmt.Errorf("%s %w", opts.Email, errServiceAccount)
 	case errors.As(err, &blocked) && blocked.CanUnblock:
-		return fmt.Errorf("%s is blocked, and no other administrator is active to unblock it: "+
-			"run this again with --unblock to unblock it too", opts.Email)
+		return fmt.Errorf("%s %w", opts.Email, errBlockedAdmin)
 	case errors.As(err, &blocked):
-		return fmt.Errorf("%s is blocked: an administrator must unblock it on the web interface first "+
-			"(--unblock only applies to an administrator when no other administrator is active)", opts.Email)
+		return fmt.Errorf("%s %w", opts.Email, errBlocked)
 	case err != nil:
-		return err
+		return fmt.Errorf("recovery: %w", err)
 	}
+
 	printResetPassword(opts.Output, out)
+
 	if !cfg.LocalLogin {
 		// As boot.Run warns for the bootstrap password.
 		_, _ = fmt.Fprintln(opts.Warnings, "warning: the server takes no password sign-in (LLMPROXY_LOCAL_LOGIN is false "+
 			"or LLMPROXY_WEB_ADDR is off): the temporary password cannot be used until local sign-in is enabled — "+
 			"set LLMPROXY_LOCAL_LOGIN=true and restart the server")
 	}
+
 	return nil
 }
 
 // printResetPassword shows the temporary password once, in the bootstrap banner's
 // style (printBootstrapPassword).
-func printResetPassword(w io.Writer, r app.Recovered) {
+func printResetPassword(out io.Writer, recovered app.Recovered) {
 	unblocked := ""
-	if r.Unblocked {
+	if recovered.Unblocked {
 		unblocked = "  The account was blocked and is now unblocked.\n"
 	}
-	_, _ = fmt.Fprintf(w, "\n"+
+
+	_, _ = fmt.Fprintf(out, "\n"+
 		"======================= llm-proxy: password reset ========================\n"+
 		"  account:            %s\n"+
 		"  temporary password: %s\n"+
@@ -100,5 +117,5 @@ func printResetPassword(w io.Writer, r app.Recovered) {
 		"%s"+
 		"  Shown this once. Sign in on the web interface and choose a new password.\n"+
 		"===========================================================================\n\n",
-		r.User.Email, r.Password.Password, r.Password.ExpiresAt.UTC().Format(time.RFC3339), unblocked)
+		recovered.User.Email, recovered.Password.Password, recovered.Password.ExpiresAt.UTC().Format(time.RFC3339), unblocked)
 }

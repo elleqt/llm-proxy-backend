@@ -27,139 +27,171 @@ const (
 	loginRateLimited = "/login?error=rate_limited"
 )
 
-func (rt *router) getAuthConfig(w http.ResponseWriter, _ *http.Request) {
+func (rt *router) getAuthConfig(rw http.ResponseWriter, _ *http.Request) {
 	var out api.AuthConfig
+
 	out.LocalLogin = rt.LocalLogin
+
 	out.Oidc.Enabled = rt.OIDC != nil
 	if rt.OIDC != nil && rt.OIDCDisplayName != "" {
 		name := rt.OIDCDisplayName
 		out.Oidc.DisplayName = &name
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // login is local sign-in. Its only 401 is invalid_credentials, for every refusal
 // alike; a locked address is 429 locked_out with the lock's remaining time. It is
 // routed only while local sign-in is on (Deps.LocalLogin).
-func (rt *router) login(w http.ResponseWriter, r *http.Request) {
+func (rt *router) login(rw http.ResponseWriter, req *http.Request) {
 	var body api.LoginRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	sess, user, err := rt.Auth.SignIn(r.Context(), body.Email, body.Password, sessionMeta(r))
+
+	sess, user, err := rt.Auth.SignIn(req.Context(), body.Email, body.Password, sessionMeta(req))
+
 	var locked *app.LockedOutError
 	switch {
 	case errors.As(err, &locked):
-		writeRetryAfter(w, locked.Until.Sub(rt.Clock.Now()), codeLockedOut, "too many failed attempts for this address")
+		writeRetryAfter(rw, locked.Until.Sub(rt.Clock.Now()), codeLockedOut, "too many failed attempts for this address")
+
 		return
 	case errors.Is(err, app.ErrInvalidCredentials):
-		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "invalid credentials")
+		writeError(rw, http.StatusUnauthorized, codeInvalidCredentials, "invalid credentials")
+
 		return
 	case err != nil:
-		rt.internal(w, r, err)
+		rt.internal(rw, req, err)
+
 		return
 	}
-	rt.cookies.setSession(w, sess)
-	writeJSON(w, http.StatusOK, meOf(user))
+
+	rt.cookies.setSession(rw, sess)
+	writeJSON(rw, http.StatusOK, meOf(user))
 }
 
 // logout ends the caller's session, if there is one, and always clears the cookie.
-func (rt *router) logout(w http.ResponseWriter, r *http.Request) {
-	rt.cookies.clearSession(w)
-	if c, ok := callerFrom(r.Context()); ok {
-		if err := rt.Auth.SignOut(r.Context(), c.session); err != nil {
-			rt.internal(w, r, err)
+func (rt *router) logout(rw http.ResponseWriter, req *http.Request) {
+	rt.cookies.clearSession(rw)
+
+	if c, ok := callerFrom(req.Context()); ok {
+		if err := rt.Auth.SignOut(req.Context(), c.session); err != nil {
+			rt.internal(rw, req, err)
+
 			return
 		}
 	}
-	w.WriteHeader(http.StatusNoContent)
+
+	rw.WriteHeader(http.StatusNoContent)
 }
 
 // changePassword serves a restricted session as well as a full one: it is the way
 // out of the restriction. invalid_credentials here rejects what was typed and leaves
 // the session alone.
-func (rt *router) changePassword(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) changePassword(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.PasswordChangeRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
+
 	var current string
 	if body.CurrentPassword != nil {
 		current = *body.CurrentPassword
 	}
-	err := rt.Auth.ChangePassword(r.Context(), c.session, current, body.NewPassword)
+
+	err := rt.Auth.ChangePassword(req.Context(), actor.session, current, body.NewPassword)
 	switch {
 	case err == nil:
-		w.WriteHeader(http.StatusNoContent)
+		rw.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, identity.ErrEmptyPassword):
-		writeFieldError(w, http.StatusBadRequest, codeEmptyPassword, "newPassword", "the new password is empty")
+		writeFieldError(rw, http.StatusBadRequest, codeEmptyPassword, "newPassword", "the new password is empty")
 	case errors.Is(err, app.ErrWeakPassword):
-		writeFieldError(w, http.StatusBadRequest, codeWeakPassword, "newPassword", "the new password is too short")
+		writeFieldError(rw, http.StatusBadRequest, codeWeakPassword, "newPassword", "the new password is too short")
 	case errors.Is(err, app.ErrInvalidCredentials), errors.Is(err, app.ErrNotFound):
 		// ErrNotFound: a federated user has no local password to prove.
-		writeError(w, http.StatusUnauthorized, codeInvalidCredentials, "invalid credentials")
+		writeError(rw, http.StatusUnauthorized, codeInvalidCredentials, "invalid credentials")
 	case errors.Is(err, app.ErrForbidden):
 		// Blocked between loading the session and here.
-		writeError(w, http.StatusUnauthorized, codeUnauthenticated, "no valid session")
+		writeError(rw, http.StatusUnauthorized, codeUnauthenticated, "no valid session")
 	default:
-		rt.internal(w, r, err)
+		rt.internal(rw, req, err)
 	}
 }
 
 // startOIDC sends the browser to the identity provider, holding the login's
 // challenge in a sealed cookie until the callback.
-func (rt *router) startOIDC(w http.ResponseWriter, r *http.Request) {
+func (rt *router) startOIDC(rw http.ResponseWriter, req *http.Request) {
 	if rt.OIDC == nil {
-		writeError(w, http.StatusNotFound, codeOIDCDisabled, "federated sign-in is not configured")
+		writeError(rw, http.StatusNotFound, codeOIDCDisabled, "federated sign-in is not configured")
+
 		return
 	}
+
 	authURL, ch, err := rt.OIDC.Begin()
 	if err != nil {
-		rt.internal(w, r, err)
+		rt.internal(rw, req, err)
+
 		return
 	}
+
 	sealed, err := rt.sealer.seal(ch)
 	if err != nil {
-		rt.internal(w, r, err)
+		rt.internal(rw, req, err)
+
 		return
 	}
-	rt.setOIDCCookie(w, sealed, int(oidcChallengeTTL.Seconds()))
-	http.Redirect(w, r, authURL, http.StatusFound)
+
+	rt.setOIDCCookie(rw, sealed, int(oidcChallengeTTL.Seconds()))
+	http.Redirect(rw, req, authURL, http.StatusFound)
 }
 
 // oidcCallback completes the login the challenge cookie belongs to. The cookie is
 // spent whatever the outcome: a challenge serves one callback.
-func (rt *router) oidcCallback(w http.ResponseWriter, r *http.Request) {
-	rt.setOIDCCookie(w, "", -1)
+func (rt *router) oidcCallback(rw http.ResponseWriter, req *http.Request) {
+	rt.setOIDCCookie(rw, "", -1)
+
 	if rt.OIDC == nil {
-		http.Redirect(w, r, oidcFailed, http.StatusFound)
+		http.Redirect(rw, req, oidcFailed, http.StatusFound)
+
 		return
 	}
-	cookie, err := r.Cookie(oidcCookieName)
+
+	cookie, err := req.Cookie(oidcCookieName)
 	if err != nil {
-		http.Redirect(w, r, oidcFailed, http.StatusFound)
+		http.Redirect(rw, req, oidcFailed, http.StatusFound)
+
 		return
 	}
+
 	ch, err := rt.sealer.open(cookie.Value)
-	q := r.URL.Query()
-	if err == nil && q.Get("error") == "access_denied" && ch.Answers(q.Get("state")) {
+
+	query := req.URL.Query()
+	if err == nil && query.Get("error") == "access_denied" && ch.Answers(query.Get("state")) {
 		// The identity provider refused the sign-in: the person or the
 		// provider's policy denied access. Named, unlike other IdP errors,
 		// so the login page can say "no access" instead of "failed". Like a
 		// code, the refusal is this login's answer only when it carries the
 		// state this login sent (RFC 6749 §10.12).
-		http.Redirect(w, r, oidcForbidden, http.StatusFound)
+		http.Redirect(rw, req, oidcForbidden, http.StatusFound)
+
 		return
 	}
-	if err != nil || q.Get("code") == "" {
-		http.Redirect(w, r, oidcFailed, http.StatusFound)
+
+	if err != nil || query.Get("code") == "" {
+		http.Redirect(rw, req, oidcFailed, http.StatusFound)
+
 		return
 	}
-	sess, err := rt.OIDC.Complete(r.Context(), q.Get("code"), q.Get("state"), ch, sessionMeta(r))
+
+	sess, err := rt.OIDC.Complete(req.Context(), query.Get("code"), query.Get("state"), ch, sessionMeta(req))
 	switch {
 	case errors.Is(err, app.ErrForbidden):
-		http.Redirect(w, r, oidcForbidden, http.StatusFound)
+		http.Redirect(rw, req, oidcForbidden, http.StatusFound)
+
 		return
 	case err != nil:
 		if !errors.Is(err, app.ErrInvalidCredentials) {
@@ -167,17 +199,21 @@ func (rt *router) oidcCallback(w http.ResponseWriter, r *http.Request) {
 			// an operator needs to know.
 			rt.Log.Warn("oidc callback failed", slog.Any("err", err))
 		}
-		http.Redirect(w, r, oidcFailed, http.StatusFound)
+
+		http.Redirect(rw, req, oidcFailed, http.StatusFound)
+
 		return
 	}
-	rt.cookies.setSession(w, sess)
-	http.Redirect(w, r, oidcSignedIn, http.StatusFound)
+
+	rt.cookies.setSession(rw, sess)
+	http.Redirect(rw, req, oidcSignedIn, http.StatusFound)
 }
 
 // setOIDCCookie writes (maxAge > 0) or retires (maxAge < 0) the challenge cookie.
 // SameSite=Lax, not Strict: the callback is a cross-site top-level navigation from the
 // identity provider, and Lax cookies are sent on those.
 func (rt *router) setOIDCCookie(w http.ResponseWriter, value string, maxAge int) {
+	//nolint:gosec // HttpOnly and Lax are set; Secure is the deployment's CookieSecure, off only for plain-http development.
 	http.SetCookie(w, &http.Cookie{
 		Name:     oidcCookieName,
 		Value:    value,

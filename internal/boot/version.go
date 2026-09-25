@@ -9,11 +9,15 @@ import (
 // cliproxyModule is the module path of the embedded CLIProxyAPI.
 const cliproxyModule = "github.com/router-for-me/CLIProxyAPI/v7"
 
+// unknownVersion labels a build whose version cannot be told.
+const unknownVersion = "unknown"
+
 // resolveVersion returns the label for logs and llmproxy_build_info: the
 // injected build version when set, else the module version when it names a
 // clean tag, else the VCS commit's short sha, else "unknown".
 func resolveVersion(injected string) string {
 	bi, _ := debug.ReadBuildInfo()
+
 	return versionOf(injected, bi)
 }
 
@@ -23,8 +27,9 @@ func versionOf(injected string, bi *debug.BuildInfo) string {
 	if injected != "" {
 		return injected
 	}
+
 	if bi == nil {
-		return "unknown"
+		return unknownVersion
 	}
 	// Since Go 1.24 go build in a checkout stamps the module version from VCS:
 	// a tag, or on an untagged commit a pseudo-version, with +dirty for
@@ -33,12 +38,14 @@ func versionOf(injected string, bi *debug.BuildInfo) string {
 	if v := bi.Main.Version; v != "" && v != "(devel)" && !pseudoVersion.MatchString(v) && !strings.HasSuffix(v, "+dirty") {
 		return v
 	}
+
 	for _, s := range bi.Settings {
 		if s.Key == "vcs.revision" && s.Value != "" {
 			return s.Value[:min(8, len(s.Value))]
 		}
 	}
-	return "unknown"
+
+	return unknownVersion
 }
 
 // pseudoVersion matches the timestamp and commit a pseudo-version carries
@@ -54,5 +61,6 @@ func cliproxyVersion() string {
 			}
 		}
 	}
-	return "unknown"
+
+	return unknownVersion
 }

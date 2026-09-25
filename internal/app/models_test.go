@@ -1,12 +1,12 @@
 package app_test
 
 import (
-	"reflect"
 	"slices"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/stretchr/testify/assert"
 )
 
 // fakeCatalog is a fixed catalogue: each provider and the models it serves.
@@ -16,12 +16,15 @@ func (c fakeCatalog) Models() map[string][]string { return c }
 
 func (c fakeCatalog) ProvidersFor(model string) []string {
 	var out []string
+
 	for provider, models := range c {
 		if slices.Contains(models, model) {
 			out = append(out, provider)
 		}
 	}
+
 	slices.Sort(out)
+
 	return out
 }
 
@@ -54,8 +57,6 @@ func TestAllowedModelsFollowThePolicy(t *testing.T) {
 		{nil, []app.CatalogProvider{}},
 	} {
 		got := svc.Allowed(identity.User{Policy: mustPolicy(t, tc.rules...)})
-		if !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("policy %v: Allowed = %+v, want %+v", tc.rules, got, tc.want)
-		}
+		assert.Equal(t, tc.want, got, "policy %v", tc.rules)
 	}
 }

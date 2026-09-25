@@ -10,27 +10,32 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // pathOf turns a ServeMux pattern into a request line that matches it.
-func pathOf(pattern string) (method, path string) {
-	method, path, _ = strings.Cut(pattern, " ")
+func pathOf(pattern string) (string, string) {
+	method, path, _ := strings.Cut(pattern, " ")
 	path = strings.ReplaceAll(path, "{userId}", uuid.NewString())
 	path = strings.ReplaceAll(path, "{accountId}", "claude-someone.json")
+
 	return method, strings.ReplaceAll(path, "{tokenId}", uuid.NewString())
 }
 
 // allRoutes is every pattern the router serves.
 func allRoutes() []string {
-	var out []string
-	for p := range (&router{}).routes() {
+	routes := (&router{}).routes()
+
+	out := make([]string, 0, len(routes))
+	for p := range routes {
 		out = append(out, p)
 	}
+
 	return out
 }
 
@@ -49,21 +54,24 @@ func TestARestrictedSessionReachesOnlyTheContractsAllowList(t *testing.T) {
 		if anonymous[pattern] && !contract[pattern] {
 			continue
 		}
+
 		t.Run(pattern, func(t *testing.T) {
-			e := newEnv(t)
-			u := person("restricted@example.com")
-			u.MustChangePassword = true
+			env := newEnv(t)
+			user := person("restricted@example.com")
+			user.MustChangePassword = true
 			method, path := pathOf(pattern)
 			// A malformed body: a route the guard admits refuses it as input (or
 			// ignores it), a route it refuses never reads it.
-			e.sessions.EXPECT().Delete(mock.Anything, mock.Anything).Return(nil).Maybe()
-			rec := e.do(method, path, "{", withCookie(e.signedIn(u)))
+			env.sessions.EXPECT().Delete(mock.Anything, mock.Anything).Return(nil).Maybe()
+
+			rec := env.do(method, path, "{", withCookie(env.signedIn(user)))
 			if contract[pattern] {
-				if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
-					t.Fatalf("status = %d, body %s: the contract lets a restricted session reach this", rec.Code, rec.Body)
-				}
+				require.NotEqual(t, http.StatusForbidden, rec.Code, "the contract lets a restricted session reach this; body %s", rec.Body)
+				require.NotEqual(t, http.StatusUnauthorized, rec.Code, "the contract lets a restricted session reach this; body %s", rec.Body)
+
 				return
 			}
+
 			apiError(t, rec, http.StatusForbidden, codePasswordChangeRequired)
 		})
 	}
@@ -76,6 +84,7 @@ func TestEveryAuthenticatedRouteRefusesARequestWithoutASession(t *testing.T) {
 		if anonymous[pattern] {
 			continue
 		}
+
 		t.Run(pattern, func(t *testing.T) {
 			method, path := pathOf(pattern)
 			apiError(t, newEnv(t).do(method, path, "{}"), http.StatusUnauthorized, codeUnauthenticated)
@@ -92,6 +101,7 @@ func TestEveryAdminRouteIsNotFoundToANonAdministrator(t *testing.T) {
 		if !adminOnly(pattern) {
 			continue
 		}
+
 		t.Run(pattern, func(t *testing.T) {
 			e := newEnv(t)
 			method, path := pathOf(pattern)
@@ -103,18 +113,18 @@ func TestEveryAdminRouteIsNotFoundToANonAdministrator(t *testing.T) {
 
 // Admin routes cannot be served without their services.
 func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
-	e := newEnv(t)
+	env := newEnv(t)
 	for name, drop := range map[string]func(*Deps){
 		"users":     func(d *Deps) { d.AdminUsers = nil },
 		"settings":  func(d *Deps) { d.Settings = nil },
 		"prices":    func(d *Deps) { d.Prices = nil },
 		"providers": func(d *Deps) { d.Providers = nil },
 	} {
-		d := e.deps
+		d := env.deps
 		drop(&d)
-		if _, err := NewRouter(d); err == nil {
-			t.Errorf("NewRouter without the %s service: no error", name)
-		}
+
+		_, err := NewRouter(d)
+		assert.Error(t, err, "NewRouter without the %s service", name)
 	}
 }
 
@@ -122,6 +132,7 @@ func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
 // renders from `code` must never meet a text/plain body.
 func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
 	big := strings.Repeat("x", maxBodyBytes+1)
+
 	cases := []struct {
 		name   string
 		send   func(e *testEnv) *httptest.ResponseRecorder
@@ -146,6 +157,7 @@ func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
 		{"restricted session", func(e *testEnv) *httptest.ResponseRecorder {
 			u := person("restricted@example.com")
 			u.MustChangePassword = true
+
 			return e.do(http.MethodGet, "/api/connect", "", withCookie(e.signedIn(u)))
 		}, http.StatusForbidden, codePasswordChangeRequired},
 		{"unknown path", func(e *testEnv) *httptest.ResponseRecorder {
@@ -156,15 +168,18 @@ func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
 		}, http.StatusNotFound, codeNotFound},
 		{"rate limit", func(e *testEnv) *httptest.ResponseRecorder {
 			e.do(http.MethodPost, "/api/auth/login", "{")
+
 			return e.do(http.MethodPost, "/api/auth/login", "{")
 		}, http.StatusTooManyRequests, codeRateLimited},
 		{"session store down", func(e *testEnv) *httptest.ResponseRecorder {
 			e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, errors.New("connection refused"))
+
 			return e.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
 		}, http.StatusInternalServerError, codeInternal},
 		{"panic", func(e *testEnv) *httptest.ResponseRecorder {
 			e.usage.EXPECT().SeriesForUser(mock.Anything, mock.Anything, mock.Anything, mock.Anything).
 				RunAndReturn(func(_ context.Context, _ uuid.UUID, _, _ time.Time) (app.UsageSeries, error) { panic("boom") })
+
 			return e.do(http.MethodGet, "/api/me/usage", "", withCookie(e.signedIn(person("p@example.com"))))
 		}, http.StatusInternalServerError, codeInternal},
 	}
@@ -178,45 +193,41 @@ func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
 
 // An internal failure is logged for the operator and never described to the client.
 func TestAnInternalErrorKeepsItsTextOutOfTheResponse(t *testing.T) {
-	e := newEnv(t)
+	env := newEnv(t)
+
 	const detail = "pq: relation sessions does not exist at 192.0.2.5"
-	e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, errors.New(detail))
-	rec := e.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
+	env.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, errors.New(detail))
+	rec := env.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
 	apiError(t, rec, http.StatusInternalServerError, codeInternal)
-	if strings.Contains(rec.Body.String(), "relation") {
-		t.Fatalf("the response describes the failure: %s", rec.Body)
-	}
-	if !strings.Contains(e.log.text(), detail) {
-		t.Fatalf("the failure was not logged; log %q", e.log.text())
-	}
+
+	require.NotContains(t, rec.Body.String(), "relation", "the response describes the failure")
+	require.Contains(t, env.log.text(), detail, "the failure was not logged")
 }
 
 // A JSON content type with parameters is still JSON.
 func TestAJSONContentTypeWithACharsetIsAccepted(t *testing.T) {
 	e := newEnv(t)
+
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", func(r *http.Request) {
 		r.Header.Set("Content-Type", "application/json; charset=utf-8")
 	})
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 }
 
 // DELETE carries no body, so it needs no content type: the frontend sets the header
 // on POST, PUT and PATCH only.
 func TestADeleteWithoutAContentTypeIsServed(t *testing.T) {
-	e := newEnv(t)
-	u := person("person@example.com")
-	mine, _, err := credentials.Generate(u.ID, "mine")
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.tokens.EXPECT().ByID(mock.Anything, mine.ID).Return(mine, nil)
-	e.tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(nil)
-	rec := e.do(http.MethodDelete, "/api/me/tokens/"+mine.ID.String(), "", withCookie(e.signedIn(u)))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-	}
+	env := newEnv(t)
+	user := person("person@example.com")
+
+	mine, _, err := credentials.Generate(user.ID, "mine")
+	require.NoError(t, err, "Generate")
+
+	env.tokens.EXPECT().ByID(mock.Anything, mine.ID).Return(mine, nil)
+	env.tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(nil)
+
+	rec := env.do(http.MethodDelete, "/api/me/tokens/"+mine.ID.String(), "", withCookie(env.signedIn(user)))
+	require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 }
 
 // rateRefused reports whether rec is a rate-limit refusal of either kind.
@@ -237,59 +248,57 @@ func TestSignInRoutesAreRateLimitedPerClient(t *testing.T) {
 	}
 	for pattern, navigational := range limited {
 		t.Run(pattern, func(t *testing.T) {
-			e := newEnv(t, withRate(RateLimit{Burst: 1, Every: 10 * time.Second, MaxClients: 10}))
-			method, path := pathOf(pattern)
-			if rec := e.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
-				t.Fatal("the first attempt was refused")
-			}
-			rec := e.do(method, path, "{", fromIP("198.51.100.1"))
-			if navigational {
-				if rec.Code != http.StatusFound || rec.Header().Get("Location") != loginRateLimited {
-					t.Fatalf("status %d to %q, want 302 to %s", rec.Code, rec.Header().Get("Location"), loginRateLimited)
-				}
-				if ct := rec.Header().Get("Content-Type"); ct == "application/json" {
-					t.Fatal("a navigational route answered with JSON")
-				}
-			} else {
-				apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
-				if got := rec.Header().Get("Retry-After"); got != "10" {
-					t.Fatalf("Retry-After = %q, want 10", got)
-				}
-			}
-			// Another client behind the same proxy connection is not limited.
-			if rec := e.do(method, path, "{", fromIP("198.51.100.2")); rateRefused(rec) {
-				t.Fatal("a different client was refused")
-			}
-			// Once the bucket refills the first client is admitted again.
-			e.clock.advance(10 * time.Second)
-			if rec := e.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
-				t.Fatal("the client was still refused after the bucket refilled")
-			}
+			checkSignInRouteLimit(t, pattern, navigational)
 		})
 	}
 
 	t.Run("other routes", func(t *testing.T) {
 		e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
 		for i := range 3 {
-			if rec := e.do(http.MethodGet, "/api/auth/config", ""); rec.Code != http.StatusOK {
-				t.Fatalf("attempt %d: status = %d, want 200", i+1, rec.Code)
-			}
+			rec := e.do(http.MethodGet, "/api/auth/config", "")
+			require.Equal(t, http.StatusOK, rec.Code, "attempt %d: status", i+1)
 		}
 	})
+}
+
+// checkSignInRouteLimit asserts pattern admits one attempt per client per bucket
+// refill and refuses the next the way its kind of route must: navigational routes
+// redirect to the login page, the others answer 429 JSON with Retry-After.
+func checkSignInRouteLimit(t *testing.T, pattern string, navigational bool) {
+	t.Helper()
+
+	env := newEnv(t, withRate(RateLimit{Burst: 1, Every: 10 * time.Second, MaxClients: 10}))
+
+	method, path := pathOf(pattern)
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.1"))), "the first attempt was refused")
+
+	rec := env.do(method, path, "{", fromIP("198.51.100.1"))
+	if navigational {
+		require.Equal(t, http.StatusFound, rec.Code, "status")
+		require.Equal(t, loginRateLimited, rec.Header().Get("Location"), "redirect")
+		require.NotEqual(t, "application/json", rec.Header().Get("Content-Type"), "a navigational route answered with JSON")
+	} else {
+		apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
+		require.Equal(t, "10", rec.Header().Get("Retry-After"), "Retry-After")
+	}
+	// Another client behind the same proxy connection is not limited.
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.2"))), "a different client was refused")
+	// Once the bucket refills the first client is admitted again.
+	env.clock.advance(10 * time.Second)
+
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.1"))), "the client was still refused after the bucket refilled")
 }
 
 // An IPv6 client can use any address of its /64, so the /64 is what is limited: two
 // addresses in one /64 share a bucket, and a neighbouring /64 has its own.
 func TestIPv6ClientsAreLimitedByTheirSlash64(t *testing.T) {
-	e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
-	if rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1::1")); rateRefused(rec) {
-		t.Fatal("the first attempt was refused")
-	}
-	rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1:ffff:ffff:ffff:ffff"))
+	env := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
+	require.False(t, rateRefused(env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1::1"))), "the first attempt was refused")
+
+	rec := env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1:ffff:ffff:ffff:ffff"))
 	apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
-	if rec := e.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:2::1")); rateRefused(rec) {
-		t.Fatal("a client in another /64 was refused")
-	}
+
+	require.False(t, rateRefused(env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:2::1"))), "a client in another /64 was refused")
 }
 
 // Without X-Real-IP (or with garbage in it) the connection's peer is the client.
@@ -301,14 +310,14 @@ func TestClientIPFallsBackToThePeerAddress(t *testing.T) {
 		" 2001:db8::1 ":    "2001:db8::1",
 		"::ffff:192.0.2.9": "192.0.2.9",
 	} {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", http.NoBody)
+
 		req.RemoteAddr = testClientAddr
 		if header != "" {
 			req.Header.Set("X-Real-IP", header)
 		}
-		if got := clientIP(req); got != want {
-			t.Errorf("X-Real-IP %q: clientIP = %q, want %q", header, got, want)
-		}
+
+		assert.Equal(t, want, clientIP(req), "X-Real-IP %q: clientIP", header)
 	}
 }
 
@@ -323,24 +332,25 @@ func TestRetryAfterRoundsUp(t *testing.T) {
 	} {
 		rec := httptest.NewRecorder()
 		writeRetryAfter(rec, wait, codeRateLimited, "slow down")
-		if got := rec.Header().Get("Retry-After"); got != strconv.Itoa(want) {
-			t.Errorf("wait %v: Retry-After = %q, want %d", wait, got, want)
-		}
+
+		assert.Equal(t, strconv.Itoa(want), rec.Header().Get("Retry-After"), "wait %v: Retry-After", wait)
 	}
 }
 
 func TestNewRouterRefusesOIDCWithoutAUsableKey(t *testing.T) {
 	e := newEnv(t, withOIDC)
 	d := e.deps
+
 	d.SessionKey = []byte("too short")
-	if _, err := NewRouter(d); err == nil {
-		t.Fatal("NewRouter accepted OIDC with a short session key")
-	}
+	_, err := NewRouter(d)
+	require.Error(t, err, "NewRouter accepted OIDC with a short session key")
 }
 
 func TestServerHasEveryTimeoutSet(t *testing.T) {
 	s := NewServer("127.0.0.1:0", http.NotFoundHandler())
-	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 || s.MaxHeaderBytes <= 0 {
-		t.Fatalf("server = %+v: a zero timeout lets a client hold a connection forever", s)
-	}
+	require.Positive(t, s.ReadHeaderTimeout, "ReadHeaderTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.ReadTimeout, "ReadTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.WriteTimeout, "WriteTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.IdleTimeout, "IdleTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.MaxHeaderBytes, "MaxHeaderBytes must be set")
 }

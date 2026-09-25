@@ -12,6 +12,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/stretchr/testify/require"
 )
 
 // Doubles that are not mocks: trivial no-op implementations shared by the tests of
@@ -27,15 +28,26 @@ func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 func mustPolicy(t *testing.T, rules ...string) access.Policy {
 	t.Helper()
-	var p access.Policy
+
+	policy := make(access.Policy, 0, len(rules))
+
 	for _, raw := range rules {
-		r, err := access.ParseRule(raw)
-		if err != nil {
-			t.Fatalf("ParseRule(%q): %v", raw, err)
-		}
-		p = append(p, r)
+		rule, err := access.ParseRule(raw)
+		require.NoError(t, err, "ParseRule(%q)", raw)
+
+		policy = append(policy, rule)
 	}
-	return p
+
+	return policy
+}
+
+// isExactly reports whether err is target itself rather than something wrapping it,
+// for control flow such as a switch case; assertions use require.Same. Refusals are
+// compared this way on purpose: fmt.Errorf("no such user: %w", ErrInvalidCredentials)
+// satisfies errors.Is while putting the reason back in the message, which is the
+// oracle those tests exist to close.
+func isExactly(err, target error) bool {
+	return err == target //nolint:errorlint // identity, not errors.Is, is the check
 }
 
 type discardLogger struct{}

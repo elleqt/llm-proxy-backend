@@ -5,19 +5,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
+	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // catalogDoc is a catalog in the upstream shape: sections we map, one we do not,
@@ -52,9 +52,8 @@ const catalogDoc = `{
 
 func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 	got, err := pricecatalog.Parse([]byte(catalogDoc))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	require.NoError(t, err, "Parse")
+
 	want := []app.ModelPrice{
 		// openai fills what openai-codex lacks a price for, and nothing else.
 		{Provider: "chatgpt", Model: "gpt-4.1", Input: 2, Output: 8, CacheRead: 0.5},
@@ -63,21 +62,15 @@ func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 		{Provider: "claude", Model: "claude-free"},
 		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Parse = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
-		}
-	}
+	require.Len(t, got, len(want), "Parse = %+v", got)
+
+	assert.Equal(t, want, got)
 }
 
 func TestParseRefusesWhatIsNotACatalog(t *testing.T) {
 	for _, doc := range []string{`[]`, `{"anthropic": [1, 2]}`, `not json`} {
-		if _, err := pricecatalog.Parse([]byte(doc)); err == nil {
-			t.Errorf("Parse(%s) accepted", doc)
-		}
+		_, err := pricecatalog.Parse([]byte(doc))
+		assert.Error(t, err, "Parse(%s) accepted", doc)
 	}
 }
 
@@ -85,44 +78,47 @@ func TestParseRefusesWhatIsNotACatalog(t *testing.T) {
 // catalog, a 200 carries its prices and new validators.
 func TestFetchIsConditional(t *testing.T) {
 	var gotETag, gotSince, gotUA string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+
+	srv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
 		gotETag, gotSince, gotUA = r.Header.Get("If-None-Match"), r.Header.Get("If-Modified-Since"), r.Header.Get("User-Agent")
 		if gotETag == `"v1"` {
-			w.WriteHeader(http.StatusNotModified)
+			writer.WriteHeader(http.StatusNotModified)
+
 			return
 		}
-		w.Header().Set("ETag", `"v1"`)
-		w.Header().Set("Last-Modified", "Tue, 22 Sep 2026 10:00:00 GMT")
-		_, _ = w.Write([]byte(catalogDoc))
+
+		writer.Header().Set("ETag", `"v1"`)
+		writer.Header().Set("Last-Modified", "Tue, 22 Sep 2026 10:00:00 GMT")
+		_, _ = writer.Write([]byte(catalogDoc))
 	}))
 	defer srv.Close()
+
 	src := pricecatalog.New(srv.URL, "v9.9.9")
 
 	first, err := src.Fetch(context.Background(), app.CatalogValidators{})
-	if err != nil {
-		t.Fatalf("first fetch: %v", err)
-	}
+	require.NoError(t, err, "first fetch")
+
 	want := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
-	if first.Unchanged || len(first.Prices) != 5 || first.Validators != want {
-		t.Fatalf("first fetch = %+v, want 5 prices and the validators", first)
-	}
-	if gotETag != "" || gotSince != "" || !strings.Contains(gotUA, "llm-proxy/v9.9.9") {
-		t.Fatalf("first request: If-None-Match %q, If-Modified-Since %q, User-Agent %q", gotETag, gotSince, gotUA)
-	}
+
+	require.False(t, first.Unchanged, "first fetch unchanged")
+	require.Len(t, first.Prices, 5, "first fetch prices")
+	require.Equal(t, want, first.Validators, "first fetch validators")
+
+	require.Empty(t, gotETag, "first request If-None-Match")
+	require.Empty(t, gotSince, "first request If-Modified-Since")
+	require.Contains(t, gotUA, "llm-proxy/v9.9.9", "first request User-Agent")
 
 	second, err := src.Fetch(context.Background(), first.Validators)
-	if err != nil {
-		t.Fatalf("second fetch: %v", err)
-	}
-	if !second.Unchanged || gotSince != want.LastModified {
-		t.Fatalf("second fetch = %+v (If-Modified-Since %q), want unchanged", second, gotSince)
-	}
+	require.NoError(t, err, "second fetch")
+	require.True(t, second.Unchanged, "second fetch = %+v, want unchanged", second)
+	require.Equal(t, want.LastModified, gotSince, "second request If-Modified-Since")
 }
 
 // A failure is an error that says what happened and never repeats the body.
 func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 	const secret = "body-that-must-not-leak"
-	for name, c := range map[string]struct {
+
+	for name, tc := range map[string]struct {
 		handler http.HandlerFunc
 		want    string
 	}{
@@ -137,13 +133,20 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 			_, _ = w.Write([]byte(secret))
 		}, "larger than 64 MiB"},
 		// No Content-Length: only reading the body can find it too large.
-		"too large, chunked": {func(w http.ResponseWriter, _ *http.Request) {
+		"too large, chunked": {func(writer http.ResponseWriter, _ *http.Request) {
+			// A writer that cannot flush makes the fetch fail differently, failing the test.
+			flusher, ok := writer.(http.Flusher)
+			if !ok {
+				return
+			}
+
 			chunk := make([]byte, 1<<20)
 			for range pricecatalog.MaxBody>>20 + 1 {
-				if _, err := w.Write(chunk); err != nil {
+				if _, err := writer.Write(chunk); err != nil {
 					return
 				}
-				w.(http.Flusher).Flush()
+
+				flusher.Flush()
 			}
 		}, "larger than 64 MiB"},
 		// With no validators sent there is nothing to be unchanged from.
@@ -152,22 +155,29 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 		}, "304 to an unconditional request"},
 		// The reason phrase is the server's to choose; only the code is kept.
 		"reason phrase": {func(w http.ResponseWriter, _ *http.Request) {
-			conn, buf, err := w.(http.Hijacker).Hijack()
+			// A writer that cannot be hijacked makes the fetch fail differently, failing the test.
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				return
+			}
+
+			conn, buf, err := hijacker.Hijack()
 			if err != nil {
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
+
 			_, _ = buf.WriteString("HTTP/1.1 503 " + secret + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 			_ = buf.Flush()
 		}, "the catalog answered 503"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(c.handler)
+			srv := httptest.NewServer(tc.handler)
 			defer srv.Close()
+
 			_, err := pricecatalog.New(srv.URL, "").Fetch(context.Background(), app.CatalogValidators{})
-			if err == nil || !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("err = %v, want one naming %q without the body", err, c.want)
-			}
+			require.ErrorContains(t, err, tc.want)
+			require.NotContains(t, err.Error(), secret, "error repeats the body")
 		})
 	}
 }
@@ -182,38 +192,43 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 
 	manual, catalog, audit := mocks.NewPriceRepo(t), mocks.NewPriceCatalogRepo(t), mocks.NewAuditSink(t)
 	manual.EXPECT().List(mock.Anything).Return(nil, nil)
+
 	var stored []app.ModelPrice
+
 	catalog.EXPECT().List(mock.Anything).RunAndReturn(func(context.Context) ([]app.ModelPrice, error) { return stored, nil })
 	catalog.EXPECT().State(mock.Anything).Return(app.CatalogState{}, nil)
 	catalog.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
 		func(_ context.Context, p []app.ModelPrice, _ app.CatalogState, _ time.Time) error {
 			stored = p
+
 			return nil
 		})
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil)
 
 	table := &app.PriceTable{}
 	m := metrics.New(prometheus.NewRegistry())
+
 	prices := app.NewPrices(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
-	if err := prices.Load(context.Background()); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, prices.Load(context.Background()), "Load")
+
 	usage := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 1_000_000, TokensTotal: 1_000_000}
+
 	cost := func() app.UsageCost {
 		p, ok := table.Price(usage.Provider, usage.Model)
+
 		return app.PriceUsage(usage, p, ok)
 	}
-	if before := cost(); before.Priced || before.UnpricedTokens != 1_000_000 {
-		t.Fatalf("before the check: %+v, want every token unpriced", before)
-	}
+	before := cost()
+	require.False(t, before.Priced, "before the check: %+v, want every token unpriced", before)
+	require.Equal(t, int64(1_000_000), before.UnpricedTokens, "before the check: want every token unpriced")
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin, Status: identity.StatusActive}
-	if _, err := prices.Refresh(context.Background(), admin); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if after := cost(); !after.Priced || after.TotalUSD() != 3 {
-		t.Fatalf("after the check: %+v, want $3", after)
-	}
+	_, err := prices.Refresh(context.Background(), admin)
+	require.NoError(t, err, "Refresh")
+
+	after := cost()
+	require.True(t, after.Priced, "after the check: %+v, want priced", after)
+	require.Equal(t, 3.0, after.TotalUSD(), "after the check")
 }
 
 type clock struct{}
@@ -229,8 +244,9 @@ func (quiet) Info(string, ...slog.Attr) {}
 // URL must not reach the store.
 func TestFingerprintNamesTheURLWithoutHoldingIt(t *testing.T) {
 	a := pricecatalog.New("https://user:s3cret@catalog.example.com/models.json", "").Fingerprint()
+
 	b := pricecatalog.New("https://catalog.example.com/models.json", "").Fingerprint()
-	if a == b || strings.Contains(a, "s3cret") || strings.Contains(a, "catalog.example.com") {
-		t.Fatalf("fingerprints %q and %q: want distinct and free of the URL", a, b)
-	}
+	require.NotEqual(t, a, b, "fingerprints must be distinct")
+	require.NotContains(t, a, "s3cret", "fingerprint holds the URL")
+	require.NotContains(t, a, "catalog.example.com", "fingerprint holds the URL")
 }

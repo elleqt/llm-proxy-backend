@@ -5,18 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // frozen is the instant the injected clock reports, so every timestamp the service
@@ -28,10 +27,9 @@ func TestIssueForOtherUserRequiresAdmin(t *testing.T) {
 	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
+
 	_, _, err := svc.Issue(context.Background(), actor, uuid.New(), "someone else")
-	if err != app.ErrForbidden {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	require.Same(t, app.ErrForbidden, err, "want the bare ErrForbidden")
 	// The strict mocks carry no expectations: a refusal must not reach the owner
 	// lookup or the repository at all.
 }
@@ -43,46 +41,38 @@ func TestAdminIssuesForServiceAccount(t *testing.T) {
 
 	service := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	users.EXPECT().ByID(mock.Anything, service.ID).Return(service, nil)
+
 	var stored credentials.Token
+
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		stored = tok
+
 		return nil
 	})
+
 	var event app.AuditEvent
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		event = e
+
 		return nil
 	})
 	clock.EXPECT().Now().Return(frozen)
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin}
+
 	issued, secret, err := svc.Issue(context.Background(), admin, service.ID, "panel")
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
-	}
-	if secret == "" {
-		t.Fatal("issued secret must be returned exactly once")
-	}
+	require.NoError(t, err, "Issue")
+	require.NotEmpty(t, secret, "issued secret must be returned exactly once")
 	// This is the only successful issue where the actor is not the owner, so it is the
 	// only place that can catch a key minted for the administrator who asked for it.
-	if stored.UserID != service.ID {
-		t.Fatalf("persisted owner = %v, want the service account %v (the actor is %v)", stored.UserID, service.ID, admin.ID)
-	}
-	if issued.UserID != service.ID {
-		t.Fatalf("returned owner = %v, want the service account %v", issued.UserID, service.ID)
-	}
-	if stored.Label != "panel" || issued.Label != "panel" {
-		t.Fatalf("label persisted %q, returned %q, want %q", stored.Label, issued.Label, "panel")
-	}
-	if stored.Hash != credentials.HashSecret(secret) {
-		t.Fatal("the persisted hash does not verify the returned secret")
-	}
-	if got := event.Detail["owner_id"]; got != service.ID.String() {
-		t.Fatalf("audit owner_id = %v, want the service account %v", got, service.ID)
-	}
-	if event.ActorID != admin.ID {
-		t.Fatalf("audit actor = %v, want the admin %v", event.ActorID, admin.ID)
-	}
+	require.Equal(t, service.ID, stored.UserID, "persisted owner: want the service account (the actor is %v)", admin.ID)
+	require.Equal(t, service.ID, issued.UserID, "returned owner: want the service account")
+	require.Equal(t, "panel", stored.Label, "persisted label")
+	require.Equal(t, "panel", issued.Label, "returned label")
+	require.Equal(t, credentials.HashSecret(secret), stored.Hash, "the persisted hash does not verify the returned secret")
+	require.Equal(t, service.ID.String(), event.Detail["owner_id"], "audit owner_id: want the service account")
+	require.Equal(t, admin.ID, event.ActorID, "audit actor: want the admin")
 }
 
 func TestIssueForUnknownOwnerIsNotFound(t *testing.T) {
@@ -93,10 +83,9 @@ func TestIssueForUnknownOwnerIsNotFound(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, owner).Return(identity.User{}, app.ErrNotFound)
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin}
+
 	_, _, err := svc.Issue(context.Background(), admin, owner, "panel")
-	if !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, err, app.ErrNotFound)
 }
 
 func TestIssueReturnsNoSecretWhenTheRowIsNotPersisted(t *testing.T) {
@@ -107,19 +96,14 @@ func TestIssueReturnsNoSecretWhenTheRowIsNotPersisted(t *testing.T) {
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
+
 	boom := errors.New("write failed")
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).Return(boom)
 
 	issued, secret, err := svc.Issue(context.Background(), owner, owner.ID, "laptop")
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the repository failure", err)
-	}
-	if secret != "" {
-		t.Fatal("a secret was handed out for a token that was never stored")
-	}
-	if issued != (credentials.Token{}) {
-		t.Fatalf("returned record = %+v, want the zero token", issued)
-	}
+	require.ErrorIs(t, err, boom, "want the repository failure")
+	require.Empty(t, secret, "a secret was handed out for a token that was never stored")
+	require.Zero(t, issued, "returned record: want the zero token")
 	// audit is a strict mock with no expectation: a failed create records nothing, and
 	// any Record call fails the test.
 }
@@ -133,32 +117,27 @@ func TestIssueRetractsTheRowWhenTheAuditRecordFails(t *testing.T) {
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).Return(nil)
+
 	sinkDown := errors.New("audit sink unreachable")
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(sinkDown)
 
 	var saved credentials.Token
+
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		saved = tok
+
 		return nil
 	})
 
 	_, secret, err := svc.Issue(context.Background(), owner, owner.ID, "laptop")
-	if !errors.Is(err, sinkDown) {
-		t.Fatalf("err = %v, want the audit failure", err)
-	}
-	if secret != "" {
-		t.Fatal("a secret was handed out for an unaudited token")
-	}
+	require.ErrorIs(t, err, sinkDown, "want the audit failure")
+	require.Empty(t, secret, "a secret was handed out for an unaudited token")
 	// The row is durable by now, so it must not be left unaudited *and* live.
-	if saved.Active() {
-		t.Fatal("the unaudited token was left active")
-	}
-	if saved.RevokedBy == nil || *saved.RevokedBy != owner.ID {
-		t.Fatalf("compensating revoke RevokedBy = %v, want %v", saved.RevokedBy, owner.ID)
-	}
-	if saved.RevokedAt == nil || !saved.RevokedAt.Equal(frozen) {
-		t.Fatalf("compensating revoke RevokedAt = %v, want %v", saved.RevokedAt, frozen)
-	}
+	require.False(t, saved.Active(), "the unaudited token was left active")
+	require.NotNil(t, saved.RevokedBy, "compensating revoke RevokedBy")
+	require.Equal(t, owner.ID, *saved.RevokedBy, "compensating revoke RevokedBy")
+	require.NotNil(t, saved.RevokedAt, "compensating revoke RevokedAt")
+	require.True(t, saved.RevokedAt.Equal(frozen), "compensating revoke RevokedAt = %v, want %v", *saved.RevokedAt, frozen)
 }
 
 func TestIssueErrorNamesBothFailuresWhenTheRetractionAlsoFails(t *testing.T) {
@@ -169,37 +148,35 @@ func TestIssueErrorNamesBothFailuresWhenTheRetractionAlsoFails(t *testing.T) {
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
+
 	var stored credentials.Token
+
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		stored = tok
+
 		return nil
 	})
+
 	sinkDown := errors.New("audit sink unreachable")
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(sinkDown)
+
 	saveDown := errors.New("save failed")
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(saveDown)
 
 	var warned string
+
 	logger.EXPECT().Warn(mock.Anything, mock.Anything).Run(func(msg string, attrs ...slog.Attr) {
 		warned = fmt.Sprint(msg, attrs)
 	})
 
 	_, secret, err := svc.Issue(context.Background(), owner, owner.ID, "laptop")
-	if !errors.Is(err, sinkDown) {
-		t.Fatalf("err = %v, want it to wrap the audit failure", err)
-	}
-	if !strings.Contains(err.Error(), saveDown.Error()) {
-		t.Fatalf("err = %v, want it to name the failed compensating write too", err)
-	}
-	if secret != "" {
-		t.Fatal("a secret was handed out for an unaudited token")
-	}
+	require.ErrorIs(t, err, sinkDown, "want it to wrap the audit failure")
+	require.ErrorContains(t, err, saveDown.Error(), "want it to name the failed compensating write too")
+	require.Empty(t, secret, "a secret was handed out for an unaudited token")
 	// A live row no audit record describes is the one outcome an operator must fix by
 	// hand, so the error string handed to the caller cannot be its only trace.
 	for _, want := range []string{stored.ID.String(), owner.ID.String(), sinkDown.Error(), saveDown.Error()} {
-		if !strings.Contains(warned, want) {
-			t.Fatalf("warning %q does not name %q", warned, want)
-		}
+		require.Contains(t, warned, want, "warning does not name it")
 	}
 }
 
@@ -212,60 +189,51 @@ func TestOwnerIssuesListsAndRevokesOwnToken(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
 
 	var stored credentials.Token
+
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		stored = tok
+
 		return nil
 	})
 
 	ctx := context.Background()
+
 	issued, secret, err := svc.Issue(ctx, owner, owner.ID, "laptop")
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
-	}
-	if stored.ID != issued.ID || stored.UserID != owner.ID || stored.Label != "laptop" {
-		t.Fatalf("persisted token = %+v, want the issued record owned by %v", stored, owner.ID)
-	}
-	if stored.Hash != credentials.HashSecret(secret) {
-		t.Fatal("the persisted hash does not verify the returned secret")
-	}
-	if !stored.CreatedAt.Equal(frozen) {
-		t.Fatalf("CreatedAt = %v, want the injected clock %v", stored.CreatedAt, frozen)
-	}
-	if !stored.Active() {
-		t.Fatal("a freshly issued token must be active")
-	}
+	require.NoError(t, err, "Issue")
+	require.Equal(t, issued.ID, stored.ID, "persisted token id")
+	require.Equal(t, owner.ID, stored.UserID, "persisted token owner")
+	require.Equal(t, "laptop", stored.Label, "persisted token label")
+	require.Equal(t, credentials.HashSecret(secret), stored.Hash, "the persisted hash does not verify the returned secret")
+	require.True(t, stored.CreatedAt.Equal(frozen), "CreatedAt = %v, want the injected clock %v", stored.CreatedAt, frozen)
+	require.True(t, stored.Active(), "a freshly issued token must be active")
 
 	tokens.EXPECT().ListByUser(mock.Anything, owner.ID).RunAndReturn(func(_ context.Context, _ uuid.UUID) ([]credentials.Token, error) {
 		return []credentials.Token{stored}, nil
 	})
+
 	listed, err := svc.List(ctx, owner, owner.ID)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(listed) != 1 || listed[0].ID != issued.ID {
-		t.Fatalf("List returned %+v, want the issued token", listed)
-	}
+	require.NoError(t, err, "List")
+	require.Len(t, listed, 1, "List: want the issued token")
+	require.Equal(t, issued.ID, listed[0].ID, "List: want the issued token")
 
 	tokens.EXPECT().ByID(mock.Anything, issued.ID).RunAndReturn(func(_ context.Context, _ uuid.UUID) (credentials.Token, error) {
 		return stored, nil
 	})
+
 	var saved credentials.Token
+
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		saved = tok
+
 		return nil
 	})
-	if err := svc.Revoke(ctx, owner, issued.ID); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	if saved.Active() {
-		t.Fatal("the saved token is still active after Revoke")
-	}
-	if saved.RevokedBy == nil || *saved.RevokedBy != owner.ID {
-		t.Fatalf("RevokedBy = %v, want the actor %v", saved.RevokedBy, owner.ID)
-	}
-	if saved.RevokedAt == nil || !saved.RevokedAt.Equal(frozen) {
-		t.Fatalf("RevokedAt = %v, want the injected clock %v", saved.RevokedAt, frozen)
-	}
+
+	require.NoError(t, svc.Revoke(ctx, owner, issued.ID), "Revoke")
+	require.False(t, saved.Active(), "the saved token is still active after Revoke")
+	require.NotNil(t, saved.RevokedBy, "RevokedBy")
+	require.Equal(t, owner.ID, *saved.RevokedBy, "RevokedBy: want the actor")
+	require.NotNil(t, saved.RevokedAt, "RevokedAt")
+	require.True(t, saved.RevokedAt.Equal(frozen), "RevokedAt = %v, want the injected clock %v", *saved.RevokedAt, frozen)
 }
 
 func TestListForOtherUserRequiresAdmin(t *testing.T) {
@@ -273,9 +241,8 @@ func TestListForOtherUserRequiresAdmin(t *testing.T) {
 	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
-	if _, err := svc.List(context.Background(), actor, uuid.New()); err != app.ErrForbidden {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	_, err := svc.List(context.Background(), actor, uuid.New())
+	require.Same(t, app.ErrForbidden, err, "want the bare ErrForbidden")
 }
 
 // An actor nobody populated is nobody: without the nil guard its zero id matches an
@@ -285,21 +252,19 @@ func TestUnpopulatedActorIsForbidden(t *testing.T) {
 	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	ctx := context.Background()
-	if _, _, err := svc.Issue(ctx, identity.User{}, uuid.Nil, "ghost"); err != app.ErrForbidden {
-		t.Fatalf("Issue: err = %v, want ErrForbidden", err)
-	}
-	if _, err := svc.List(ctx, identity.User{}, uuid.Nil); err != app.ErrForbidden {
-		t.Fatalf("List: err = %v, want ErrForbidden", err)
-	}
+	_, _, err := svc.Issue(ctx, identity.User{}, uuid.Nil, "ghost")
+	require.Same(t, app.ErrForbidden, err, "Issue: want the bare ErrForbidden")
+
+	_, err = svc.List(ctx, identity.User{}, uuid.Nil)
+	require.Same(t, app.ErrForbidden, err, "List: want the bare ErrForbidden")
 
 	orphan, _, err := credentials.Generate(uuid.Nil, "ghost")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
+
 	tokens.EXPECT().ByID(mock.Anything, orphan.ID).Return(orphan, nil)
-	if err := svc.Revoke(ctx, identity.User{}, orphan.ID); err != app.ErrForbidden {
-		t.Fatalf("Revoke: err = %v, want ErrForbidden", err)
-	}
+
+	err = svc.Revoke(ctx, identity.User{}, orphan.ID)
+	require.Same(t, app.ErrForbidden, err, "Revoke: want the bare ErrForbidden")
 }
 
 func TestRevokeOtherUsersTokenIsForbidden(t *testing.T) {
@@ -307,16 +272,15 @@ func TestRevokeOtherUsersTokenIsForbidden(t *testing.T) {
 	svc := app.NewTokenService(users, tokens, nopAudit{}, clock, discardLogger{})
 
 	victim := uuid.New()
+
 	tok, _, err := credentials.Generate(victim, "laptop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
+
 	tokens.EXPECT().ByID(mock.Anything, tok.ID).Return(tok, nil)
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
-	if err := svc.Revoke(context.Background(), actor, tok.ID); err != app.ErrForbidden {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	err = svc.Revoke(context.Background(), actor, tok.ID)
+	require.Same(t, app.ErrForbidden, err, "want the bare ErrForbidden")
 	// No Save expectation: a refused revocation must not touch the record.
 }
 
@@ -326,23 +290,22 @@ func TestAdminRevokesAnotherUsersToken(t *testing.T) {
 	clock.EXPECT().Now().Return(frozen)
 
 	tok, _, err := credentials.Generate(uuid.New(), "laptop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
+
 	tokens.EXPECT().ByID(mock.Anything, tok.ID).Return(tok, nil)
+
 	var saved credentials.Token
+
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, got credentials.Token) error {
 		saved = got
+
 		return nil
 	})
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin}
-	if err := svc.Revoke(context.Background(), admin, tok.ID); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
-	if saved.RevokedBy == nil || *saved.RevokedBy != admin.ID {
-		t.Fatalf("RevokedBy = %v, want the admin %v", saved.RevokedBy, admin.ID)
-	}
+	require.NoError(t, svc.Revoke(context.Background(), admin, tok.ID), "Revoke")
+	require.NotNil(t, saved.RevokedBy, "RevokedBy")
+	require.Equal(t, admin.ID, *saved.RevokedBy, "RevokedBy: want the admin")
 }
 
 func TestRevokeUnknownTokenIsNotFound(t *testing.T) {
@@ -353,9 +316,7 @@ func TestRevokeUnknownTokenIsNotFound(t *testing.T) {
 	tokens.EXPECT().ByID(mock.Anything, id).Return(credentials.Token{}, app.ErrNotFound)
 
 	actor := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin}
-	if err := svc.Revoke(context.Background(), actor, id); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	require.ErrorIs(t, svc.Revoke(context.Background(), actor, id), app.ErrNotFound)
 }
 
 func TestRevokeTwiceFails(t *testing.T) {
@@ -364,27 +325,25 @@ func TestRevokeTwiceFails(t *testing.T) {
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
+
 	stored, _, err := credentials.Generate(owner.ID, "laptop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
+
 	tokens.EXPECT().ByID(mock.Anything, stored.ID).RunAndReturn(func(_ context.Context, _ uuid.UUID) (credentials.Token, error) {
 		return stored, nil
 	})
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, got credentials.Token) error {
 		stored = got
+
 		return nil
 	})
 
 	ctx := context.Background()
-	if err := svc.Revoke(ctx, owner, stored.ID); err != nil {
-		t.Fatalf("first Revoke: %v", err)
-	}
+	require.NoError(t, svc.Revoke(ctx, owner, stored.ID), "first Revoke")
 	// The second attempt must fail against the state the first one wrote, and must
 	// not write again — Save is expected but the mock records every call.
-	if err := svc.Revoke(ctx, owner, stored.ID); !errors.Is(err, credentials.ErrAlreadyRevoked) {
-		t.Fatalf("second Revoke: err = %v, want ErrAlreadyRevoked", err)
-	}
+	require.ErrorIs(t, svc.Revoke(ctx, owner, stored.ID), credentials.ErrAlreadyRevoked, "second Revoke")
+
 	tokens.AssertNumberOfCalls(t, "Save", 1)
 }
 
@@ -397,33 +356,32 @@ func TestRevokeSucceedsAndLogsWhenTheAuditRecordFails(t *testing.T) {
 	clock.EXPECT().Now().Return(frozen)
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
+
 	tok, _, err := credentials.Generate(owner.ID, "laptop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
+
 	tokens.EXPECT().ByID(mock.Anything, tok.ID).Return(tok, nil)
+
 	var saved credentials.Token
+
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, got credentials.Token) error {
 		saved = got
+
 		return nil
 	})
+
 	sinkDown := errors.New("audit sink unreachable")
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(sinkDown)
 
 	var warned string
+
 	logger.EXPECT().Warn(mock.Anything, mock.Anything).Run(func(msg string, attrs ...slog.Attr) {
 		warned = fmt.Sprint(msg, attrs)
 	})
 
-	if err := svc.Revoke(context.Background(), owner, tok.ID); err != nil {
-		t.Fatalf("Revoke: err = %v, want nil for a revocation that was saved", err)
-	}
-	if saved.Active() {
-		t.Fatal("the token was not revoked")
-	}
-	if !strings.Contains(warned, tok.ID.String()) {
-		t.Fatalf("warning %q does not name the token whose audit record was lost", warned)
-	}
+	require.NoError(t, svc.Revoke(context.Background(), owner, tok.ID), "Revoke: want nil for a revocation that was saved")
+	require.False(t, saved.Active(), "the token was not revoked")
+	require.Contains(t, warned, tok.ID.String(), "warning does not name the token whose audit record was lost")
 }
 
 func TestAuditDetailsNeverCarrySecretOrHash(t *testing.T) {
@@ -433,57 +391,47 @@ func TestAuditDetailsNeverCarrySecretOrHash(t *testing.T) {
 	clock.EXPECT().Now().Return(frozen)
 
 	var events []app.AuditEvent
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		events = append(events, e)
+
 		return nil
 	})
 
 	owner := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleUser}
 	users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
+
 	var stored credentials.Token
+
 	tokens.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, tok credentials.Token) error {
 		stored = tok
+
 		return nil
 	})
 
 	ctx := context.Background()
+
 	issued, secret, err := svc.Issue(ctx, owner, owner.ID, "laptop")
-	if err != nil {
-		t.Fatalf("Issue: %v", err)
-	}
+	require.NoError(t, err, "Issue")
 
 	tokens.EXPECT().ByID(mock.Anything, issued.ID).RunAndReturn(func(_ context.Context, _ uuid.UUID) (credentials.Token, error) {
 		return stored, nil
 	})
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(nil)
-	if err := svc.Revoke(ctx, owner, issued.ID); err != nil {
-		t.Fatalf("Revoke: %v", err)
-	}
 
-	if len(events) != 2 {
-		t.Fatalf("recorded %d audit events, want one for the issue and one for the revoke", len(events))
-	}
+	require.NoError(t, svc.Revoke(ctx, owner, issued.ID), "Revoke")
+	require.Len(t, events, 2, "want one audit event for the issue and one for the revoke")
+
 	wantActions := []string{"token.issue", "token.revoke"}
-	for i, e := range events {
-		if e.Action != wantActions[i] {
-			t.Fatalf("event %d action = %q, want %q", i, e.Action, wantActions[i])
-		}
-		if e.ActorID != owner.ID {
-			t.Fatalf("event %d actor = %v, want %v", i, e.ActorID, owner.ID)
-		}
-		if !e.At.Equal(frozen) {
-			t.Fatalf("event %d At = %v, want the injected clock %v", i, e.At, frozen)
-		}
-		rendered := renderEvent(e)
-		if strings.Contains(rendered, secret) {
-			t.Fatalf("audit event %d carried the token secret: %s", i, rendered)
-		}
-		if strings.Contains(rendered, stored.Hash) {
-			t.Fatalf("audit event %d carried the token hash: %s", i, rendered)
-		}
-		if !strings.Contains(rendered, issued.ID.String()) {
-			t.Fatalf("audit event %d does not identify the token: %s", i, rendered)
-		}
+	for idx, event := range events {
+		require.Equal(t, wantActions[idx], event.Action, "event %d action", idx)
+		require.Equal(t, owner.ID, event.ActorID, "event %d actor", idx)
+		require.True(t, event.At.Equal(frozen), "event %d At = %v, want the injected clock %v", idx, event.At, frozen)
+
+		rendered := renderEvent(event)
+		require.NotContains(t, rendered, secret, "audit event %d carried the token secret", idx)
+		require.NotContains(t, rendered, stored.Hash, "audit event %d carried the token hash", idx)
+		require.Contains(t, rendered, issued.ID.String(), "audit event %d does not identify the token", idx)
 	}
 }
 
@@ -507,18 +455,23 @@ func TestIssueRetractsTheRowEvenWhenTheClientHungUp(t *testing.T) {
 
 	ctx, hangUp := context.WithCancel(context.Background())
 	defer hangUp()
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(context.Context, app.AuditEvent) error {
 		hangUp()
+
 		return ctx.Err()
 	})
+
 	var saveCtx compensationSeen
+
 	tokens.EXPECT().Save(mock.Anything, mock.Anything).RunAndReturn(func(sctx context.Context, _ credentials.Token) error {
 		saveCtx = observe(sctx)
+
 		return sctx.Err()
 	})
 
-	if _, _, err := svc.Issue(ctx, owner, owner.ID, "laptop"); err == nil {
-		t.Fatal("Issue succeeded although the issuance was never recorded")
-	}
+	_, _, err := svc.Issue(ctx, owner, owner.ID, "laptop")
+	require.Error(t, err, "Issue succeeded although the issuance was never recorded")
+
 	assertCompensationContext(t, saveCtx)
 }

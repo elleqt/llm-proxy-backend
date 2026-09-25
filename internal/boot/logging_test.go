@@ -8,9 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/elleqt/llm-proxy-backend/internal/config"
+	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // An upstream logrus record reaches the process log as a record of its own:
@@ -21,6 +22,7 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 	std := logrus.StandardLogger()
 	out, formatter, level := std.Out, std.Formatter, std.GetLevel()
 	hooks := std.ReplaceHooks(make(logrus.LevelHooks))
+
 	t.Cleanup(func() {
 		std.SetOutput(out)
 		std.SetFormatter(formatter)
@@ -36,36 +38,27 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 	logrus.WithField("request_id", "a1b2c3d4").Info("request served")
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("got %d records, want the warning and the info line only:\n%s", len(lines), buf.String())
-	}
+	require.Len(t, lines, 2, "want the warning and the info line only")
+
 	var warn, info map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &warn); err != nil {
-		t.Fatalf("record %q: %v", lines[0], err)
-	}
-	if err := json.Unmarshal([]byte(lines[1]), &info); err != nil {
-		t.Fatalf("record %q: %v", lines[1], err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &warn), "record %q", lines[0])
+	require.NoError(t, json.Unmarshal([]byte(lines[1]), &info), "record %q", lines[1])
+
 	for k, want := range map[string]any{
 		"level": "WARN", "msg": "quota exceeded", "provider": "claude",
 		"version": "0.1.2", "component": "cliproxyapi",
 	} {
-		if warn[k] != want {
-			t.Errorf("%s = %v, want %v (record %s)", k, warn[k], want, lines[0])
-		}
+		assert.Equal(t, want, warn[k], "%s (record %s)", k, lines[0])
 	}
-	if v, _ := warn["cliproxy_version"].(string); !strings.HasPrefix(v, "v7.") {
-		t.Errorf("cliproxy_version = %q, want the embedded CLIProxyAPI v7 module's version", v)
-	}
-	if ts, _ := warn["time"].(string); !strings.HasSuffix(ts, "Z") {
-		t.Errorf("time = %q, want UTC", ts)
-	}
-	if _, ok := warn["request_id"]; ok {
-		t.Errorf("the placeholder request_id was kept: %s", lines[0])
-	}
-	if info["request_id"] != "a1b2c3d4" {
-		t.Errorf("request_id = %v, want a real id kept", info["request_id"])
-	}
+
+	version, _ := warn["cliproxy_version"].(string)
+	assert.True(t, strings.HasPrefix(version, "v7."),
+		"cliproxy_version = %q, want the embedded CLIProxyAPI v7 module's version", version)
+
+	stamp, _ := warn["time"].(string)
+	assert.True(t, strings.HasSuffix(stamp, "Z"), "time = %q, want UTC", stamp)
+	assert.NotContains(t, warn, "request_id", "the placeholder request_id was kept")
+	assert.Equal(t, "a1b2c3d4", info["request_id"], "request_id, want a real id kept")
 }
 
 // Trace joins debug and fatal and panic join error; no logrus level lands on a
@@ -81,9 +74,7 @@ func TestLogrusLevelsKeepTheirSeverity(t *testing.T) {
 		logrus.PanicLevel: slog.LevelError,
 	}
 	for _, l := range logrus.AllLevels {
-		if got := slogLevel(l); got != want[l] {
-			t.Errorf("slogLevel(%v) = %v, want %v", l, got, want[l])
-		}
+		assert.Equal(t, want[l], slogLevel(l), "slogLevel(%v)", l)
 	}
 }
 
@@ -92,7 +83,7 @@ func TestLogrusLevelsKeepTheirSeverity(t *testing.T) {
 // tree names no release.
 func TestVersionPrecedence(t *testing.T) {
 	vcs := []debug.BuildSetting{{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}}
-	for _, c := range []struct {
+	for _, tc := range []struct {
 		name, injected string
 		bi             *debug.BuildInfo
 		want           string
@@ -106,8 +97,6 @@ func TestVersionPrecedence(t *testing.T) {
 		{"no commit", "", &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}}, "unknown"},
 		{"no build info", "", nil, "unknown"},
 	} {
-		if got := versionOf(c.injected, c.bi); got != c.want {
-			t.Errorf("%s: versionOf = %q, want %q", c.name, got, c.want)
-		}
+		assert.Equal(t, tc.want, versionOf(tc.injected, tc.bi), "%s: versionOf", tc.name)
 	}
 }

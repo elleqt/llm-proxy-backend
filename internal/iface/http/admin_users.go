@@ -6,12 +6,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
+	"github.com/google/uuid"
 )
 
 // The element types the contract declares inline, for which the generator emits
@@ -26,15 +25,15 @@ type (
 		Provider    string     `json:"provider"`
 		StatusCode  int        `json:"statusCode"`
 		Stream      bool       `json:"stream"`
-		TokenId     *uuid.UUID `json:"tokenId,omitempty"`
+		TokenId     *uuid.UUID `json:"tokenId,omitempty"` //nolint:revive // must match the generated api struct field for the alias
 		TokensTotal int        `json:"tokensTotal"`
 	}
 	activityAudit = struct {
-		Action  string                  `json:"action"`
-		ActorId *uuid.UUID              `json:"actorId,omitempty"`
-		At      time.Time               `json:"at"`
-		Detail  *map[string]interface{} `json:"detail,omitempty"`
-		Target  *string                 `json:"target,omitempty"`
+		Action  string          `json:"action"`
+		ActorId *uuid.UUID      `json:"actorId,omitempty"` //nolint:revive // must match the generated api struct field for the alias
+		At      time.Time       `json:"at"`
+		Detail  *map[string]any `json:"detail,omitempty"`
+		Target  *string         `json:"target,omitempty"`
 	}
 	catalogProvider = struct {
 		Models []string `json:"models"`
@@ -71,240 +70,297 @@ func pathID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, boo
 	id, err := uuid.Parse(r.PathValue(name))
 	if err != nil {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such resource")
+
 		return uuid.Nil, false
 	}
+
 	return id, true
 }
 
-func (rt *router) listUsers(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	views, err := rt.AdminUsers.ListUsers(r.Context(), c.user)
+func (rt *router) listUsers(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+
+	views, err := rt.AdminUsers.ListUsers(req.Context(), c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := make([]api.AdminUser, 0, len(views))
 	for _, v := range views {
 		out = append(out, adminUserOf(v))
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // createUser is the one response that carries a new account's temporary password.
-func (rt *router) createUser(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) createUser(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.CreateUserRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
+
 	in := app.NewUser{Kind: identity.Kind(body.Kind), DisplayName: body.DisplayName, Policy: body.Policy}
 	if body.Email != nil {
 		in.Email = *body.Email
 	}
+
 	if body.Role != nil {
 		in.Role = identity.Role(*body.Role)
 	}
+
 	if body.SignIn != nil {
 		in.SignIn = app.SignInMethod(*body.SignIn)
 	}
-	created, err := rt.AdminUsers.CreateUser(r.Context(), c.user, in)
+
+	created, err := rt.AdminUsers.CreateUser(req.Context(), actor.user, in)
 	switch {
 	case errors.Is(err, app.ErrConflict):
-		writeError(w, http.StatusConflict, codeEmailTaken, "the email address is already taken")
+		writeError(rw, http.StatusConflict, codeEmailTaken, "the email address is already taken")
+
 		return
 	case err != nil:
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := api.CreatedUser{User: adminUserOf(created.User)}
 	if created.TemporaryPassword != nil {
 		temp := temporaryPasswordOf(*created.TemporaryPassword)
 		out.TemporaryPassword = &temp
 	}
-	writeJSON(w, http.StatusCreated, out)
+
+	writeJSON(rw, http.StatusCreated, out)
 }
 
-func (rt *router) getUser(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) getUser(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
-	v, err := rt.AdminUsers.GetUser(r.Context(), c.user, id)
+
+	view, err := rt.AdminUsers.GetUser(req.Context(), actor.user, id)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, adminUserOf(v))
+
+	writeJSON(rw, http.StatusOK, adminUserOf(view))
 }
 
-func (rt *router) updateUser(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) updateUser(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
+
 	var body api.UpdateUserRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
+
 	ch := app.UserChanges{DisplayName: body.DisplayName, Policy: body.Policy}
 	if body.Role != nil {
 		role := identity.Role(*body.Role)
 		ch.Role = &role
 	}
+
 	if body.Status != nil {
 		status := identity.Status(*body.Status)
 		ch.Status = &status
 	}
-	v, err := rt.AdminUsers.UpdateUser(r.Context(), c.user, id, ch)
+
+	view, err := rt.AdminUsers.UpdateUser(req.Context(), actor.user, id, ch)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, adminUserOf(v))
+
+	writeJSON(rw, http.StatusOK, adminUserOf(view))
 }
 
 // resetUserPassword is the one response that carries the new temporary password.
-func (rt *router) resetUserPassword(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) resetUserPassword(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
-	temp, err := rt.AdminUsers.ResetPassword(r.Context(), c.user, id)
+
+	temp, err := rt.AdminUsers.ResetPassword(req.Context(), actor.user, id)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, temporaryPasswordOf(temp))
+
+	writeJSON(rw, http.StatusOK, temporaryPasswordOf(temp))
 }
 
 // renewUserInvitation answers ErrConflict with 204: the invitation's unique index
 // refused this insert because a concurrent renewal for the same address committed
 // first, so the account holds a fresh invitation — the state asked for.
-func (rt *router) renewUserInvitation(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) renewUserInvitation(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
-	switch err := rt.AdminUsers.RenewInvitation(r.Context(), c.user, id); {
+
+	switch err := rt.AdminUsers.RenewInvitation(req.Context(), actor.user, id); {
 	case err == nil, errors.Is(err, app.ErrConflict):
-		w.WriteHeader(http.StatusNoContent)
+		rw.WriteHeader(http.StatusNoContent)
 	default:
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
 	}
 }
 
-func (rt *router) listUserTokens(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) listUserTokens(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
-	toks, err := rt.AdminUsers.ListTokens(r.Context(), c.user, id)
+
+	toks, err := rt.AdminUsers.ListTokens(req.Context(), actor.user, id)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := make([]api.Token, 0, len(toks))
 	for _, t := range toks {
 		out = append(out, tokenOf(t))
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // issueUserToken is the one response that carries the token's secret.
-func (rt *router) issueUserToken(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) issueUserToken(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
+
 	var body api.IssueTokenRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	tok, secret, err := rt.AdminUsers.IssueToken(r.Context(), c.user, id, body.Label)
+
+	tok, secret, err := rt.AdminUsers.IssueToken(req.Context(), actor.user, id, body.Label)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusCreated, api.IssuedToken{Token: tokenOf(tok), Secret: secret})
+
+	writeJSON(rw, http.StatusCreated, api.IssuedToken{Token: tokenOf(tok), Secret: secret})
 }
 
 // revokeUserToken answers 204 for a token already revoked, the state asked for, as
 // the cabinet does.
-func (rt *router) revokeUserToken(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	userID, ok := pathID(w, r, "userId")
+func (rt *router) revokeUserToken(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	userID, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
-	tokenID, ok := pathID(w, r, "tokenId")
+
+	tokenID, ok := pathID(rw, req, "tokenId")
 	if !ok {
 		return
 	}
-	switch err := rt.AdminUsers.RevokeToken(r.Context(), c.user, userID, tokenID); {
+
+	switch err := rt.AdminUsers.RevokeToken(req.Context(), actor.user, userID, tokenID); {
 	case err == nil, errors.Is(err, credentials.ErrAlreadyRevoked):
-		w.WriteHeader(http.StatusNoContent)
+		rw.WriteHeader(http.StatusNoContent)
 	default:
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
 	}
 }
 
-func (rt *router) getUserActivity(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	id, ok := pathID(w, r, "userId")
+func (rt *router) getUserActivity(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	id, ok := pathID(rw, req, "userId")
 	if !ok {
 		return
 	}
+
 	limit := app.DefaultActivityLimit
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > app.MaxActivityLimit {
-			writeFieldError(w, http.StatusUnprocessableEntity, codeInvalidInput, "limit",
+
+	if raw := req.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > app.MaxActivityLimit {
+			writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "limit",
 				"limit must be an integer from 1 to "+strconv.Itoa(app.MaxActivityLimit))
+
 			return
 		}
-		limit = n
+
+		limit = parsed
 	}
-	act, err := rt.AdminUsers.Activity(r.Context(), c.user, id, limit)
+
+	act, err := rt.AdminUsers.Activity(req.Context(), actor.user, id, limit)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := api.Activity{
 		Requests: make([]activityRequest, 0, len(act.Requests)),
 		Audit:    make([]activityAudit, 0, len(act.Audit)),
 	}
-	for _, e := range act.Requests {
+	for _, event := range act.Requests {
 		out.Requests = append(out.Requests, activityRequest{
-			At:          e.At.UTC(),
-			TokenId:     idPtr(e.TokenID),
-			Provider:    e.Provider,
-			Model:       e.Model,
-			Stream:      e.Stream,
-			StatusCode:  requestStatus(e),
-			TokensTotal: int(e.TokensTotal),
-			LatencyMs:   e.LatencyMS,
-			CostUSD:     requestCost(e.Cost),
+			At:          event.At.UTC(),
+			TokenId:     idPtr(event.TokenID),
+			Provider:    event.Provider,
+			Model:       event.Model,
+			Stream:      event.Stream,
+			StatusCode:  requestStatus(event),
+			TokensTotal: int(event.TokensTotal),
+			LatencyMs:   event.LatencyMS,
+			CostUSD:     requestCost(event.Cost),
 		})
 	}
-	for _, e := range act.Audit {
-		a := activityAudit{At: e.At.UTC(), Action: e.Action, ActorId: idPtr(e.ActorID)}
-		if e.Target != "" {
-			target := e.Target
-			a.Target = &target
+
+	for _, event := range act.Audit {
+		audit := activityAudit{At: event.At.UTC(), Action: event.Action, ActorId: idPtr(event.ActorID)}
+		if event.Target != "" {
+			target := event.Target
+			audit.Target = &target
 		}
-		if len(e.Detail) > 0 {
-			detail := e.Detail
-			a.Detail = &detail
+
+		if len(event.Detail) > 0 {
+			detail := event.Detail
+			audit.Detail = &detail
 		}
-		out.Audit = append(out.Audit, a)
+
+		out.Audit = append(out.Audit, audit)
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // requestStatus is the status a proxied request ended with. The ledger records the
@@ -314,44 +370,54 @@ func requestStatus(e app.UsageEvent) int {
 	if e.StatusCode == 0 && !e.Failed {
 		return http.StatusOK
 	}
+
 	return e.StatusCode
 }
 
-func (rt *router) getCatalog(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) getCatalog(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+
 	providers, err := rt.AdminUsers.Catalog(c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, catalogOf(providers))
+
+	writeJSON(rw, http.StatusOK, catalogOf(providers))
 }
 
 // catalogOf writes providers as the contract's Catalog; a provider's models are []
 // rather than null.
 func catalogOf(providers []app.CatalogProvider) api.Catalog {
 	out := api.Catalog{Providers: make([]catalogProvider, 0, len(providers))}
-	for _, p := range providers {
-		models := p.Models
+	for _, provider := range providers {
+		models := provider.Models
 		if models == nil {
 			models = []string{}
 		}
-		out.Providers = append(out.Providers, catalogProvider{Name: p.Name, Models: models})
+
+		out.Providers = append(out.Providers, catalogProvider{Name: provider.Name, Models: models})
 	}
+
 	return out
 }
 
-func (rt *router) previewPolicy(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) previewPolicy(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.PolicyPreviewRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	preview, err := rt.AdminUsers.PolicyPreview(c.user, body.Rules)
+
+	preview, err := rt.AdminUsers.PolicyPreview(actor.user, body.Rules)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
+
 	out := api.PolicyPreview{
 		Errors:  make([]previewError, 0, len(preview.Invalid)),
 		Covered: make([]previewCovered, 0, len(preview.Covered)),
@@ -359,38 +425,43 @@ func (rt *router) previewPolicy(w http.ResponseWriter, r *http.Request) {
 	for _, rule := range preview.Invalid {
 		out.Errors = append(out.Errors, previewError{Rule: rule, Code: codeInvalidRule})
 	}
+
 	for _, m := range preview.Covered {
 		out.Covered = append(out.Covered, previewCovered{Provider: m.Provider, Model: m.Model})
 	}
-	writeJSON(w, http.StatusOK, out)
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 // adminUserOf describes an account as the contract's AdminUser. It carries no
 // credential: no password, hash or token.
-func adminUserOf(v app.UserView) api.AdminUser {
-	u := v.User
-	signIn := make([]api.AdminUserSignIn, 0, len(v.SignIn))
-	for _, m := range v.SignIn {
+func adminUserOf(view app.UserView) api.AdminUser {
+	user := view.User
+
+	signIn := make([]api.AdminUserSignIn, 0, len(view.SignIn))
+	for _, m := range view.SignIn {
 		signIn = append(signIn, api.AdminUserSignIn(m))
 	}
+
 	out := api.AdminUser{
-		Id:                  u.ID,
-		Kind:                api.Kind(u.Kind),
-		DisplayName:         u.DisplayName,
-		Role:                api.Role(u.Role),
-		Status:              api.Status(u.Status),
-		Policy:              policyOf(u.Policy),
-		PolicySource:        api.PolicySource(u.PolicySource),
-		MustChangePassword:  u.MustChangePassword,
+		Id:                  user.ID,
+		Kind:                api.Kind(user.Kind),
+		DisplayName:         user.DisplayName,
+		Role:                api.Role(user.Role),
+		Status:              api.Status(user.Status),
+		Policy:              policyOf(user.Policy),
+		PolicySource:        api.PolicySource(user.PolicySource),
+		MustChangePassword:  user.MustChangePassword,
 		SignIn:              signIn,
-		InvitationExpiresAt: utcPtr(v.InvitationExpiresAt),
-		LastSeenAt:          utcPtr(u.LastSeenAt),
-		CreatedAt:           u.CreatedAt.UTC(),
+		InvitationExpiresAt: utcPtr(view.InvitationExpiresAt),
+		LastSeenAt:          utcPtr(user.LastSeenAt),
+		CreatedAt:           user.CreatedAt.UTC(),
 	}
-	if u.Email != "" {
-		email := u.Email
+	if user.Email != "" {
+		email := user.Email
 		out.Email = &email
 	}
+
 	return out
 }
 
@@ -404,6 +475,7 @@ func idPtr(id uuid.UUID) *uuid.UUID {
 	if id == uuid.Nil {
 		return nil
 	}
+
 	return &id
 }
 
@@ -413,6 +485,8 @@ func requestCost(c app.UsageCost) *float64 {
 	if !c.Priced {
 		return nil
 	}
+
 	total := c.TotalUSD()
+
 	return &total
 }

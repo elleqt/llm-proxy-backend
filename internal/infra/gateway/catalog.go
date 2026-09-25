@@ -49,6 +49,7 @@ func newCatalog(registry any) (*Catalog, error) {
 	if !ok {
 		return nil, ErrModelRegistry
 	}
+
 	return &Catalog{registry: r}, nil
 }
 
@@ -62,16 +63,20 @@ func (c *Catalog) ProvidersFor(model string) []string {
 			keys = c.registry.GetModelProviders(lower)
 		}
 	}
+
 	if len(keys) == 0 {
 		return nil
 	}
+
 	names := make([]string, 0, len(keys))
 	for _, key := range keys {
 		if name := policyProvider(key); name != "" && !slices.Contains(names, name) {
 			names = append(names, name)
 		}
 	}
+
 	slices.Sort(names)
+
 	return names
 }
 
@@ -83,9 +88,11 @@ func (c *Catalog) KnownModel(model string) (string, bool) {
 	if len(c.registry.GetModelProviders(model)) > 0 {
 		return model, true
 	}
+
 	if lower := strings.ToLower(model); lower != model && len(c.registry.GetModelProviders(lower)) > 0 {
 		return lower, true
 	}
+
 	return "", false
 }
 
@@ -95,20 +102,24 @@ func (c *Catalog) KnownModel(model string) (string, bool) {
 // under each of its providers.
 func (c *Catalog) Models() map[string][]string {
 	out := make(map[string][]string)
+
 	for _, entry := range c.registry.GetAvailableModels("openai") {
 		id, _ := entry["id"].(string)
 		if id == "" {
 			continue
 		}
+
 		for _, provider := range c.ProvidersFor(id) {
 			if !slices.Contains(out[provider], id) {
 				out[provider] = append(out[provider], id)
 			}
 		}
 	}
+
 	for _, models := range out {
 		slices.Sort(models)
 	}
+
 	return out
 }
 
@@ -117,6 +128,19 @@ func (c *Catalog) Models() map[string][]string {
 // OpenAICompatibleProviderKey).
 const openAICompatiblePrefix = "openai-compatible-"
 
+// Upstream keys of built-in providers the gateway names more than once.
+const (
+	// codexProviderKey is upstream's key for ChatGPT accounts, which policies
+	// call "chatgpt".
+	codexProviderKey = "codex"
+	// openAICompatibilityKey is upstream's key for an openai-compatibility
+	// entry without a name of its own.
+	openAICompatibilityKey = "openai-compatibility"
+	// xaiProviderKey is upstream's key for xAI accounts, also the prefix an
+	// xAI model name may carry.
+	xaiProviderKey = "xai"
+)
+
 // policyProvider is the one naming layer between upstream provider keys and
 // the provider names policies are written in: codex is "chatgpt", a named
 // openai-compatibility provider is its configured name, and every other key is
@@ -124,12 +148,14 @@ const openAICompatiblePrefix = "openai-compatible-"
 // no name ("openai-compatible-" alone) keeps its own, so every provider
 // serving a model is named and checked; admit refuses such an entry anyway.
 func policyProvider(key string) string {
-	if key == "codex" {
+	if key == codexProviderKey {
 		return "chatgpt"
 	}
+
 	if name := strings.TrimPrefix(key, openAICompatiblePrefix); name != "" {
 		return name
 	}
+
 	return key
 }
 
@@ -141,8 +167,8 @@ func compatProviderKey(name string) string {
 	key := strings.ToLower(strings.TrimSpace(name))
 	switch {
 	case key == "":
-		return "openai-compatibility"
-	case key == "openai-compatibility" || strings.HasPrefix(key, openAICompatiblePrefix):
+		return openAICompatibilityKey
+	case key == openAICompatibilityKey || strings.HasPrefix(key, openAICompatiblePrefix):
 		return key
 	default:
 		return openAICompatiblePrefix + key
@@ -154,6 +180,7 @@ func compatProviderKey(name string) string {
 // policy name of its own, or its policy name is reserved.
 func compatNameRefused(name string) bool {
 	key := compatProviderKey(name)
+
 	return strings.TrimPrefix(key, openAICompatiblePrefix) == "" || reservedProviderName(policyProvider(key))
 }
 
@@ -164,9 +191,9 @@ func compatNameRefused(name string) bool {
 // itself, is reserved: an openai-compatibility entry going by it would share
 // every grant written for the built-in provider.
 var builtinProviders = []string{
-	"codex", "claude", "gemini", "gemini-interactions", "vertex", "aistudio",
-	"antigravity", "kimi", "kimi-ai", "kimi.ai", "kimi.com", "xai", "devin",
-	"meta", "home", "openai-compatibility",
+	codexProviderKey, "claude", "gemini", "gemini-interactions", "vertex", "aistudio",
+	"antigravity", "kimi", "kimi-ai", "kimi.ai", "kimi.com", xaiProviderKey, "devin",
+	"meta", "home", openAICompatibilityKey,
 }
 
 // reservedProviderName reports whether name, a policy name, is one a built-in
@@ -177,5 +204,6 @@ func reservedProviderName(name string) bool {
 			return true
 		}
 	}
+
 	return false
 }

@@ -10,10 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/mock"
-
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // pricesFixture is a Prices whose stores are mocks backed by the fields below, so a
@@ -50,89 +51,106 @@ const fingerprint = "2 https://catalog.example.com/models.json"
 // manual store is left to each test; the catalog store starts as given.
 func newPricesFixture(t *testing.T, disabled bool, catalog []app.ModelPrice, state app.CatalogState) *pricesFixture {
 	t.Helper()
-	f := &pricesFixture{
+	fixture := &pricesFixture{
 		repo: mocks.NewPriceRepo(t), catalog: mocks.NewPriceCatalogRepo(t), source: mocks.NewPriceCatalogSource(t),
 		sink: mocks.NewPriceSink(t), metrics: mocks.NewPriceCatalogMetrics(t), audit: mocks.NewAuditSink(t),
 		storedCatalog: catalog, state: state,
 	}
-	f.catalog.EXPECT().List(mock.Anything).RunAndReturn(func(context.Context) ([]app.ModelPrice, error) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.storedCatalog, nil
+	fixture.catalog.EXPECT().List(mock.Anything).RunAndReturn(func(context.Context) ([]app.ModelPrice, error) {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		return fixture.storedCatalog, nil
 	}).Maybe()
-	f.catalog.EXPECT().State(mock.Anything).RunAndReturn(func(context.Context) (app.CatalogState, error) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.state, nil
+	fixture.catalog.EXPECT().State(mock.Anything).RunAndReturn(func(context.Context) (app.CatalogState, error) {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		return fixture.state, nil
 	}).Maybe()
-	f.catalog.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
-		func(_ context.Context, prices []app.ModelPrice, s app.CatalogState, at time.Time) error {
-			f.mu.Lock()
-			defer f.mu.Unlock()
-			f.replaces++
-			if f.onStore != nil {
-				f.onStore()
+	fixture.catalog.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+		func(_ context.Context, prices []app.ModelPrice, state app.CatalogState, at time.Time) error {
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+
+			fixture.replaces++
+			if fixture.onStore != nil {
+				fixture.onStore()
 			}
-			if f.storeErr != nil {
-				return f.storeErr
+
+			if fixture.storeErr != nil {
+				return fixture.storeErr
 			}
-			f.storedCatalog = make([]app.ModelPrice, len(prices))
+
+			fixture.storedCatalog = make([]app.ModelPrice, len(prices))
 			for i, p := range prices {
 				p.UpdatedAt = at
-				f.storedCatalog[i] = p
+				fixture.storedCatalog[i] = p
 			}
-			f.state = s
+
+			fixture.state = state
+
 			return nil
 		}).Maybe()
-	f.catalog.EXPECT().SetState(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, s app.CatalogState) error {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.setStates++
-		if f.storeErr != nil && s.LastError == "" {
-			return f.storeErr
+	fixture.catalog.EXPECT().SetState(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, state app.CatalogState) error {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		fixture.setStates++
+		if fixture.storeErr != nil && state.LastError == "" {
+			return fixture.storeErr
 		}
-		f.state = s
+
+		fixture.state = state
+
 		return nil
 	}).Maybe()
-	f.sink.EXPECT().SetPrices(mock.Anything).Run(func(p []app.ModelPrice) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.sunk = append(f.sunk, p)
+	fixture.sink.EXPECT().SetPrices(mock.Anything).Run(func(p []app.ModelPrice) {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		fixture.sunk = append(fixture.sunk, p)
 	}).Maybe()
-	f.metrics.EXPECT().SetPriceCatalog(mock.Anything, mock.Anything).Run(func(n int, at time.Time) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.models, f.checkedAt = n, at
+	fixture.metrics.EXPECT().SetPriceCatalog(mock.Anything, mock.Anything).Run(func(n int, at time.Time) {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		fixture.models, fixture.checkedAt = n, at
 	}).Maybe()
-	f.metrics.EXPECT().ObservePriceCatalogFailure().Run(func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.failures++
+	fixture.metrics.EXPECT().ObservePriceCatalogFailure().Run(func() {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		fixture.failures++
 	}).Maybe()
-	f.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.events = append(f.events, e)
+	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+		fixture.mu.Lock()
+		defer fixture.mu.Unlock()
+
+		fixture.events = append(fixture.events, e)
+
 		return nil
 	}).Maybe()
 
-	f.source.EXPECT().Fingerprint().Return(fingerprint).Maybe()
+	fixture.source.EXPECT().Fingerprint().Return(fingerprint).Maybe()
 
-	var source app.PriceCatalogSource = f.source
+	var source app.PriceCatalogSource = fixture.source
 	if disabled {
 		source = nil
 	}
-	f.svc = app.NewPrices(f.repo, f.catalog, source, f.sink, f.metrics, f.audit, fixedClock{now: settingsNow}, discardLogger{})
-	return f
+
+	fixture.svc = app.NewPrices(fixture.repo, fixture.catalog, source, fixture.sink, fixture.metrics, fixture.audit, fixedClock{now: settingsNow}, discardLogger{})
+
+	return fixture
 }
 
 // load runs Load with manual as the stored overrides.
 func (f *pricesFixture) load(t *testing.T, manual ...app.ModelPrice) {
 	t.Helper()
 	f.repo.EXPECT().List(mock.Anything).Return(manual, nil).Once()
-	if err := f.svc.Load(context.Background()); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+
+	err := f.svc.Load(context.Background())
+	require.NoError(t, err, "Load")
 }
 
 // priced is the sink's latest list as provider/model -> input rate.
@@ -140,22 +158,23 @@ func (f *pricesFixture) priced(t *testing.T) map[string]float64 {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.sunk) == 0 {
-		t.Fatal("the sink was never given a list")
-	}
+
+	require.NotEmpty(t, f.sunk, "the sink was never given a list")
+
 	out := map[string]float64{}
 	for _, p := range f.sunk[len(f.sunk)-1] {
 		out[p.Provider+"/"+p.Model] = p.Input
 	}
+
 	return out
 }
 
 func (f *pricesFixture) get(t *testing.T) app.PriceList {
 	t.Helper()
+
 	list, err := f.svc.Get(context.Background(), newAdmin())
-	if err != nil {
-		t.Errorf("Get: %v", err)
-	}
+	assert.NoError(t, err, "Get")
+
 	return list
 }
 
@@ -173,9 +192,10 @@ func TestPricesReplaceRefusesInvalidLists(t *testing.T) {
 	with := func(edit func(*app.ModelPrice)) []app.ModelPrice {
 		p := sonnet()
 		edit(&p)
+
 		return []app.ModelPrice{sonnet(), p}
 	}
-	for name, c := range map[string]struct {
+	for name, tc := range map[string]struct {
 		list  []app.ModelPrice
 		field string
 	}{
@@ -190,11 +210,11 @@ func TestPricesReplaceRefusesInvalidLists(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newPricesFixture(t, false, nil, app.CatalogState{})
 			// No manual store expectation: nothing may be written.
-			_, err := f.svc.Replace(context.Background(), newAdmin(), c.list)
+			_, err := f.svc.Replace(context.Background(), newAdmin(), tc.list)
+
 			var ie *app.InvalidInputError
-			if !errors.As(err, &ie) || ie.Field != c.field {
-				t.Fatalf("err = %v, want InvalidInputError{%q}", err, c.field)
-			}
+			require.ErrorAs(t, err, &ie)
+			require.Equal(t, tc.field, ie.Field, "InvalidInputError field")
 		})
 	}
 }
@@ -208,124 +228,144 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 	catalogSonnet.UpdatedAt = earlier
 	catalogGPT := gpt()
 	catalogGPT.UpdatedAt = earlier
-	f := newPricesFixture(t, false, []app.ModelPrice{catalogSonnet, catalogGPT}, app.CatalogState{CheckedAt: earlier})
+	fixture := newPricesFixture(t, false, []app.ModelPrice{catalogSonnet, catalogGPT}, app.CatalogState{CheckedAt: earlier})
 
 	override := sonnet()
 	override.Input = 2
 	custom := app.ModelPrice{Provider: "claude", Model: "claude-private", Input: 7}
-	f.load(t, override, custom)
+	fixture.load(t, override, custom)
 
-	if got := f.priced(t); got["claude/claude-sonnet-5"] != 2 || got["chatgpt/gpt-6"] != 1.25 || got["claude/claude-private"] != 7 || len(got) != 3 {
-		t.Fatalf("sink = %v, want the override for sonnet, the catalog for gpt-6, the private model", got)
-	}
-	list := f.get(t)
-	if len(list.Prices) != 3 {
-		t.Fatalf("Get = %+v, want 3 entries", list.Prices)
-	}
+	require.Equal(t, map[string]float64{"claude/claude-sonnet-5": 2, "chatgpt/gpt-6": 1.25, "claude/claude-private": 7}, fixture.priced(t),
+		"sink: want the override for sonnet, the catalog for gpt-6, the private model")
+
+	assertOverriddenList(t, fixture.get(t))
+
+	fixture.repo.EXPECT().Replace(mock.Anything, []app.ModelPrice{}, settingsNow).Return(nil).Once()
+	fixture.repo.EXPECT().List(mock.Anything).Return(nil, nil).Once()
+
+	got, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{})
+	require.NoError(t, err, "Replace")
+	require.Len(t, got.Prices, 2, "after omitting the overrides: want the catalog's two rows")
+	require.Equal(t, app.PriceSourceCatalog, got.Prices[0].Source, "after omitting the overrides")
+	require.Equal(t, app.PriceSourceCatalog, got.Prices[1].Source, "after omitting the overrides")
+
+	priced := fixture.priced(t)
+	require.Equal(t, 3.0, priced["claude/claude-sonnet-5"], "sink: want sonnet back at the catalog's 3")
+	require.Len(t, priced, 2, "sink: want the private model gone")
+
+	require.Len(t, fixture.events, 1, "audit: want one prices.replace")
+	require.Equal(t, "prices.replace", fixture.events[0].Action, "audit action")
+}
+
+// assertOverriddenList checks the admin view while a manual sonnet price and a
+// private model override a two-row catalog: each entry names its source, and a
+// manual entry shadowing a catalog row carries that row's rates behind it.
+func assertOverriddenList(t *testing.T, list app.PriceList) {
+	t.Helper()
+
+	require.Len(t, list.Prices, 3, "Get: want 3 entries")
+
 	byModel := map[string]app.PriceEntry{}
 	for _, e := range list.Prices {
 		byModel[e.Model] = e
 	}
-	if e := byModel["claude-sonnet-5"]; e.Source != app.PriceSourceManual || e.Input != 2 || e.Catalog == nil || e.Catalog.Input != 3 {
-		t.Fatalf("sonnet = %+v, want manual at 2 with the catalog's 3 behind it", e)
-	}
-	if e := byModel["gpt-6"]; e.Source != app.PriceSourceCatalog || e.Catalog != nil || !e.UpdatedAt.Equal(earlier) {
-		t.Fatalf("gpt-6 = %+v, want the catalog's row", e)
-	}
-	if e := byModel["claude-private"]; e.Source != app.PriceSourceManual || e.Catalog != nil {
-		t.Fatalf("private = %+v, want manual with no catalog rates", e)
-	}
-	if list.Catalog.Models != 2 || !list.Catalog.Enabled {
-		t.Fatalf("catalog status = %+v, want enabled with 2 models", list.Catalog)
-	}
 
-	f.repo.EXPECT().Replace(mock.Anything, []app.ModelPrice{}, settingsNow).Return(nil).Once()
-	f.repo.EXPECT().List(mock.Anything).Return(nil, nil).Once()
-	got, err := f.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{})
-	if err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
-	if len(got.Prices) != 2 || got.Prices[0].Source != app.PriceSourceCatalog || got.Prices[1].Source != app.PriceSourceCatalog {
-		t.Fatalf("after omitting the overrides = %+v, want the catalog's two rows", got.Prices)
-	}
-	if priced := f.priced(t); priced["claude/claude-sonnet-5"] != 3 || len(priced) != 2 {
-		t.Fatalf("sink = %v, want sonnet back at the catalog's 3 and the private model gone", priced)
-	}
-	if len(f.events) != 1 || f.events[0].Action != "prices.replace" {
-		t.Fatalf("audit = %+v, want one prices.replace", f.events)
-	}
+	sonnetEntry := byModel["claude-sonnet-5"]
+	require.Equal(t, app.PriceSourceManual, sonnetEntry.Source, "sonnet source")
+	require.Equal(t, 2.0, sonnetEntry.Input, "sonnet input")
+	require.NotNil(t, sonnetEntry.Catalog, "sonnet: want the catalog's rates behind it")
+	require.Equal(t, 3.0, sonnetEntry.Catalog.Input, "sonnet catalog input")
+
+	gptEntry := byModel["gpt-6"]
+	require.Equal(t, app.PriceSourceCatalog, gptEntry.Source, "gpt-6 source")
+	require.Nil(t, gptEntry.Catalog, "gpt-6: the catalog's own row has no catalog rates behind it")
+	require.True(t, gptEntry.UpdatedAt.Equal(earlier), "gpt-6 updated at %v, want %v", gptEntry.UpdatedAt, earlier)
+
+	privateEntry := byModel["claude-private"]
+	require.Equal(t, app.PriceSourceManual, privateEntry.Source, "private source")
+	require.Nil(t, privateEntry.Catalog, "private: want no catalog rates")
+
+	require.Equal(t, 2, list.Catalog.Models, "catalog status models")
+	require.True(t, list.Catalog.Enabled, "catalog status: want enabled")
 }
 
 func TestPricesReplaceStoreFailureLeavesTheSinkAlone(t *testing.T) {
-	f := newPricesFixture(t, false, nil, app.CatalogState{})
-	f.load(t, sonnet())
-	f.repo.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("db down"))
+	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
+	fixture.load(t, sonnet())
+	fixture.repo.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("db down"))
 
-	if _, err := f.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{gpt()}); err == nil {
-		t.Fatal("Replace succeeded with the store failing")
-	}
-	if got := f.priced(t); len(f.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v after %d lists, want the stored list alone", got, len(f.sunk))
-	}
+	_, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{gpt()})
+	require.Error(t, err, "Replace succeeded with the store failing")
+
+	got := fixture.priced(t)
+	require.Len(t, fixture.sunk, 1, "sink: want the stored list alone")
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the stored list alone")
 }
 
 // A check that finds a new catalog stores it with its validators, prices it and
 // reports it; the refresh is audited.
 func TestRefreshAppliesAChangedCatalog(t *testing.T) {
-	f := newPricesFixture(t, false, nil, app.CatalogState{})
-	f.load(t)
-	v := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
-	f.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
-		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet(), gpt()}, Validators: v}, nil).Once()
+	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
+	fixture.load(t)
 
-	list, err := f.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if got := f.priced(t); got["claude/claude-sonnet-5"] != 3 || got["chatgpt/gpt-6"] != 1.25 {
-		t.Fatalf("sink = %v, want the catalog's prices", got)
-	}
-	if f.state.Validators != v || !f.state.CheckedAt.Equal(settingsNow) || !f.state.ChangedAt.Equal(settingsNow) {
-		t.Fatalf("stored state = %+v, want the validators, checked and changed now", f.state)
-	}
-	if c := list.Catalog; c.Models != 2 || !c.CheckedAt.Equal(settingsNow) || !c.ChangedAt.Equal(settingsNow) || c.LastError != "" {
-		t.Fatalf("status = %+v", c)
-	}
-	if f.models != 2 || !f.checkedAt.Equal(settingsNow) {
-		t.Fatalf("metrics = %d models checked at %v", f.models, f.checkedAt)
-	}
-	if len(f.events) != 1 || f.events[0].Action != "prices.refresh" || f.events[0].Detail["outcome"] != "changed" || f.events[0].Detail["models"] != 2 {
-		t.Fatalf("audit = %+v, want prices.refresh changed with 2 models", f.events)
-	}
+	validators := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
+	fixture.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
+		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet(), gpt()}, Validators: validators}, nil).Once()
+
+	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
+
+	got := fixture.priced(t)
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the catalog's prices")
+	require.Equal(t, 1.25, got["chatgpt/gpt-6"], "sink: want the catalog's prices")
+
+	require.Equal(t, validators, fixture.state.Validators, "stored validators")
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "stored state = %+v, want checked now", fixture.state)
+	require.True(t, fixture.state.ChangedAt.Equal(settingsNow), "stored state = %+v, want changed now", fixture.state)
+
+	status := list.Catalog
+	require.Equal(t, 2, status.Models, "status models")
+	require.True(t, status.CheckedAt.Equal(settingsNow), "status = %+v, want checked now", status)
+	require.True(t, status.ChangedAt.Equal(settingsNow), "status = %+v, want changed now", status)
+	require.Empty(t, status.LastError, "status last error")
+
+	require.Equal(t, 2, fixture.models, "metrics models")
+	require.True(t, fixture.checkedAt.Equal(settingsNow), "metrics checked at %v, want now", fixture.checkedAt)
+
+	require.Len(t, fixture.events, 1, "audit: want one prices.refresh")
+	require.Equal(t, "prices.refresh", fixture.events[0].Action, "audit action")
+	require.Equal(t, "changed", fixture.events[0].Detail["outcome"], "audit outcome")
+	require.Equal(t, 2, fixture.events[0].Detail["models"], "audit models")
 }
 
 // A 304 is a successful check: the prices and the validators stay, the check time
 // moves and an earlier failure is cleared.
 func TestNotModifiedKeepsPricesAndValidatorsAndClearsTheError(t *testing.T) {
-	v := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
+	validators := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
 	stored := sonnet()
 	stored.UpdatedAt = earlier
-	f := newPricesFixture(t, false, []app.ModelPrice{stored},
-		app.CatalogState{Validators: v, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier, LastError: "the catalog answered 503"})
-	f.load(t)
-	f.source.EXPECT().Fetch(mock.Anything, v).Return(app.CatalogFetch{Unchanged: true}, nil).Once()
+	fixture := newPricesFixture(t, false, []app.ModelPrice{stored},
+		app.CatalogState{Validators: validators, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier, LastError: "the catalog answered 503"})
+	fixture.load(t)
+	fixture.source.EXPECT().Fetch(mock.Anything, validators).Return(app.CatalogFetch{Unchanged: true}, nil).Once()
 
-	list, err := f.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if f.state.Validators != v || !f.state.CheckedAt.Equal(settingsNow) || !f.state.ChangedAt.Equal(earlier) || f.state.LastError != "" {
-		t.Fatalf("stored state = %+v, want the same validators and change time, checked now, no error", f.state)
-	}
-	if list.Catalog.LastError != "" || list.Catalog.Models != 1 || len(list.Prices) != 1 || !list.Prices[0].UpdatedAt.Equal(earlier) {
-		t.Fatalf("list = %+v, want the stored price and no error", list)
-	}
-	if got := f.priced(t); got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v, want the stored price", got)
-	}
-	if f.events[0].Detail["outcome"] != "unchanged" {
-		t.Fatalf("audit = %+v, want outcome unchanged", f.events)
-	}
+	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
+
+	require.Equal(t, validators, fixture.state.Validators, "stored validators")
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "stored state = %+v, want checked now", fixture.state)
+	require.True(t, fixture.state.ChangedAt.Equal(earlier), "stored state = %+v, want the same change time", fixture.state)
+	require.Empty(t, fixture.state.LastError, "stored state: want no error")
+
+	require.Empty(t, list.Catalog.LastError, "list: want no error")
+	require.Equal(t, 1, list.Catalog.Models, "list catalog models")
+	require.Len(t, list.Prices, 1, "list: want the stored price")
+	require.True(t, list.Prices[0].UpdatedAt.Equal(earlier), "list = %+v, want the stored price", list)
+
+	require.Equal(t, 3.0, fixture.priced(t)["claude/claude-sonnet-5"], "sink: want the stored price")
+
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "unchanged", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // A failed check, including one whose catalog prices none of our models, keeps
@@ -337,38 +377,46 @@ func TestFailedChecksKeepThePricesInForce(t *testing.T) {
 		want  string
 	}{
 		"unreachable": {err: errors.New("the catalog answered 503"), want: "the catalog answered 503"},
-		"no prices": {fetch: app.CatalogFetch{Validators: app.CatalogValidators{ETag: `"empty"`}},
-			want: "the catalog has no price for any of our providers"},
-		"every price zero": {fetch: app.CatalogFetch{Prices: []app.ModelPrice{{Provider: "claude", Model: "claude-sonnet-5"},
-			{Provider: "chatgpt", Model: "gpt-6", CacheRead: 1}}, Validators: app.CatalogValidators{ETag: `"zero"`}},
-			want: "the catalog prices every model at zero"},
+		"no prices": {
+			fetch: app.CatalogFetch{Validators: app.CatalogValidators{ETag: `"empty"`}},
+			want:  "the catalog has no price for any of our providers",
+		},
+		"every price zero": {
+			fetch: app.CatalogFetch{Prices: []app.ModelPrice{
+				{Provider: "claude", Model: "claude-sonnet-5"},
+				{Provider: "chatgpt", Model: "gpt-6", CacheRead: 1},
+			}, Validators: app.CatalogValidators{ETag: `"zero"`}},
+			want: "the catalog prices every model at zero",
+		},
 		"too long": {err: errors.New(strings.Repeat("é", 300)), want: strings.Repeat("é", 100)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			v := app.CatalogValidators{ETag: `"v1"`}
-			f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{Validators: v, Fingerprint: fingerprint, CheckedAt: earlier})
-			f.load(t)
-			f.source.EXPECT().Fetch(mock.Anything, v).Return(answer.fetch, answer.err).Once()
+			validators := app.CatalogValidators{ETag: `"v1"`}
+			fixture := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{Validators: validators, Fingerprint: fingerprint, CheckedAt: earlier})
+			fixture.load(t)
+			fixture.source.EXPECT().Fetch(mock.Anything, validators).Return(answer.fetch, answer.err).Once()
 
-			list, err := f.svc.Refresh(context.Background(), newAdmin())
-			if err != nil {
-				t.Fatalf("Refresh: %v, want the failure in the status", err)
-			}
-			if list.Catalog.LastError != answer.want || list.Catalog.Models != 1 || !list.Catalog.CheckedAt.Equal(earlier) {
-				t.Fatalf("status = %+v, want lastError %q, the price kept, the last success unchanged", list.Catalog, answer.want)
-			}
-			if len(f.storedCatalog) != 1 || f.state.Validators != v || f.state.LastError != answer.want {
-				t.Fatalf("stored %v / %+v, want the catalog and validators kept and the error recorded", f.storedCatalog, f.state)
-			}
-			if got := f.priced(t); len(f.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-				t.Fatalf("sink = %v after %d lists, want the price in force untouched", got, len(f.sunk))
-			}
-			if f.failures != 1 {
-				t.Fatalf("failures = %d, want 1", f.failures)
-			}
-			if e := f.events[0]; e.Detail["outcome"] != "failed" || e.Detail["error"] != answer.want {
-				t.Fatalf("audit = %+v, want outcome failed with the reason", e)
-			}
+			list, err := fixture.svc.Refresh(context.Background(), newAdmin())
+			require.NoError(t, err, "Refresh: want the failure in the status")
+
+			require.Equal(t, answer.want, list.Catalog.LastError, "status last error")
+			require.Equal(t, 1, list.Catalog.Models, "status: want the price kept")
+			require.True(t, list.Catalog.CheckedAt.Equal(earlier), "status = %+v, want the last success unchanged", list.Catalog)
+
+			require.Len(t, fixture.storedCatalog, 1, "stored: want the catalog kept")
+			require.Equal(t, validators, fixture.state.Validators, "stored: want the validators kept")
+			require.Equal(t, answer.want, fixture.state.LastError, "stored: want the error recorded")
+
+			got := fixture.priced(t)
+			require.Len(t, fixture.sunk, 1, "sink: want the price in force untouched")
+			require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the price in force untouched")
+
+			require.Equal(t, 1, fixture.failures, "failures")
+
+			require.NotEmpty(t, fixture.events, "audit")
+			e := fixture.events[0]
+			require.Equal(t, "failed", e.Detail["outcome"], "audit outcome")
+			require.Equal(t, answer.want, e.Detail["error"], "audit reason")
 		})
 	}
 }
@@ -376,104 +424,126 @@ func TestFailedChecksKeepThePricesInForce(t *testing.T) {
 // With no catalog configured a refresh is refused, and catalog rows stored while
 // one was are not in force.
 func TestDisabledCatalog(t *testing.T) {
-	f := newPricesFixture(t, true, []app.ModelPrice{gpt()}, app.CatalogState{CheckedAt: earlier})
-	f.load(t, sonnet())
-	if _, err := f.svc.Refresh(context.Background(), newAdmin()); !errors.Is(err, app.ErrCatalogDisabled) {
-		t.Fatalf("Refresh = %v, want ErrCatalogDisabled", err)
-	}
-	list := f.get(t)
-	if list.Catalog != (app.CatalogStatus{}) || len(list.Prices) != 1 || list.Prices[0].Model != "claude-sonnet-5" {
-		t.Fatalf("list = %+v, want the manual price alone and a disabled catalog", list)
-	}
-	if got := f.priced(t); len(got) != 1 {
-		t.Fatalf("sink = %v, want the manual price alone", got)
-	}
+	fixture := newPricesFixture(t, true, []app.ModelPrice{gpt()}, app.CatalogState{CheckedAt: earlier})
+	fixture.load(t, sonnet())
+
+	_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.ErrorIs(t, err, app.ErrCatalogDisabled, "Refresh")
+
+	list := fixture.get(t)
+	require.Zero(t, list.Catalog, "list: want a disabled catalog")
+	require.Len(t, list.Prices, 1, "list: want the manual price alone")
+	require.Equal(t, "claude-sonnet-5", list.Prices[0].Model, "list: want the manual price alone")
+
+	require.Len(t, fixture.priced(t), 1, "sink: want the manual price alone")
 }
 
 // Checks run one at a time, and reading the list never waits on one.
 func TestChecksAreSerialisedAndReadsDoNotWait(t *testing.T) {
-	f := newPricesFixture(t, false, nil, app.CatalogState{})
-	f.load(t)
+	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
+	fixture.load(t)
+
 	var inFlight, most atomic.Int32
+
 	release, entered := make(chan struct{}), make(chan struct{}, 2)
-	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
+
+	fixture.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
 		func(context.Context, app.CatalogValidators) (app.CatalogFetch, error) {
-			n := inFlight.Add(1)
+			current := inFlight.Add(1)
 			defer inFlight.Add(-1)
-			for m := most.Load(); n > m && !most.CompareAndSwap(m, n); m = most.Load() {
+
+			// Raise the recorded peak to n unless a concurrent fetch already set it higher.
+			for {
+				peak := most.Load()
+				if current <= peak || most.CompareAndSwap(peak, current) {
+					break
+				}
 			}
+
 			entered <- struct{}{}
+
 			<-release
+
 			return app.CatalogFetch{Unchanged: true}, nil
 		}).Times(2)
 
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {
-			if _, err := f.svc.Refresh(context.Background(), newAdmin()); err != nil {
-				t.Errorf("Refresh: %v", err)
-			}
+			_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+			assert.NoError(t, err, "Refresh")
 		})
 	}
+
 	<-entered
+
 	read := make(chan struct{})
-	go func() { f.get(t); close(read) }()
+
+	go func() { fixture.get(t); close(read) }()
+
 	select {
 	case <-read:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Get waited on a catalog fetch")
+		require.Fail(t, "Get waited on a catalog fetch")
 	}
+
 	select {
 	case <-entered:
-		t.Fatal("a second fetch started while the first ran")
+		require.Fail(t, "a second fetch started while the first ran")
 	case <-time.After(100 * time.Millisecond):
 	}
+
 	close(release)
 	wg.Wait()
-	if most.Load() != 1 {
-		t.Fatalf("%d fetches ran at once, want 1", most.Load())
-	}
+
+	require.Equal(t, int32(1), most.Load(), "fetches that ran at once")
 }
 
 // The scheduled loop checks at once, not an interval later, and returns when
 // told to stop.
 func TestRunCatalogChecksAtOnceAndStops(t *testing.T) {
-	f := newPricesFixture(t, false, nil, app.CatalogState{})
-	f.load(t)
+	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
+	fixture.load(t)
+
 	fetched := make(chan struct{}, 1)
-	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
+
+	fixture.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
 		func(context.Context, app.CatalogValidators) (app.CatalogFetch, error) {
 			fetched <- struct{}{}
+
 			return app.CatalogFetch{Unchanged: true}, nil
 		}).Once()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { f.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
+	go func() { fixture.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
 	select {
 	case <-fetched:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no check at start")
+		require.Fail(t, "no check at start")
 	}
+
 	cancel()
+
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("RunCatalog did not return after its context ended")
+		require.Fail(t, "RunCatalog did not return after its context ended")
 	}
 }
 
 func TestPricesAreAdminOnly(t *testing.T) {
-	f := newPricesFixture(t, false, nil, app.CatalogState{})
-	if _, err := f.svc.Get(context.Background(), newPerson()); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Get by a user: err = %v, want ErrForbidden", err)
-	}
-	if _, err := f.svc.Replace(context.Background(), newPerson(), nil); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Replace by a user: err = %v, want ErrForbidden", err)
-	}
-	if _, err := f.svc.Refresh(context.Background(), newPerson()); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Refresh by a user: err = %v, want ErrForbidden", err)
-	}
+	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
+	_, err := fixture.svc.Get(context.Background(), newPerson())
+	require.ErrorIs(t, err, app.ErrForbidden, "Get by a user")
+
+	_, err = fixture.svc.Replace(context.Background(), newPerson(), nil)
+	require.ErrorIs(t, err, app.ErrForbidden, "Replace by a user")
+
+	_, err = fixture.svc.Refresh(context.Background(), newPerson())
+	require.ErrorIs(t, err, app.ErrForbidden, "Refresh by a user")
 }
 
 // A catalog whose rates match the stored ones under new validators is not a
@@ -482,101 +552,111 @@ func TestNewValidatorsWithTheSameRatesAreNoChange(t *testing.T) {
 	v1, v2 := app.CatalogValidators{ETag: `"v1"`}, app.CatalogValidators{ETag: `"v2"`}
 	stored := sonnet()
 	stored.UpdatedAt = earlier
-	f := newPricesFixture(t, false, []app.ModelPrice{stored}, app.CatalogState{Validators: v1, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier})
-	f.load(t)
-	f.source.EXPECT().Fetch(mock.Anything, v1).Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v2}, nil).Once()
+	fixture := newPricesFixture(t, false, []app.ModelPrice{stored}, app.CatalogState{Validators: v1, Fingerprint: fingerprint, CheckedAt: earlier, ChangedAt: earlier})
+	fixture.load(t)
+	fixture.source.EXPECT().Fetch(mock.Anything, v1).Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v2}, nil).Once()
 
-	list, err := f.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if f.replaces != 0 || f.state.Validators != v2 || !f.state.ChangedAt.Equal(earlier) || !f.state.CheckedAt.Equal(settingsNow) {
-		t.Fatalf("%d replaces, state %+v; want none, the new validators, changed at the earlier time", f.replaces, f.state)
-	}
-	if !list.Catalog.ChangedAt.Equal(earlier) || f.events[0].Detail["outcome"] != "unchanged" {
-		t.Fatalf("status %+v, audit %+v; want unchanged", list.Catalog, f.events)
-	}
+	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
+
+	require.Zero(t, fixture.replaces, "replaces")
+	require.Equal(t, v2, fixture.state.Validators, "state: want the new validators")
+	require.True(t, fixture.state.ChangedAt.Equal(earlier), "state = %+v, want changed at the earlier time", fixture.state)
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "state = %+v, want checked now", fixture.state)
+
+	require.True(t, list.Catalog.ChangedAt.Equal(earlier), "status = %+v, want unchanged", list.Catalog)
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "unchanged", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // Validators stored under another URL or parser are not sent: the new source
 // reads the whole catalog, and stores its own fingerprint with what it finds.
 func TestValidatorsFromAnotherSourceAreNotSent(t *testing.T) {
-	v := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
-	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()},
-		app.CatalogState{Validators: v, Fingerprint: "1 https://catalog.example.com/models.json", CheckedAt: earlier})
-	f.load(t)
-	f.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
-		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v}, nil).Once()
+	validators := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
+	fixture := newPricesFixture(t, false, []app.ModelPrice{sonnet()},
+		app.CatalogState{Validators: validators, Fingerprint: "1 https://catalog.example.com/models.json", CheckedAt: earlier})
+	fixture.load(t)
+	fixture.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
+		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: validators}, nil).Once()
 
-	if _, err := f.svc.Refresh(context.Background(), newAdmin()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if f.state.Fingerprint != fingerprint || f.state.Validators != v {
-		t.Fatalf("state = %+v, want this source's fingerprint with the validators", f.state)
-	}
+	_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
+
+	require.Equal(t, fingerprint, fixture.state.Fingerprint, "state: want this source's fingerprint")
+	require.Equal(t, validators, fixture.state.Validators, "state: want the validators")
 }
 
 // A store that refuses the catalog makes a failed check, reported like any other.
 func TestAStoreFailureIsAFailedCheck(t *testing.T) {
-	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
-	f.load(t)
-	f.storeErr = errors.New("invalid byte sequence for encoding UTF8: 0x00")
-	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).
+	fixture := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	fixture.load(t)
+	fixture.storeErr = errors.New("invalid byte sequence for encoding UTF8: 0x00")
+	fixture.source.EXPECT().Fetch(mock.Anything, mock.Anything).
 		Return(app.CatalogFetch{Prices: []app.ModelPrice{gpt()}, Validators: app.CatalogValidators{ETag: `"v1"`}}, nil).Once()
 
-	list, err := f.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if list.Catalog.LastError != "the catalog could not be stored" || !list.Catalog.CheckedAt.Equal(earlier) || f.failures != 1 {
-		t.Fatalf("status %+v, %d failures; want a failed check counted", list.Catalog, f.failures)
-	}
-	if got := f.priced(t); len(f.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v after %d lists, want the price in force untouched", got, len(f.sunk))
-	}
-	if f.events[0].Detail["outcome"] != "failed" {
-		t.Fatalf("audit = %+v, want outcome failed", f.events)
-	}
+	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
+
+	require.Equal(t, "the catalog could not be stored", list.Catalog.LastError, "status last error")
+	require.True(t, list.Catalog.CheckedAt.Equal(earlier), "status = %+v, want the last success unchanged", list.Catalog)
+	require.Equal(t, 1, fixture.failures, "failures: want a failed check counted")
+
+	got := fixture.priced(t)
+	require.Len(t, fixture.sunk, 1, "sink: want the price in force untouched")
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the price in force untouched")
+
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "failed", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // A check cut short by the shutdown is not a failed check: nothing is counted or
 // recorded.
 func TestACancelledCheckIsNotAFailure(t *testing.T) {
-	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
-	f.load(t)
+	fixture := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	fixture.load(t)
+
 	fetching := make(chan struct{})
-	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
+
+	fixture.source.EXPECT().Fetch(mock.Anything, mock.Anything).RunAndReturn(
 		func(ctx context.Context, _ app.CatalogValidators) (app.CatalogFetch, error) {
 			close(fetching)
 			<-ctx.Done()
+
 			return app.CatalogFetch{}, errors.New("the catalog could not be fetched: context canceled")
 		}).Once()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { f.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
+	go func() { fixture.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
 	<-fetching
 	cancel()
 	<-done
-	if f.failures != 0 || f.setStates != 0 || f.get(t).Catalog.LastError != "" {
-		t.Fatalf("%d failures, %d state writes, status %+v; want none", f.failures, f.setStates, f.get(t).Catalog)
-	}
+
+	require.Zero(t, fixture.failures, "failures")
+	require.Zero(t, fixture.setStates, "state writes")
+	require.Empty(t, fixture.get(t).Catalog.LastError, "status last error")
 }
 
 // A check stopped while its catalog is being stored is not a failed check either.
 func TestACheckCancelledWhileStoringIsNotAFailure(t *testing.T) {
-	f := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
-	f.load(t)
+	fixture := newPricesFixture(t, false, []app.ModelPrice{sonnet()}, app.CatalogState{CheckedAt: earlier})
+	fixture.load(t)
+
 	ctx, cancel := context.WithCancel(context.Background())
-	f.onStore, f.storeErr = cancel, context.Canceled
-	f.source.EXPECT().Fetch(mock.Anything, mock.Anything).
+	fixture.onStore, fixture.storeErr = cancel, context.Canceled
+	fixture.source.EXPECT().Fetch(mock.Anything, mock.Anything).
 		Return(app.CatalogFetch{Prices: []app.ModelPrice{gpt()}, Validators: app.CatalogValidators{ETag: `"v1"`}}, nil).Once()
 
 	done := make(chan struct{})
-	go func() { f.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
+	go func() { fixture.svc.RunCatalog(ctx, time.Hour); close(done) }()
+
 	<-done
-	if f.replaces != 1 || f.failures != 0 || f.setStates != 0 || f.get(t).Catalog.LastError != "" {
-		t.Fatalf("%d replaces, %d failures, %d state writes, status %+v; want one replace and nothing recorded",
-			f.replaces, f.failures, f.setStates, f.get(t).Catalog)
-	}
+
+	require.Equal(t, 1, fixture.replaces, "replaces")
+	require.Zero(t, fixture.failures, "failures")
+	require.Zero(t, fixture.setStates, "state writes")
+	require.Empty(t, fixture.get(t).Catalog.LastError, "status last error")
 }

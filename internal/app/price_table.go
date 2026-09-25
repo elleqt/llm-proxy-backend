@@ -23,6 +23,7 @@ func (t *PriceTable) SetPrices(prices []ModelPrice) {
 	for _, p := range prices {
 		m[priceKey{p.Provider, p.Model}] = p
 	}
+
 	t.table.Store(&m)
 }
 
@@ -33,6 +34,8 @@ func (t *PriceTable) Price(provider, model string) (ModelPrice, bool) {
 	if m == nil {
 		return ModelPrice{}, false
 	}
+
 	p, ok := (*m)[priceKey{provider, model}]
+
 	return p, ok
 }

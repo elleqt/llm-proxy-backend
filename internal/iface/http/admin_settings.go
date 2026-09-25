@@ -20,32 +20,40 @@ func (rt *router) registerAdminSettings(routes map[string]http.HandlerFunc) {
 
 // getSettings answers the stored document as it is, credentials included: it is the
 // administrator's to edit, and a redacted copy sent back whole would overwrite them.
-func (rt *router) getSettings(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	v, err := rt.Settings.Get(r.Context(), c.user)
+func (rt *router) getSettings(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+
+	view, err := rt.Settings.Get(req.Context(), c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, settingsOf(v))
+
+	writeJSON(rw, http.StatusOK, settingsOf(view))
 }
 
-func (rt *router) updateSettings(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) updateSettings(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.SettingsUpdateRequest
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
-	req := app.SettingsUpdate{YAML: body.Yaml, DryRun: body.DryRun != nil && *body.DryRun}
+
+	update := app.SettingsUpdate{YAML: body.Yaml, DryRun: body.DryRun != nil && *body.DryRun}
 	if f := body.Fields; f != nil {
-		req.Fields = &app.SettingsPatch{ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval}
+		update.Fields = &app.SettingsPatch{ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval}
 	}
-	res, err := rt.Settings.Update(r.Context(), c.user, req)
+
+	res, err := rt.Settings.Update(req.Context(), actor.user, update)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, api.SettingsUpdateResult{Applied: res.Applied, Diff: res.Diff, Settings: settingsOf(res.Settings)})
+
+	writeJSON(rw, http.StatusOK, api.SettingsUpdateResult{Applied: res.Applied, Diff: res.Diff, Settings: settingsOf(res.Settings)})
 }
 
 func settingsOf(v app.SettingsView) api.Settings {
@@ -54,31 +62,39 @@ func settingsOf(v app.SettingsView) api.Settings {
 	out.Fields.ProxyURL = &f.ProxyURL
 	out.Fields.RequestRetry = &f.RequestRetry
 	out.Fields.MaxRetryInterval = &f.MaxRetryInterval
+
 	return out
 }
 
-func (rt *router) getPrices(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
-	list, err := rt.Prices.Get(r.Context(), c.user)
+func (rt *router) getPrices(rw http.ResponseWriter, req *http.Request) {
+	c, _ := callerFrom(req.Context())
+
+	list, err := rt.Prices.Get(req.Context(), c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, priceListOf(list))
+
+	writeJSON(rw, http.StatusOK, priceListOf(list))
 }
 
 // replacePrices makes the body the whole manual override list. A body of null is
 // not a list: clearing every override takes an explicit [].
-func (rt *router) replacePrices(w http.ResponseWriter, r *http.Request) {
-	c, _ := callerFrom(r.Context())
+func (rt *router) replacePrices(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
 	var body api.ReplacePricesJSONRequestBody
-	if !decodeJSON(w, r, &body) {
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
+
 	if body == nil {
-		writeError(w, http.StatusUnprocessableEntity, codeInvalidInput, "the price list must be an array")
+		writeError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "the price list must be an array")
+
 		return
 	}
+
 	list := make([]app.ModelPrice, 0, len(body))
 	for _, p := range body {
 		list = append(list, app.ModelPrice{
@@ -86,12 +102,15 @@ func (rt *router) replacePrices(w http.ResponseWriter, r *http.Request) {
 			Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite,
 		})
 	}
-	stored, err := rt.Prices.Replace(r.Context(), c.user, list)
+
+	stored, err := rt.Prices.Replace(req.Context(), actor.user, list)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, priceListOf(stored))
+
+	writeJSON(rw, http.StatusOK, priceListOf(stored))
 }
 
 // refreshWriteTime is how long POST /api/admin/prices/refresh may take to answer:
@@ -102,44 +121,54 @@ const refreshWriteTime = 2*app.CatalogFetchTimeout + time.Minute
 
 // refreshPriceCatalog checks the catalog now. A failed check is still a 200: its
 // reason is in catalog.lastError.
-func (rt *router) refreshPriceCatalog(w http.ResponseWriter, r *http.Request) {
-	if err := http.NewResponseController(w).SetWriteDeadline(time.Now().Add(refreshWriteTime)); err != nil &&
+func (rt *router) refreshPriceCatalog(rw http.ResponseWriter, req *http.Request) {
+	if err := http.NewResponseController(rw).SetWriteDeadline(time.Now().Add(refreshWriteTime)); err != nil &&
 		!errors.Is(err, http.ErrNotSupported) {
 		rt.Log.Warn("extending the write deadline failed",
-			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("err", err))
+			slog.String("method", req.Method), slog.String("path", req.URL.Path), slog.Any("err", err))
 	}
-	c, _ := callerFrom(r.Context())
-	list, err := rt.Prices.Refresh(r.Context(), c.user)
+
+	c, _ := callerFrom(req.Context())
+
+	list, err := rt.Prices.Refresh(req.Context(), c.user)
 	if err != nil {
-		rt.adminFailure(w, r, err)
+		rt.adminFailure(rw, req, err)
+
 		return
 	}
-	writeJSON(w, http.StatusOK, priceListOf(list))
+
+	writeJSON(rw, http.StatusOK, priceListOf(list))
 }
 
 func priceListOf(list app.PriceList) api.PriceList {
 	prices := make([]api.PriceEntry, 0, len(list.Prices))
-	for _, p := range list.Prices {
-		e := api.PriceEntry{
-			Provider: p.Provider, Model: p.Model,
-			Input: p.Input, Output: p.Output, CacheRead: p.CacheRead, CacheWrite: p.CacheWrite,
-			Source: api.PriceEntrySource(p.Source), UpdatedAt: p.UpdatedAt,
+	for _, price := range list.Prices {
+		entry := api.PriceEntry{
+			Provider: price.Provider, Model: price.Model,
+			Input: price.Input, Output: price.Output, CacheRead: price.CacheRead, CacheWrite: price.CacheWrite,
+			Source: api.PriceEntrySource(price.Source), UpdatedAt: price.UpdatedAt,
 		}
-		if c := p.Catalog; c != nil {
-			e.CatalogRates = &api.PriceRates{Input: c.Input, Output: c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite}
+		if c := price.Catalog; c != nil {
+			entry.CatalogRates = &api.PriceRates{Input: c.Input, Output: c.Output, CacheRead: c.CacheRead, CacheWrite: c.CacheWrite}
 		}
-		prices = append(prices, e)
+
+		prices = append(prices, entry)
 	}
-	s := list.Catalog
-	catalog := api.PriceCatalog{Enabled: s.Enabled, Models: s.Models}
-	if !s.CheckedAt.IsZero() {
-		catalog.CheckedAt = &s.CheckedAt
+
+	state := list.Catalog
+
+	catalog := api.PriceCatalog{Enabled: state.Enabled, Models: state.Models}
+	if !state.CheckedAt.IsZero() {
+		catalog.CheckedAt = &state.CheckedAt
 	}
-	if !s.ChangedAt.IsZero() {
-		catalog.ChangedAt = &s.ChangedAt
+
+	if !state.ChangedAt.IsZero() {
+		catalog.ChangedAt = &state.ChangedAt
 	}
-	if s.LastError != "" {
-		catalog.LastError = &s.LastError
+
+	if state.LastError != "" {
+		catalog.LastError = &state.LastError
 	}
+
 	return api.PriceList{Prices: prices, Catalog: catalog}
 }

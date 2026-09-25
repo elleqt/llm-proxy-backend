@@ -46,6 +46,7 @@ func NewThrottle(attempts LoginAttemptRepo, maxFailures int, lockFor time.Durati
 	if maxFailures < 1 || lockFor <= 0 {
 		panic(fmt.Sprintf("app: throttle needs a positive limit and window, got %d and %v", maxFailures, lockFor))
 	}
+
 	return &Throttle{attempts: attempts, maxFailures: maxFailures, lockFor: lockFor, clock: clock}
 }
 
@@ -54,11 +55,13 @@ func NewThrottle(attempts LoginAttemptRepo, maxFailures int, lockFor time.Durati
 func (t *Throttle) Check(ctx context.Context, email string) error {
 	_, until, err := t.attempts.Failures(ctx, email)
 	if err != nil {
-		return err
+		return fmt.Errorf("app: sign-in attempts: %w", err)
 	}
+
 	if until != nil && t.clock.Now().Before(*until) {
 		return &LockedOutError{Until: *until}
 	}
+
 	return nil
 }
 
@@ -67,10 +70,12 @@ func (t *Throttle) Check(ctx context.Context, email string) error {
 // succeeds; if it fails, the charge already is the failure.
 func (t *Throttle) Charge(ctx context.Context, email string) error {
 	now := t.clock.Now()
+
 	count, until, err := t.attempts.Charge(ctx, email, t.maxFailures, now, now.Add(t.lockFor))
 	if err != nil {
-		return err
+		return fmt.Errorf("app: charge sign-in attempt: %w", err)
 	}
+
 	if count <= t.maxFailures {
 		return nil
 	}
@@ -80,11 +85,16 @@ func (t *Throttle) Charge(ctx context.Context, email string) error {
 	if until != nil {
 		lapse = *until
 	}
+
 	return &LockedOutError{Until: lapse}
 }
 
 // Reset forgets every attempt of email, including an open lock. Only a successful
 // sign-in may call it.
 func (t *Throttle) Reset(ctx context.Context, email string) error {
-	return t.attempts.Clear(ctx, email)
+	if err := t.attempts.Clear(ctx, email); err != nil {
+		return fmt.Errorf("app: clear sign-in attempts: %w", err)
+	}
+
+	return nil
 }

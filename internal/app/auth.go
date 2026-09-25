@@ -31,20 +31,23 @@ const sessionIDLen = 32
 // place that mints a session id. Both secrets leave through the return value and
 // through nothing else: no audit detail, no error string, no log line.
 type AuthService struct {
+	sessionOpener
+
 	users     UserRepo
 	passwords PasswordRepo
 	throttle  *Throttle
 	hasher    *PasswordHasher
-	sessionOpener
 }
 
-func NewAuthService(users UserRepo, passwords PasswordRepo, throttle *Throttle, hasher *PasswordHasher, sessions SessionRepo, audit AuditSink, clock Clock) *AuthService {
+func NewAuthService(
+	users UserRepo, passwords PasswordRepo, throttle *Throttle, hasher *PasswordHasher, sessions SessionRepo, audit AuditSink, clock Clock,
+) *AuthService {
 	return &AuthService{
-		users:         users,
-		passwords:     passwords,
-		throttle:      throttle,
-		hasher:        hasher,
-		sessionOpener: sessionOpener{sessions: sessions, audit: audit, clock: clock},
+		users:     users,
+		passwords: passwords,
+		throttle:  throttle,
+		hasher:    hasher,
+		sessions:  sessions, audit: audit, clock: clock,
 	}
 }
 
@@ -66,10 +69,12 @@ func mustDecoyHash() string {
 	if _, err := rand.Read(buf); err != nil {
 		panic(fmt.Sprintf("app: read decoy password: %v", err))
 	}
+
 	hash, err := identity.HashPassword(base64.RawURLEncoding.EncodeToString(buf))
 	if err != nil {
 		panic(fmt.Sprintf("app: hash decoy password: %v", err))
 	}
+
 	return hash
 }
 
@@ -78,6 +83,7 @@ func mustDecoyHash() string {
 // there is no second definition to drift.
 func HashSessionID(id string) string {
 	sum := sha256.Sum256([]byte(id))
+
 	return hex.EncodeToString(sum[:])
 }
 
@@ -106,27 +112,34 @@ func (s *AuthService) SignIn(ctx context.Context, email, password string, meta S
 	if err := s.throttle.Check(ctx, email); err != nil {
 		return Session{}, identity.User{}, err
 	}
+
 	if err := s.throttle.Charge(ctx, email); err != nil {
 		return Session{}, identity.User{}, err
 	}
+
 	attempt, err := s.resolve(ctx, email)
 	if err != nil {
 		return Session{}, identity.User{}, err
 	}
+
 	ok, err := attempt.verify(ctx, s.hasher, password)
 	if err != nil {
 		return Session{}, identity.User{}, err
 	}
+
 	if !ok {
 		return Session{}, identity.User{}, ErrInvalidCredentials
 	}
+
 	if err := s.throttle.Reset(ctx, email); err != nil {
 		return Session{}, identity.User{}, fmt.Errorf("app: clear sign-in attempts: %w", err)
 	}
+
 	sess, err := s.open(ctx, attempt.user, "auth.signin", meta)
 	if err != nil {
 		return Session{}, identity.User{}, err
 	}
+
 	return sess, attempt.user, nil
 }
 
@@ -153,16 +166,20 @@ func (s *AuthService) SignIn(ctx context.Context, email, password string, meta S
 func (s *AuthService) ResolveSession(ctx context.Context, id string) (Session, identity.User, error) {
 	sess, err := s.sessions.ByHash(ctx, HashSessionID(id))
 	if err != nil {
-		return Session{}, identity.User{}, err
+		return Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
 	}
+
 	user, err := s.users.ByID(ctx, sess.UserID)
 	if err != nil {
-		return Session{}, identity.User{}, err
+		return Session{}, identity.User{}, fmt.Errorf("app: resolve session: %w", err)
 	}
+
 	if !user.CanSignIn() {
 		return Session{}, identity.User{}, ErrNotFound
 	}
+
 	sess.Restricted = user.MustChangePassword
+
 	return sess, user, nil
 }
 
@@ -180,10 +197,12 @@ type sessionOpener struct {
 // id for the caller to put in a cookie; the stored copy does not.
 func (o sessionOpener) open(ctx context.Context, user identity.User, action string, meta SessionMeta) (Session, error) {
 	now := o.clock.Now()
+
 	id, err := newSessionID()
 	if err != nil {
 		return Session{}, err
 	}
+
 	stored := Session{
 		IDHash:    HashSessionID(id),
 		UserID:    user.ID,
@@ -193,7 +212,7 @@ func (o sessionOpener) open(ctx context.Context, user identity.User, action stri
 		ExpiresAt: now.Add(SessionTTL),
 	}
 	if err := o.sessions.Create(ctx, stored); err != nil {
-		return Session{}, err
+		return Session{}, fmt.Errorf("app: open session: %w", err)
 	}
 
 	if err := o.audit.Record(ctx, AuditEvent{
@@ -214,13 +233,17 @@ func (o sessionOpener) open(ctx context.Context, user identity.User, action stri
 		// the request context is cancelled for exactly that reason.
 		cctx, cancel := compensationContext(ctx)
 		defer cancel()
+
 		if derr := o.sessions.Delete(cctx, stored.IDHash); derr != nil {
+			//nolint:errorlint // derr is reported, not wrapped: callers match the sign-in failure alone.
 			return Session{}, fmt.Errorf("record sign-in: %w (session left open: %v)", err, derr)
 		}
+
 		return Session{}, fmt.Errorf("record sign-in: %w", err)
 	}
 
 	stored.ID = id
+
 	return stored, nil
 }
 
@@ -253,46 +276,8 @@ func (a signInAttempt) verify(ctx context.Context, hasher *PasswordHasher, passw
 	if err != nil {
 		return false, err
 	}
+
 	return ok && a.eligible, nil
-}
-
-// resolve looks up whatever exists behind email. Its error return is reserved for
-// infrastructure failures — a credential decision is never an error here, it is an
-// attempt that verify will refuse, because an error would return before the
-// derivation and reopen the timing oracle.
-func (s *AuthService) resolve(ctx context.Context, email string) (signInAttempt, error) {
-	var a signInAttempt
-
-	user, err := s.users.ByEmail(ctx, email)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		// No such address. Nothing to fill in.
-		return a, nil
-	case err != nil:
-		return a, err
-	case !user.CanSignIn():
-		// A service account and a blocked user are refused through the one
-		// predicate that owns the rule. Their real hash is deliberately not even
-		// read: there is no path on which it could matter.
-		return a, nil
-	}
-	a.user = user
-
-	hash, expiresAt, err := s.passwords.Get(ctx, user.ID)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		// An IdP-only person has no local password.
-		return a, nil
-	case err != nil:
-		return a, err
-	case expiresAt != nil && !s.clock.Now().Before(*expiresAt):
-		// A temporary password that outlived its window is not a credential.
-		return a, nil
-	}
-
-	a.hash = hash
-	a.eligible = true
-	return a, nil
 }
 
 // ChangePassword replaces the password of the session's owner.
@@ -321,24 +306,28 @@ func (s *AuthService) resolve(ctx context.Context, email string) (signInAttempt,
 func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentPlain, newPlain string) error {
 	user, err := s.users.ByID(ctx, sess.UserID)
 	if err != nil {
-		return err
+		return fmt.Errorf("app: change password: %w", err)
 	}
+
 	if !user.CanSignIn() {
 		return ErrForbidden
 	}
 
 	current, expiresAt, err := s.passwords.Get(ctx, user.ID)
 	if err != nil {
-		return err
+		return fmt.Errorf("app: change password: %w", err)
 	}
+
 	if expiresAt != nil && !s.clock.Now().Before(*expiresAt) {
 		return ErrInvalidCredentials
 	}
+
 	if !user.MustChangePassword {
 		ok, err := s.hasher.Verify(ctx, current, currentPlain)
 		if err != nil {
 			return err
 		}
+
 		if !ok {
 			return ErrInvalidCredentials
 		}
@@ -347,6 +336,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 	if err := checkNewPassword(newPlain); err != nil {
 		return err
 	}
+
 	hash, err := s.hasher.Hash(ctx, newPlain)
 	if err != nil {
 		return err
@@ -354,7 +344,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 	// The new password is the user's own, so it carries no expiry: nil clears the
 	// one the temporary password left behind.
 	if err := s.passwords.Set(ctx, user.ID, hash, nil); err != nil {
-		return err
+		return fmt.Errorf("app: change password: %w", err)
 	}
 	// Order matters. The flag is cleared only after the password it describes is
 	// gone; the other order would leave a user unflagged and still holding an
@@ -362,8 +352,9 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 	// restriction from the session the user is holding right now, because that
 	// session reads the flag rather than a copy of it.
 	if err := s.users.SetMustChangePassword(ctx, user.ID, false); err != nil {
-		return err
+		return fmt.Errorf("app: change password: %w", err)
 	}
+
 	if err := s.sessions.DeleteByUserExcept(ctx, user.ID, sess.IDHash); err != nil {
 		return fmt.Errorf("app: end the other sessions: %w", err)
 	}
@@ -384,6 +375,7 @@ func (s *AuthService) ChangePassword(ctx context.Context, sess Session, currentP
 		// uses the new password either way.
 		return fmt.Errorf("record password change: %w", err)
 	}
+
 	return nil
 }
 
@@ -399,9 +391,11 @@ func checkNewPassword(plain string) error {
 	if plain == "" {
 		return identity.ErrEmptyPassword
 	}
+
 	if utf8.RuneCountInString(plain) < MinPasswordLength {
 		return ErrWeakPassword
 	}
+
 	return nil
 }
 
@@ -415,9 +409,11 @@ func checkNewPassword(plain string) error {
 func (s *AuthService) SignOut(ctx context.Context, sess Session) error {
 	dctx, cancel := compensationContext(ctx)
 	defer cancel()
+
 	if err := s.sessions.Delete(dctx, sess.IDHash); err != nil {
 		return fmt.Errorf("app: end session: %w", err)
 	}
+
 	if err := s.audit.Record(dctx, AuditEvent{
 		At:        s.clock.Now(),
 		ActorID:   sess.UserID,
@@ -429,7 +425,49 @@ func (s *AuthService) SignOut(ctx context.Context, sess Session) error {
 	}); err != nil {
 		return fmt.Errorf("record sign-out: %w", err)
 	}
+
 	return nil
+}
+
+// resolve looks up whatever exists behind email. Its error return is reserved for
+// infrastructure failures — a credential decision is never an error here, it is an
+// attempt that verify will refuse, because an error would return before the
+// derivation and reopen the timing oracle.
+func (s *AuthService) resolve(ctx context.Context, email string) (signInAttempt, error) {
+	var attempt signInAttempt
+
+	user, err := s.users.ByEmail(ctx, email)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// No such address. Nothing to fill in.
+		return attempt, nil
+	case err != nil:
+		return attempt, fmt.Errorf("app: sign in: %w", err)
+	case !user.CanSignIn():
+		// A service account and a blocked user are refused through the one
+		// predicate that owns the rule. Their real hash is deliberately not even
+		// read: there is no path on which it could matter.
+		return attempt, nil
+	}
+
+	attempt.user = user
+
+	hash, expiresAt, err := s.passwords.Get(ctx, user.ID)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// An IdP-only person has no local password.
+		return attempt, nil
+	case err != nil:
+		return attempt, fmt.Errorf("app: sign in: %w", err)
+	case expiresAt != nil && !s.clock.Now().Before(*expiresAt):
+		// A temporary password that outlived its window is not a credential.
+		return attempt, nil
+	}
+
+	attempt.hash = hash
+	attempt.eligible = true
+
+	return attempt, nil
 }
 
 func newSessionID() (string, error) {
@@ -437,5 +475,6 @@ func newSessionID() (string, error) {
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("app: read session id: %w", err)
 	}
+
 	return base64.RawURLEncoding.EncodeToString(buf), nil
 }

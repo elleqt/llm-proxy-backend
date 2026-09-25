@@ -3,12 +3,12 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 type LoginAttemptRepo struct{ pool *pgxpool.Pool }
@@ -32,15 +32,18 @@ func (r *LoginAttemptRepo) Failures(ctx context.Context, email string) (int, *ti
 		count       int
 		lockedUntil *time.Time
 	)
+
 	err := r.pool.QueryRow(ctx,
 		`SELECT failures, locked_until FROM login_attempts WHERE email = lower($1)`, email).
 		Scan(&count, &lockedUntil)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil, nil
 	}
+
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("postgres: login failures: %w", err)
 	}
+
 	return count, lockedUntil, nil
 }
 
@@ -57,6 +60,7 @@ func (r *LoginAttemptRepo) Charge(ctx context.Context, email string, maxFailures
 		count       int
 		lockedUntil *time.Time
 	)
+
 	err := r.pool.QueryRow(ctx,
 		`INSERT INTO login_attempts AS a (email, failures, locked_until, last_failure_at)
 		 VALUES (lower($1), 1, CASE WHEN $2::integer <= 1 THEN $4::timestamptz END, $3::timestamptz)
@@ -79,14 +83,18 @@ func (r *LoginAttemptRepo) Charge(ctx context.Context, email string, maxFailures
 		email, maxFailures, now, lockUntil).
 		Scan(&count, &lockedUntil)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("postgres: charge login attempt: %w", err)
 	}
+
 	return count, lockedUntil, nil
 }
 
 // Clear forgets an address after a successful sign-in, dropping both the count and any
 // lockout.
 func (r *LoginAttemptRepo) Clear(ctx context.Context, email string) error {
-	_, err := r.pool.Exec(ctx, `DELETE FROM login_attempts WHERE email = lower($1)`, email)
-	return err
+	if _, err := r.pool.Exec(ctx, `DELETE FROM login_attempts WHERE email = lower($1)`, email); err != nil {
+		return fmt.Errorf("postgres: clear login attempts: %w", err)
+	}
+
+	return nil
 }

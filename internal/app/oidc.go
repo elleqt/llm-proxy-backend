@@ -10,10 +10,9 @@ import (
 	"slices"
 	"sort"
 
-	"github.com/google/uuid"
-
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
 )
 
 // challengeLen is the number of random bytes behind each of state, nonce and PKCE
@@ -24,13 +23,15 @@ const challengeLen = 32
 // NewChallenge draws fresh, independent secrets for one login.
 func NewChallenge() (Challenge, error) {
 	var ch Challenge
-	for _, f := range []*string{&ch.State, &ch.Nonce, &ch.Verifier} {
+	for _, field := range []*string{&ch.State, &ch.Nonce, &ch.Verifier} {
 		buf := make([]byte, challengeLen)
 		if _, err := rand.Read(buf); err != nil {
 			return Challenge{}, fmt.Errorf("app: read login challenge: %w", err)
 		}
-		*f = base64.RawURLEncoding.EncodeToString(buf)
+
+		*field = base64.RawURLEncoding.EncodeToString(buf)
 	}
+
 	return ch, nil
 }
 
@@ -57,10 +58,11 @@ type groupGrant struct {
 
 // OIDCService signs people in through an OpenID Connect provider.
 type OIDCService struct {
+	sessionOpener
+
 	users  UserRepo
 	idents IdentityRepo
 	idp    IdentityProvider
-	sessionOpener
 
 	requiredGroup string
 	allowSignUp   bool
@@ -74,26 +76,31 @@ type OIDCService struct {
 // NewOIDCService parses the default policy and the group mapping up front — the one
 // place either is parsed: a rule that does not parse is a configuration error the
 // operator sees at startup, never a surprise on some user's login.
-func NewOIDCService(users UserRepo, idents IdentityRepo, sessions SessionRepo, idp IdentityProvider, audit AuditSink, clock Clock, cfg OIDCConfig) (*OIDCService, error) {
+func NewOIDCService(
+	users UserRepo, idents IdentityRepo, sessions SessionRepo, idp IdentityProvider, audit AuditSink, clock Clock, cfg OIDCConfig,
+) (*OIDCService, error) {
 	defaultPolicy, err := parseRules(cfg.DefaultPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("app: oidc default policy: %w", err)
 	}
+
 	grants := make([]groupGrant, 0, len(cfg.GroupPolicy))
 	for group, rules := range cfg.GroupPolicy {
 		policy, err := parseRules(rules)
 		if err != nil {
 			return nil, fmt.Errorf("app: oidc group policy for %q: %w", group, err)
 		}
+
 		grants = append(grants, groupGrant{group: group, policy: policy})
 	}
+
 	sort.Slice(grants, func(i, j int) bool { return grants[i].group < grants[j].group })
 
 	return &OIDCService{
-		users:         users,
-		idents:        idents,
-		idp:           idp,
-		sessionOpener: sessionOpener{sessions: sessions, audit: audit, clock: clock},
+		users:    users,
+		idents:   idents,
+		idp:      idp,
+		sessions: sessions, audit: audit, clock: clock,
 		requiredGroup: cfg.RequiredGroup,
 		allowSignUp:   cfg.AllowSignUp,
 		defaultPolicy: defaultPolicy,
@@ -107,20 +114,23 @@ func parseRules(raw []string) (access.Policy, error) {
 	for _, s := range raw {
 		r, err := access.ParseRule(s)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("app: parse rule: %w", err)
 		}
+
 		policy = append(policy, r)
 	}
+
 	return policy, nil
 }
 
 // Begin starts a login: the URL to send the browser to, and the challenge the
 // transport must hold until the callback.
-func (s *OIDCService) Begin() (authURL string, ch Challenge, err error) {
-	ch, err = NewChallenge()
+func (s *OIDCService) Begin() (string, Challenge, error) {
+	ch, err := NewChallenge()
 	if err != nil {
 		return "", Challenge{}, err
 	}
+
 	return s.idp.AuthURL(ch), ch, nil
 }
 
@@ -135,10 +145,12 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 	if !ch.Answers(state) {
 		return Session{}, ErrInvalidCredentials
 	}
+
 	claims, err := s.idp.Exchange(ctx, code, ch)
 	if err != nil {
 		return Session{}, fmt.Errorf("oidc exchange: %w", err)
 	}
+
 	if s.requiredGroup != "" && !slices.Contains(claims.Groups, s.requiredGroup) {
 		return Session{}, ErrForbidden
 	}
@@ -155,6 +167,7 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 		if err != nil {
 			return Session{}, fmt.Errorf("oidc fill display name: %w", err)
 		}
+
 		if filled {
 			user.DisplayName = claims.Name
 		}
@@ -162,11 +175,13 @@ func (s *OIDCService) Complete(ctx context.Context, code, state string, ch Chall
 
 	if len(s.grants) > 0 {
 		user.Policy = s.policyFor(claims.Groups)
+
 		user.PolicySource = identity.PolicyIDP
 		if err := s.users.SaveIdentityState(ctx, user); err != nil {
-			return Session{}, err
+			return Session{}, fmt.Errorf("app: oidc save identity state: %w", err)
 		}
 	}
+
 	return s.open(ctx, user, "auth.signin.oidc", meta)
 }
 
@@ -178,37 +193,39 @@ func (ch Challenge) Answers(state string) bool {
 	if state == "" || ch.State == "" {
 		return false
 	}
+
 	return subtle.ConstantTimeCompare([]byte(state), []byte(ch.State)) == 1
 }
 
 // resolve finds or creates the account behind the claims and returns it only if it
 // may sign in. Nothing is linked, consumed or created for a user CanSignIn refuses.
-func (s *OIDCService) resolve(ctx context.Context, c Claims) (identity.User, error) {
-	id, err := s.idents.BySubject(ctx, c.Issuer, c.Subject)
+func (s *OIDCService) resolve(ctx context.Context, claims Claims) (identity.User, error) {
+	id, err := s.idents.BySubject(ctx, claims.Issuer, claims.Subject)
 	switch {
 	case err == nil:
 		return s.eligible(ctx, id)
 	case !errors.Is(err, ErrNotFound):
-		return identity.User{}, err
+		return identity.User{}, fmt.Errorf("app: oidc find linked subject: %w", err)
 	}
 
 	// An invitation is addressed to a mailbox, so only a provider's statement that
 	// the person controls that mailbox may redeem it. Unverified, the invitation is
 	// invisible and sign-up policy decides as if there were none.
-	if c.EmailVerified && c.Email != "" {
-		invited, err := s.idents.PendingByEmail(ctx, c.Issuer, c.Email)
+	if claims.EmailVerified && claims.Email != "" {
+		invited, err := s.idents.PendingByEmail(ctx, claims.Issuer, claims.Email)
 		switch {
 		case err == nil:
-			return s.redeem(ctx, invited, c)
+			return s.redeem(ctx, invited, claims)
 		case !errors.Is(err, ErrNotFound):
-			return identity.User{}, err
+			return identity.User{}, fmt.Errorf("app: oidc find invitation: %w", err)
 		}
 	}
 
 	if !s.allowSignUp {
 		return identity.User{}, ErrForbidden
 	}
-	return s.signUp(ctx, c)
+
+	return s.signUp(ctx, claims)
 }
 
 // eligible loads a user and applies the one sign-in rule. The refusal is the same
@@ -216,11 +233,13 @@ func (s *OIDCService) resolve(ctx context.Context, c Claims) (identity.User, err
 func (s *OIDCService) eligible(ctx context.Context, id uuid.UUID) (identity.User, error) {
 	user, err := s.users.ByID(ctx, id)
 	if err != nil {
-		return identity.User{}, err
+		return identity.User{}, fmt.Errorf("app: oidc load user: %w", err)
 	}
+
 	if !user.CanSignIn() {
 		return identity.User{}, ErrInvalidCredentials
 	}
+
 	return user, nil
 }
 
@@ -233,17 +252,20 @@ func (s *OIDCService) eligible(ctx context.Context, id uuid.UUID) (identity.User
 // consumed invitation with no link, which an administrator fixes by re-inviting. The
 // other order would leave a live invitation beside a working link — redeemable a
 // second time, by a second subject, until it expired.
-func (s *OIDCService) redeem(ctx context.Context, invited uuid.UUID, c Claims) (identity.User, error) {
+func (s *OIDCService) redeem(ctx context.Context, invited uuid.UUID, claims Claims) (identity.User, error) {
 	user, err := s.eligible(ctx, invited)
 	if err != nil {
 		return identity.User{}, err
 	}
+
 	if err := s.idents.ConsumePending(ctx, user.ID); err != nil {
 		return identity.User{}, fmt.Errorf("oidc consume invitation: %w", err)
 	}
-	if err := s.idents.Link(ctx, user.ID, c.Issuer, c.Subject); err != nil {
+
+	if err := s.idents.Link(ctx, user.ID, claims.Issuer, claims.Subject); err != nil {
 		return identity.User{}, fmt.Errorf("oidc link invited subject: %w", err)
 	}
+
 	return user, nil
 }
 
@@ -259,11 +281,11 @@ func signUpID(issuer, subject string) uuid.UUID {
 // signUp provisions an account for a stranger. With a group mapping the policy comes
 // from the groups, exactly as it would on every later login; without one the
 // operator's default applies and stays administrator-owned.
-func (s *OIDCService) signUp(ctx context.Context, c Claims) (identity.User, error) {
+func (s *OIDCService) signUp(ctx context.Context, claims Claims) (identity.User, error) {
 	user := identity.User{
-		ID:           signUpID(c.Issuer, c.Subject),
+		ID:           signUpID(claims.Issuer, claims.Subject),
 		Kind:         identity.KindHuman,
-		DisplayName:  c.Name,
+		DisplayName:  claims.Name,
 		Role:         identity.RoleUser,
 		Status:       identity.StatusActive,
 		Policy:       s.defaultPolicy,
@@ -274,13 +296,15 @@ func (s *OIDCService) signUp(ctx context.Context, c Claims) (identity.User, erro
 	// address the IdP has not verified must not occupy it, or whoever types a
 	// colleague's address into their profile first locks the colleague out of it.
 	// The account is still created — the subject is the identity — just without one.
-	if c.EmailVerified {
-		user.Email = c.Email
+	if claims.EmailVerified {
+		user.Email = claims.Email
 	}
+
 	if len(s.grants) > 0 {
-		user.Policy = s.policyFor(c.Groups)
+		user.Policy = s.policyFor(claims.Groups)
 		user.PolicySource = identity.PolicyIDP
 	}
+
 	if err := s.users.Create(ctx, user); err != nil {
 		if !errors.Is(err, ErrConflict) {
 			return identity.User{}, fmt.Errorf("oidc sign-up: %w", err)
@@ -297,11 +321,14 @@ func (s *OIDCService) signUp(ctx context.Context, c Claims) (identity.User, erro
 		case lerr != nil:
 			return identity.User{}, lerr
 		}
+
 		user = existing
 	}
-	if err := s.idents.Link(ctx, user.ID, c.Issuer, c.Subject); err != nil {
+
+	if err := s.idents.Link(ctx, user.ID, claims.Issuer, claims.Subject); err != nil {
 		return identity.User{}, fmt.Errorf("oidc link new subject: %w", err)
 	}
+
 	return user, nil
 }
 
@@ -310,16 +337,20 @@ func (s *OIDCService) signUp(ctx context.Context, c Claims) (identity.User, erro
 func (s *OIDCService) policyFor(groups []string) access.Policy {
 	policy := access.Policy{}
 	seen := map[string]bool{}
+
 	for _, g := range s.grants {
 		if !slices.Contains(groups, g.group) {
 			continue
 		}
+
 		for _, r := range g.policy {
 			if key := r.String(); !seen[key] {
 				seen[key] = true
+
 				policy = append(policy, r)
 			}
 		}
 	}
+
 	return policy
 }

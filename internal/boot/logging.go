@@ -2,15 +2,15 @@ package boot
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/elleqt/llm-proxy-backend/internal/config"
+	"github.com/sirupsen/logrus"
 )
 
 // Component labels: which code wrote a record.
@@ -19,18 +19,20 @@ const (
 	componentUpstream = "cliproxyapi"
 )
 
-// newLogHandler is the process log's handler: text or JSON on w
+// newLogHandler is the process log's handler: text or JSON on out
 // (LLMPROXY_LOG_FORMAT), timestamps in UTC, and every record labelled with the
 // build version. Records carry no component yet; each logger adds its own.
-func newLogHandler(w io.Writer, format, version string) slog.Handler {
+func newLogHandler(out io.Writer, format, version string) slog.Handler {
 	opts := &slog.HandlerOptions{ReplaceAttr: utcTime}
-	var h slog.Handler
+
+	var handler slog.Handler
 	if format == config.LogFormatJSON {
-		h = slog.NewJSONHandler(w, opts)
+		handler = slog.NewJSONHandler(out, opts)
 	} else {
-		h = slog.NewTextHandler(w, opts)
+		handler = slog.NewTextHandler(out, opts)
 	}
-	return h.WithAttrs([]slog.Attr{slog.String("version", version)})
+
+	return handler.WithAttrs([]slog.Attr{slog.String("version", version)})
 }
 
 // utcTime writes a record's time in UTC, as the process log always has.
@@ -38,6 +40,7 @@ func utcTime(groups []string, a slog.Attr) slog.Attr {
 	if len(groups) == 0 && a.Key == slog.TimeKey && a.Value.Kind() == slog.KindTime {
 		a.Value = slog.TimeValue(a.Value.Time().UTC())
 	}
+
 	return a
 }
 
@@ -67,30 +70,39 @@ type logrusBridge struct{ h slog.Handler }
 
 func (b logrusBridge) Levels() []logrus.Level { return logrus.AllLevels }
 
-func (b logrusBridge) Fire(e *logrus.Entry) error {
-	ctx := e.Context
+func (b logrusBridge) Fire(entry *logrus.Entry) error {
+	ctx := entry.Context
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lvl := slogLevel(e.Level)
+
+	lvl := slogLevel(entry.Level)
 	if !b.h.Enabled(ctx, lvl) {
 		return nil
 	}
+
 	var pc uintptr
-	if e.Caller != nil {
-		pc = e.Caller.PC
+	if entry.Caller != nil {
+		pc = entry.Caller.PC
 	}
-	r := slog.NewRecord(e.Time, lvl, strings.TrimRight(e.Message, "\r\n"), pc)
+
+	record := slog.NewRecord(entry.Time, lvl, strings.TrimRight(entry.Message, "\r\n"), pc)
 	// In key order, as logrus's own formatters write them: lines from one
 	// callsite then read and diff alike.
-	for _, k := range slices.Sorted(maps.Keys(e.Data)) {
-		v := e.Data[k]
-		if k == "request_id" && v == "--------" {
+	for _, key := range slices.Sorted(maps.Keys(entry.Data)) {
+		v := entry.Data[key]
+		if key == "request_id" && v == "--------" {
 			continue // upstream's placeholder for "no id"
 		}
-		r.AddAttrs(slog.Any(k, v))
+
+		record.AddAttrs(slog.Any(key, v))
 	}
-	return b.h.Handle(ctx, r)
+
+	if err := b.h.Handle(ctx, record); err != nil {
+		return fmt.Errorf("logrus bridge: %w", err)
+	}
+
+	return nil
 }
 
 // slogLevel maps a logrus level to the nearest slog level: trace joins debug,
@@ -103,9 +115,11 @@ func slogLevel(l logrus.Level) slog.Level {
 		return slog.LevelInfo
 	case logrus.WarnLevel:
 		return slog.LevelWarn
-	default: // Error, Fatal, Panic
-		return slog.LevelError
+	case logrus.ErrorLevel, logrus.FatalLevel, logrus.PanicLevel:
+		// Error, fatal and panic, like any level logrus may add, map to error below.
 	}
+
+	return slog.LevelError
 }
 
 // nopFormatter keeps logrus from formatting entries nobody reads: the bridge

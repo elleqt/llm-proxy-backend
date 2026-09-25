@@ -33,6 +33,7 @@ func ValidateLabel(label string) error {
 	if label == "" || !utf8.ValidString(label) {
 		return ErrInvalidLabel
 	}
+
 	n := 0
 	for _, r := range label {
 		n++
@@ -40,6 +41,7 @@ func ValidateLabel(label string) error {
 			return ErrInvalidLabel
 		}
 	}
+
 	return nil
 }
 
@@ -63,11 +65,14 @@ func Generate(owner uuid.UUID, label string) (Token, string, error) {
 	if err := ValidateLabel(label); err != nil {
 		return Token{}, "", err
 	}
+
 	raw := make([]byte, secretBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return Token{}, "", fmt.Errorf("credentials: entropy: %w", err)
 	}
+
 	secret := "sk-" + base64.RawURLEncoding.EncodeToString(raw)
+
 	return Token{
 		ID:        uuid.New(),
 		UserID:    owner,
@@ -80,17 +85,20 @@ func Generate(owner uuid.UUID, label string) (Token, string, error) {
 
 func HashSecret(secret string) string {
 	sum := sha256.Sum256([]byte(secret))
+
 	return hex.EncodeToString(sum[:])
 }
 
-func (t Token) Active() bool { return t.RevokedAt == nil }
+func (t *Token) Active() bool { return t.RevokedAt == nil }
 
 func (t *Token) Revoke(by uuid.UUID, at time.Time) error {
 	if t.RevokedAt != nil {
 		return ErrAlreadyRevoked
 	}
+
 	when := at.UTC()
 	t.RevokedAt = &when
 	t.RevokedBy = &by
+
 	return nil
 }

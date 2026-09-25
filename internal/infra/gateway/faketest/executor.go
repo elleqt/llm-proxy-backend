@@ -11,6 +11,7 @@ package faketest
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -43,13 +44,16 @@ func (e *Executor) Identifier() string { return e.Provider }
 
 // Execute returns the canned payload, or the canned error.
 func (e *Executor) Execute(ctx context.Context, _ *coreauth.Auth,
-	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	if err := sleep(ctx, e.Latency); err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
+
 	if e.Err != nil {
 		return cliproxyexecutor.Response{}, e.Err
 	}
+
 	return cliproxyexecutor.Response{Payload: e.Payload}, nil
 }
 
@@ -57,24 +61,31 @@ func (e *Executor) Execute(ctx context.Context, _ *coreauth.Auth,
 // them and cancellation of ctx. The channel is buffered to the full sequence
 // so a consumer that abandons the stream cannot leak the producer goroutine.
 func (e *Executor) ExecuteStream(ctx context.Context, _ *coreauth.Auth,
-	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options,
+) (*cliproxyexecutor.StreamResult, error) {
 	if e.Err != nil {
 		return nil, e.Err
 	}
+
 	ch := make(chan cliproxyexecutor.StreamChunk, len(e.Chunks)+1)
 	go func() {
 		defer close(ch)
-		for _, c := range e.Chunks {
+
+		for _, chunk := range e.Chunks {
 			if err := sleep(ctx, e.Latency); err != nil {
 				ch <- cliproxyexecutor.StreamChunk{Err: err}
+
 				return
 			}
-			ch <- cliproxyexecutor.StreamChunk{Payload: c}
+
+			ch <- cliproxyexecutor.StreamChunk{Payload: chunk}
 		}
+
 		if e.StreamErr != nil {
 			ch <- cliproxyexecutor.StreamChunk{Err: e.StreamErr}
 		}
 	}()
+
 	return &cliproxyexecutor.StreamResult{Headers: http.Header{}, Chunks: ch}, nil
 }
 
@@ -85,19 +96,23 @@ func (e *Executor) Refresh(_ context.Context, a *coreauth.Auth) (*coreauth.Auth,
 
 // CountTokens returns a fixed count; the fake charges nothing.
 func (e *Executor) CountTokens(_ context.Context, _ *coreauth.Auth,
-	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	_ cliproxyexecutor.Request, _ cliproxyexecutor.Options,
+) (cliproxyexecutor.Response, error) {
 	if e.Err != nil {
 		return cliproxyexecutor.Response{}, e.Err
 	}
+
 	return cliproxyexecutor.Response{Payload: []byte(`{"input_tokens":0}`)}, nil
 }
 
 // HttpRequest answers passthrough requests with an empty 200, or the canned error.
-func (e *Executor) HttpRequest(_ context.Context, _ *coreauth.Auth,
-	_ *http.Request) (*http.Response, error) {
+func (e *Executor) HttpRequest(_ context.Context, _ *coreauth.Auth, //nolint:revive // name mandated by the upstream executor interface
+	_ *http.Request,
+) (*http.Response, error) {
 	if e.Err != nil {
 		return nil, e.Err
 	}
+
 	return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
 }
 
@@ -106,11 +121,13 @@ func sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
+
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("faketest: stream cancelled: %w", ctx.Err())
 	case <-timer.C:
 		return nil
 	}

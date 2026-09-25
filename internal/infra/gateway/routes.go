@@ -60,6 +60,7 @@ func (r route) bodyLimitFor(c *gin.Context) int64 {
 	if r.maxMultipartBody > 0 && !jsonContent(c) {
 		return r.maxMultipartBody
 	}
+
 	return r.maxBody
 }
 
@@ -96,7 +97,10 @@ var routes = map[string]route{
 	"POST /v1beta/models/*action":               {kind: routeModel, model: geminiActionModel, maxBody: maxJSONBody},
 	"POST /v1beta/interactions":                 {kind: routeModel, model: interactionsModel, maxBody: maxJSONBody},
 	"POST /v1/images/generations":               {kind: routeModel, model: imageGenerationModel, maxBody: maxJSONBody, decodes: always},
-	"POST /v1/images/edits":                     {kind: routeModel, model: imageEditModel, maxBody: maxJSONBody, maxMultipartBody: maxMultipartBody, decodes: jsonContent},
+	"POST /v1/images/edits": {
+		kind: routeModel, model: imageEditModel, maxBody: maxJSONBody, maxMultipartBody: maxMultipartBody,
+		decodes: jsonContent,
+	},
 
 	// Denied: the websocket relay, through which a connecting client
 	// registers itself as an "aistudio" provider account and is then sent

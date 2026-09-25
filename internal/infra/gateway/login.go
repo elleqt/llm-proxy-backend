@@ -17,12 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/gin-gonic/gin"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-
-	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
 const (
@@ -56,6 +55,10 @@ var (
 	errHandedToGateway = errors.New("gateway: the vendor login is added by the gateway, not saved by upstream")
 	errNotCompleted    = errors.New("gateway: a vendor login finished for no session in progress; dropped")
 )
+
+// errUpstreamAnswered starts every refusal requestLogin reads from upstream's
+// start handler; StartLogin wraps it with the provider.
+var errUpstreamAnswered = errors.New("upstream answered")
 
 // loginFlow is one provider's upstream sign-in: the management handler method
 // that starts it and the provider name upstream's session registry and
@@ -112,23 +115,25 @@ type Login struct {
 
 var _ app.VendorLogins = (*Login)(nil)
 
-// NewLogin serves Claude and Codex sign-ins for g under their policy names.
-// Upstream's handler gets g's configuration as it is now, with the auth
+// NewLogin serves Claude and Codex sign-ins for gw under their policy names.
+// Upstream's handler gets gw's configuration as it is now, with the auth
 // directory made absolute: its proxy settings reach the code exchange, and a
 // configuration pushed later does not.
-func NewLogin(g *Gateway) *Login {
+func NewLogin(gw *Gateway) *Login {
 	var cfg cliproxyconfig.Config
-	if current := g.CurrentConfig(); current != nil {
+	if current := gw.CurrentConfig(); current != nil {
 		cfg = *current
 	}
-	cfg.AuthDir = g.authDir
-	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, g.coreAuth)
-	l := newLogin(g.AddAccount, g.authDir, map[string]loginFlow{
-		policyProvider("claude"): {upstream: "anthropic", start: h.RequestAnthropicToken},
-		policyProvider("codex"):  {upstream: "codex", start: h.RequestCodexToken},
+
+	cfg.AuthDir = gw.authDir
+	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, gw.coreAuth)
+	login := newLogin(gw.AddAccount, gw.authDir, map[string]loginFlow{
+		policyProvider("claude"):         {upstream: "anthropic", start: h.RequestAnthropicToken},
+		policyProvider(codexProviderKey): {upstream: codexProviderKey, start: h.RequestCodexToken},
 	})
-	h.SetPostAuthHook(l.deliver)
-	return l
+	h.SetPostAuthHook(login.deliver)
+
+	return login
 }
 
 func newLogin(add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error), authDir string, flows map[string]loginFlow) *Login {
@@ -164,14 +169,17 @@ func (l *Login) StartLogin(ctx context.Context, provider string) (app.VendorLogi
 	if !ok {
 		return app.VendorLogin{}, fmt.Errorf("%w: %q", app.ErrUnsupportedProvider, provider)
 	}
+
 	if err := ctx.Err(); err != nil {
-		return app.VendorLogin{}, err
+		return app.VendorLogin{}, fmt.Errorf("gateway: start login: %w", err)
 	}
+
 	id, err := loginSessionID()
 	if err != nil {
 		return app.VendorLogin{}, err
 	}
-	p := &pendingLogin{upstream: flow.upstream, result: make(chan *coreauth.Auth, 1)}
+
+	pending := &pendingLogin{upstream: flow.upstream, result: make(chan *coreauth.Auth, 1)}
 
 	// Reserve the slot and publish the session before upstream starts, so a
 	// record can find it; it is unclaimed until CompleteLogin, so nothing can
@@ -179,37 +187,46 @@ func (l *Login) StartLogin(ctx context.Context, provider string) (app.VendorLogi
 	l.mu.Lock()
 	if len(l.sessions) >= l.max {
 		l.mu.Unlock()
+
 		return app.VendorLogin{}, app.ErrLoginsBusy
 	}
+
 	startedAt := time.Now()
-	p.expiresAt = startedAt.Add(l.ttl)
-	l.sessions[id] = p
+	pending.expiresAt = startedAt.Add(l.ttl)
+	l.sessions[id] = pending
 	l.mu.Unlock()
 
-	authURL, state, err := requestLogin(flow.start, id)
+	authURL, state, err := requestLogin(ctx, flow.start, id)
 	if err != nil {
-		l.finish(id, p)
+		l.finish(id, pending)
+
 		return app.VendorLogin{}, fmt.Errorf("gateway: %s login did not start: %w", provider, err)
 	}
+
 	l.mu.Lock()
-	p.state = state
-	p.timer = time.AfterFunc(time.Until(p.expiresAt), func() { l.expire(id, p) })
+	pending.state = state
+	pending.timer = time.AfterFunc(time.Until(pending.expiresAt), func() { l.expire(id, pending) })
 	l.mu.Unlock()
-	return app.VendorLogin{SessionID: id, AuthURL: authURL, ExpiresAt: p.expiresAt}, nil
+
+	return app.VendorLogin{SessionID: id, AuthURL: authURL, ExpiresAt: pending.expiresAt}, nil
 }
 
 // requestLogin calls an upstream start handler as the management API would
 // be called, without is_webui, and returns the URL and state it answers with.
-func requestLogin(start func(*gin.Context), sessionID string) (authURL, state string, err error) {
+func requestLogin(ctx context.Context, start func(*gin.Context), sessionID string) (string, string, error) {
 	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
-	req, err := http.NewRequest(http.MethodGet, "/", nil)
+	ginCtx, _ := gin.CreateTestContext(rec)
+
+	// Upstream's start handlers run their sign-in on a background context of
+	// their own; the request only carries the session header to the hook.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "/", http.NoBody)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("gateway: build the login start request: %w", err)
 	}
+
 	req.Header.Set(loginSessionHeader, sessionID)
-	c.Request = req
-	start(c)
+	ginCtx.Request = req
+	start(ginCtx)
 
 	var body struct {
 		URL   string `json:"url"`
@@ -217,75 +234,25 @@ func requestLogin(start func(*gin.Context), sessionID string) (authURL, state st
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		return "", "", fmt.Errorf("upstream answered %d with an unreadable body", rec.Code)
+		return "", "", fmt.Errorf("%w %d with an unreadable body", errUpstreamAnswered, rec.Code)
 	}
+
 	if rec.Code != http.StatusOK {
 		// A state upstream registered before failing is abandoned.
 		if body.State != "" {
 			sdkapi.CompleteOAuthSession(body.State)
 		}
-		return "", "", fmt.Errorf("upstream answered %d: %s", rec.Code, body.Error)
+
+		return "", "", fmt.Errorf("%w %d: %s", errUpstreamAnswered, rec.Code, body.Error)
 	}
+
 	if body.URL == "" || sdkapi.ValidateOAuthState(body.State) != nil {
 		sdkapi.CompleteOAuthSession(body.State)
-		return "", "", errors.New("upstream answered without an authorisation URL and state")
+
+		return "", "", fmt.Errorf("%w without an authorisation URL and state", errUpstreamAnswered)
 	}
+
 	return body.URL, body.State, nil
-}
-
-// deliver is upstream's post-auth hook. It runs on upstream's exchange
-// goroutine with the start request's headers in ctx, and never lets upstream
-// save the record.
-func (l *Login) deliver(ctx context.Context, auth *coreauth.Auth) error {
-	var id string
-	if info := coreauth.GetRequestInfo(ctx); info != nil {
-		id = info.Headers.Get(loginSessionHeader)
-	}
-	l.mu.Lock()
-	p, ok := l.sessions[id]
-	l.mu.Unlock()
-	if !ok {
-		return errNotCompleted
-	}
-	select {
-	case p.result <- auth:
-	default:
-	}
-	return errHandedToGateway
-}
-
-// expire ends an unclaimed login once its time is up. Marking it claimed and
-// withdrawing it happen under one lock, so no CompleteLogin can claim it
-// meanwhile.
-func (l *Login) expire(id string, p *pendingLogin) {
-	l.mu.Lock()
-	unclaimed := l.sessions[id] == p && !p.claimed
-	if unclaimed {
-		p.claimed = true
-		delete(l.sessions, id)
-	}
-	l.mu.Unlock()
-	if unclaimed {
-		sdkapi.CompleteOAuthSession(p.state)
-	}
-}
-
-// finish ends a login: its slot frees, and upstream's session is completed,
-// which stops its waiter and makes its pre-save guard drop an exchange still
-// in flight. Safe to call more than once.
-func (l *Login) finish(id string, p *pendingLogin) {
-	l.mu.Lock()
-	if l.sessions[id] == p {
-		delete(l.sessions, id)
-	}
-	if p.timer != nil {
-		p.timer.Stop()
-	}
-	state := p.state
-	l.mu.Unlock()
-	if state != "" {
-		sdkapi.CompleteOAuthSession(state)
-	}
 }
 
 // CompleteLogin finishes session sessionID with the URL the vendor sign-in
@@ -303,72 +270,151 @@ func (l *Login) CompleteLogin(ctx context.Context, sessionID, callbackURL string
 	}
 
 	l.mu.Lock()
-	p, ok := l.sessions[sessionID]
-	if !ok || p.claimed || p.state == "" || !time.Now().Before(p.expiresAt) {
+
+	pending, ok := l.sessions[sessionID]
+	if !ok || pending.claimed || pending.state == "" || !time.Now().Before(pending.expiresAt) {
 		l.mu.Unlock()
+
 		return app.VendorAccount{}, app.ErrLoginExpired
 	}
-	if cb.state != p.state {
+
+	if cb.state != pending.state {
 		l.mu.Unlock()
+
 		return app.VendorAccount{}, fmt.Errorf("%w: the callback belongs to another sign-in", app.ErrLoginFailed)
 	}
-	p.claimed = true
-	p.timer.Stop()
+
+	pending.claimed = true
+	pending.timer.Stop()
+
 	l.mu.Unlock()
-	defer l.finish(sessionID, p)
+	defer l.finish(sessionID, pending)
 
 	if cb.vendorError != "" {
 		return app.VendorAccount{}, fmt.Errorf("%w: the vendor refused the sign-in", app.ErrLoginFailed)
 	}
-	if _, err := sdkapi.WriteOAuthCallbackFileForPendingSession(l.authDir, p.upstream, p.state, cb.code, ""); err != nil {
-		if !sdkapi.IsOAuthSessionPending(p.state, p.upstream) {
+
+	if _, err := sdkapi.WriteOAuthCallbackFileForPendingSession(l.authDir, pending.upstream, pending.state, cb.code, ""); err != nil {
+		if !sdkapi.IsOAuthSessionPending(pending.state, pending.upstream) {
 			return app.VendorAccount{}, app.ErrLoginExpired
 		}
+
 		return app.VendorAccount{}, fmt.Errorf("gateway: hand the callback to upstream: %w", err)
 	}
 
-	auth, err := l.await(ctx, p, cb, callbackURL)
+	auth, err := l.await(ctx, pending, cb, callbackURL)
 	if err != nil {
 		return app.VendorAccount{}, err
 	}
+
 	stored, err := l.add(ctx, auth)
 	if err != nil {
 		return app.VendorAccount{}, err
 	}
+
 	return vendorAccount(stored), nil
+}
+
+// deliver is upstream's post-auth hook. It runs on upstream's exchange
+// goroutine with the start request's headers in ctx, and never lets upstream
+// save the record.
+func (l *Login) deliver(ctx context.Context, auth *coreauth.Auth) error {
+	var id string
+	if info := coreauth.GetRequestInfo(ctx); info != nil {
+		id = info.Headers.Get(loginSessionHeader)
+	}
+
+	l.mu.Lock()
+	pending, ok := l.sessions[id]
+	l.mu.Unlock()
+
+	if !ok {
+		return errNotCompleted
+	}
+
+	select {
+	case pending.result <- auth:
+	default:
+	}
+
+	return errHandedToGateway
+}
+
+// expire ends an unclaimed login once its time is up. Marking it claimed and
+// withdrawing it happen under one lock, so no CompleteLogin can claim it
+// meanwhile.
+func (l *Login) expire(id string, pending *pendingLogin) {
+	l.mu.Lock()
+
+	unclaimed := l.sessions[id] == pending && !pending.claimed
+	if unclaimed {
+		pending.claimed = true
+
+		delete(l.sessions, id)
+	}
+	l.mu.Unlock()
+
+	if unclaimed {
+		sdkapi.CompleteOAuthSession(pending.state)
+	}
+}
+
+// finish ends a login: its slot frees, and upstream's session is completed,
+// which stops its waiter and makes its pre-save guard drop an exchange still
+// in flight. Safe to call more than once.
+func (l *Login) finish(id string, pending *pendingLogin) {
+	l.mu.Lock()
+	if l.sessions[id] == pending {
+		delete(l.sessions, id)
+	}
+
+	if pending.timer != nil {
+		pending.timer.Stop()
+	}
+
+	state := pending.state
+	l.mu.Unlock()
+
+	if state != "" {
+		sdkapi.CompleteOAuthSession(state)
+	}
 }
 
 // await waits, bounded, for upstream's exchange: the record through the
 // hook, or a failure in upstream's session status.
-func (l *Login) await(ctx context.Context, p *pendingLogin, cb callback, callbackURL string) (*coreauth.Auth, error) {
+func (l *Login) await(ctx context.Context, pending *pendingLogin, cb callback, callbackURL string) (*coreauth.Auth, error) {
 	tick := time.NewTicker(l.poll)
 	defer tick.Stop()
+
 	deadline := time.NewTimer(l.finishWait)
 	defer deadline.Stop()
+
 	for {
 		select {
-		case auth := <-p.result:
+		case auth := <-pending.result:
 			return auth, nil
 		case <-tick.C:
-			_, status, ok := sdkapi.GetOAuthSession(p.state)
+			_, status, ok := sdkapi.GetOAuthSession(pending.state)
 			if ok && status == "" {
 				continue
 			}
 			// The hook hands the record over before upstream marks the
 			// session failed.
 			select {
-			case auth := <-p.result:
+			case auth := <-pending.result:
 				return auth, nil
 			default:
 			}
+
 			if !ok {
 				return nil, fmt.Errorf("%w: upstream ended the sign-in", app.ErrLoginFailed)
 			}
+
 			return nil, fmt.Errorf("%w: %s", app.ErrLoginFailed, redactCallback(status, callbackURL, cb))
 		case <-deadline.C:
 			return nil, fmt.Errorf("%w: the vendor sign-in did not finish within %s", app.ErrLoginFailed, l.finishWait)
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, fmt.Errorf("gateway: await login: %w", ctx.Err())
 		}
 	}
 }
@@ -396,18 +442,21 @@ func parseCallback(raw string) (callback, error) {
 	default:
 		raw = "http://localhost/?" + raw
 	}
-	u, err := url.Parse(raw)
+
+	parsed, err := url.Parse(raw)
 	if err != nil {
 		return callback{}, fmt.Errorf("%w: the callback URL does not parse", app.ErrLoginFailed)
 	}
-	values := u.Query()
-	if frag, err := url.ParseQuery(u.Fragment); err == nil {
+
+	values := parsed.Query()
+	if frag, err := url.ParseQuery(parsed.Fragment); err == nil {
 		for k, vs := range frag {
 			if values.Get(k) == "" {
 				values[k] = vs
 			}
 		}
 	}
+
 	cb := callback{
 		code:        strings.TrimSpace(values.Get("code")),
 		state:       strings.TrimSpace(values.Get("state")),
@@ -418,9 +467,11 @@ func parseCallback(raw string) (callback, error) {
 			cb.code, cb.state = code, state
 		}
 	}
+
 	if cb.state == "" || (cb.code == "" && cb.vendorError == "") {
 		return callback{}, fmt.Errorf("%w: the callback URL carries no code and state", app.ErrLoginFailed)
 	}
+
 	return cb, nil
 }
 
@@ -429,14 +480,17 @@ func parseCallback(raw string) (callback, error) {
 func redactCallback(msg, callbackURL string, cb callback) string {
 	secrets := []string{callbackURL, cb.code, cb.state}
 	slices.SortFunc(secrets, func(a, b string) int { return cmp.Compare(len(b), len(a)) })
-	for _, s := range secrets {
-		if s == "" {
+
+	for _, secret := range secrets {
+		if secret == "" {
 			continue
 		}
-		msg = strings.ReplaceAll(msg, strconv.Quote(s), "[redacted]")
-		msg = strings.ReplaceAll(msg, s, "[redacted]")
-		msg = strings.ReplaceAll(msg, url.QueryEscape(s), "[redacted]")
+
+		msg = strings.ReplaceAll(msg, strconv.Quote(secret), "[redacted]")
+		msg = strings.ReplaceAll(msg, secret, "[redacted]")
+		msg = strings.ReplaceAll(msg, url.QueryEscape(secret), "[redacted]")
 	}
+
 	return msg
 }
 
@@ -447,5 +501,6 @@ func loginSessionID() (string, error) {
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("gateway: login session id: %w", err)
 	}
+
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
 }

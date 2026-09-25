@@ -5,16 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type providersFixture struct {
@@ -28,21 +28,25 @@ type providersFixture struct {
 }
 
 func newProvidersFixture(t *testing.T) *providersFixture {
-	f := &providersFixture{
+	t.Helper()
+
+	fixture := &providersFixture{
 		accounts: mocks.NewVendorAccounts(t),
 		logins:   mocks.NewVendorLogins(t),
 		quota:    mocks.NewVendorQuota(t),
 		metrics:  mocks.NewAccountMetrics(t),
 		audit:    mocks.NewAuditSink(t),
 	}
-	f.svc = app.NewProviders(f.accounts, f.logins, f.quota, f.metrics, f.audit, systemClock{}, discardLogger{})
-	return f
+	fixture.svc = app.NewProviders(fixture.accounts, fixture.logins, fixture.quota, fixture.metrics, fixture.audit, systemClock{}, discardLogger{})
+
+	return fixture
 }
 
 // recordAudits accepts every audit write and keeps it.
 func (f *providersFixture) recordAudits() {
 	f.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		f.events = append(f.events, e)
+
 		return nil
 	})
 }
@@ -70,18 +74,17 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 
 	for name, actor := range map[string]identity.User{"user": user, "blocked admin": blocked, "restricted admin": restricted, "nobody": {}} {
 		t.Run(name, func(t *testing.T) {
-			f := newProvidersFixture(t)
+			fixture := newProvidersFixture(t)
 			ctx := context.Background()
 			calls := map[string]error{}
-			_, calls["List"] = f.svc.List(ctx, actor)
-			_, calls["StartLogin"] = f.svc.StartLogin(ctx, actor, "claude")
-			_, calls["CompleteLogin"] = f.svc.CompleteLogin(ctx, actor, "session", "http://localhost/callback?code=c&state=s")
-			_, calls["SetDisabled"] = f.svc.SetDisabled(ctx, actor, codexAccount.ID, true)
-			calls["Remove"] = f.svc.Remove(ctx, actor, codexAccount.ID)
+			_, calls["List"] = fixture.svc.List(ctx, actor)
+			_, calls["StartLogin"] = fixture.svc.StartLogin(ctx, actor, "claude")
+			_, calls["CompleteLogin"] = fixture.svc.CompleteLogin(ctx, actor, "session", "http://localhost/callback?code=c&state=s")
+			_, calls["SetDisabled"] = fixture.svc.SetDisabled(ctx, actor, codexAccount.ID, true)
+
+			calls["Remove"] = fixture.svc.Remove(ctx, actor, codexAccount.ID)
 			for method, err := range calls {
-				if !errors.Is(err, app.ErrForbidden) {
-					t.Errorf("%s = %v, want ErrForbidden", method, err)
-				}
+				assert.ErrorIs(t, err, app.ErrForbidden, method)
 			}
 		})
 	}
@@ -90,100 +93,98 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 // TestProvidersListCarriesEachAccountsQuota: each account gets the quota
 // windows reported for it and no other account's.
 func TestProvidersListCarriesEachAccountsQuota(t *testing.T) {
-	f := newProvidersFixture(t)
+	fixture := newProvidersFixture(t)
 	claude := app.VendorAccount{ID: "claude-a.json", Provider: "claude", Status: "active"}
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount, claude})
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount, claude})
+
 	reset := time.Date(2026, 9, 23, 5, 0, 0, 0, time.UTC)
 	fiveHours := app.QuotaSignal{Account: codexAccount.ID, Provider: "chatgpt", Window: "5h", UsedRatio: 0.25, ResetAt: reset}
 	week := app.QuotaSignal{Account: codexAccount.ID, Provider: "chatgpt", Window: "7d", UsedRatio: 0.5}
-	f.quota.EXPECT().QuotaSignals().Return([]app.QuotaSignal{fiveHours, week})
+	fixture.quota.EXPECT().QuotaSignals().Return([]app.QuotaSignal{fiveHours, week})
 
-	got, err := f.svc.List(context.Background(), providerAdmin())
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(got) != 2 {
-		t.Fatalf("List = %+v, want both accounts", got)
-	}
-	if got[0].Provider != "chatgpt" || len(got[0].Quota) != 2 || got[0].Quota[0] != fiveHours || got[0].Quota[1] != week {
-		t.Fatalf("codex account = %+v, want provider chatgpt with its 5h and 7d windows", got[0])
-	}
-	if len(got[1].Quota) != 0 {
-		t.Fatalf("claude account = %+v, want no quota: none was reported for it", got[1])
-	}
+	got, err := fixture.svc.List(context.Background(), providerAdmin())
+	require.NoError(t, err, "List")
+	require.Len(t, got, 2, "List: want both accounts")
+	require.Equal(t, "chatgpt", got[0].Provider, "codex account provider")
+	require.Len(t, got[0].Quota, 2, "codex account: want its 5h and 7d windows")
+	require.Equal(t, fiveHours, got[0].Quota[0], "codex 5h window")
+	require.Equal(t, week, got[0].Quota[1], "codex 7d window")
+	require.Empty(t, got[1].Quota, "claude account: want no quota: none was reported for it")
 }
 
 // TestProvidersSetDisabledGoesThroughTheGateway: the change is the gateway's,
 // the metric follows under the policy name, and it is audited.
 func TestProvidersSetDisabledGoesThroughTheGateway(t *testing.T) {
-	f := newProvidersFixture(t)
+	fixture := newProvidersFixture(t)
 	disabled := codexAccount
 	disabled.Disabled, disabled.Status = true, "disabled"
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount}).Once()
-	f.accounts.EXPECT().SetAccountDisabled(mock.Anything, codexAccount.ID, true).Return(nil).Once()
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{disabled}).Once()
-	f.quota.EXPECT().QuotaSignals().Return(nil)
-	f.metrics.EXPECT().SetAccountDisabled(codexAccount.ID, "chatgpt", true).Once()
-	f.recordAudits()
+
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount}).Once()
+	fixture.accounts.EXPECT().SetAccountDisabled(mock.Anything, codexAccount.ID, true).Return(nil).Once()
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{disabled}).Once()
+	fixture.quota.EXPECT().QuotaSignals().Return(nil)
+	fixture.metrics.EXPECT().SetAccountDisabled(codexAccount.ID, "chatgpt", true).Once()
+	fixture.recordAudits()
 
 	actor := providerAdmin()
-	got, err := f.svc.SetDisabled(context.Background(), actor, codexAccount.ID, true)
-	if err != nil {
-		t.Fatalf("SetDisabled: %v", err)
-	}
-	if !got.Disabled {
-		t.Fatalf("SetDisabled returned %+v, want the account as it now is: disabled", got)
-	}
-	if len(f.events) != 1 || f.events[0].Action != "provider.account_disable" || f.events[0].ActorID != actor.ID ||
-		f.events[0].Detail["disabled"] != true || f.events[0].Detail["provider"] != "chatgpt" {
-		t.Fatalf("audit = %+v, want one provider.account_disable by the actor naming chatgpt", f.events)
-	}
+
+	got, err := fixture.svc.SetDisabled(context.Background(), actor, codexAccount.ID, true)
+	require.NoError(t, err, "SetDisabled")
+	require.True(t, got.Disabled, "SetDisabled returned %+v, want the account as it now is: disabled", got)
+	require.Len(t, fixture.events, 1, "audit: want one provider.account_disable")
+
+	event := fixture.events[0]
+	require.Equal(t, "provider.account_disable", event.Action, "audit action")
+	require.Equal(t, actor.ID, event.ActorID, "audit actor")
+
+	auditedDisabled, isBool := event.Detail["disabled"].(bool)
+	require.True(t, isBool, "audit detail disabled = %v, want a bool", event.Detail["disabled"])
+	require.True(t, auditedDisabled, "audit detail disabled")
+	require.Equal(t, "chatgpt", event.Detail["provider"], "audit detail provider")
 }
 
 // TestProvidersRemoveForgetsTheAccount: removal goes through the gateway, then
 // the quota snapshot and the metric series of the account go too, under its
 // policy name, and it is audited.
 func TestProvidersRemoveForgetsTheAccount(t *testing.T) {
-	f := newProvidersFixture(t)
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
-	f.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(nil).Once()
-	f.quota.EXPECT().ForgetAccount(codexAccount.ID).Once()
-	f.metrics.EXPECT().ForgetAccount(codexAccount.ID, "chatgpt").Once()
-	f.recordAudits()
+	fixture := newProvidersFixture(t)
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
+	fixture.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(nil).Once()
+	fixture.quota.EXPECT().ForgetAccount(codexAccount.ID).Once()
+	fixture.metrics.EXPECT().ForgetAccount(codexAccount.ID, "chatgpt").Once()
+	fixture.recordAudits()
 
-	if err := f.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if len(f.events) != 1 || f.events[0].Action != "provider.account_remove" || f.events[0].Target != "provider_account/"+codexAccount.ID {
-		t.Fatalf("audit = %+v, want one provider.account_remove of the account", f.events)
-	}
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID)
+	require.NoError(t, err, "Remove")
+	require.Len(t, fixture.events, 1, "audit: want one provider.account_remove")
+	require.Equal(t, "provider.account_remove", fixture.events[0].Action, "audit action")
+	require.Equal(t, "provider_account/"+codexAccount.ID, fixture.events[0].Target, "audit target")
 }
 
 // TestProvidersRemoveThatFailsForgetsNothing: an account the gateway could not
 // remove is still there, so its quota and metrics stay, and nothing is audited.
 func TestProvidersRemoveThatFailsForgetsNothing(t *testing.T) {
-	f := newProvidersFixture(t)
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
-	failure := errors.New("credential not deleted")
-	f.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(failure)
+	fixture := newProvidersFixture(t)
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
 
-	if err := f.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID); !errors.Is(err, failure) {
-		t.Fatalf("Remove = %v, want the gateway's error", err)
-	}
+	failure := errors.New("credential not deleted")
+	fixture.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(failure)
+
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID)
+	require.ErrorIs(t, err, failure, "Remove: want the gateway's error")
 }
 
 // TestProvidersUnknownAccountIsNotFound: an id the gateway does not hold is
 // ErrNotFound, and no change is attempted.
 func TestProvidersUnknownAccountIsNotFound(t *testing.T) {
-	f := newProvidersFixture(t)
-	f.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
+	fixture := newProvidersFixture(t)
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
 
-	if err := f.svc.Remove(context.Background(), providerAdmin(), "no-such.json"); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("Remove(unknown) = %v, want ErrNotFound", err)
-	}
-	if _, err := f.svc.SetDisabled(context.Background(), providerAdmin(), "no-such.json", true); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("SetDisabled(unknown) = %v, want ErrNotFound", err)
-	}
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), "no-such.json")
+	require.ErrorIs(t, err, app.ErrNotFound, "Remove(unknown)")
+
+	_, err = fixture.svc.SetDisabled(context.Background(), providerAdmin(), "no-such.json", true)
+	require.ErrorIs(t, err, app.ErrNotFound, "SetDisabled(unknown)")
 }
 
 // TestProvidersLoginAuditCarriesNoSecret: the wizard's audit records name the
@@ -191,42 +192,40 @@ func TestProvidersUnknownAccountIsNotFound(t *testing.T) {
 // authorisation code or state in it, or the session id that with a callback
 // completes a login.
 func TestProvidersLoginAuditCarriesNoSecret(t *testing.T) {
-	f := newProvidersFixture(t)
+	fixture := newProvidersFixture(t)
+
 	const (
 		sessionID = "SESSION-ID-9f8e7d"
 		code      = "AUTH-CODE-SECRET-1234"
 		state     = "STATE-SECRET-5678"
 	)
+
 	callback := "http://localhost:1455/auth/callback?code=" + code + "&state=" + state
-	f.logins.EXPECT().StartLogin(mock.Anything, "chatgpt").
+	fixture.logins.EXPECT().StartLogin(mock.Anything, "chatgpt").
 		Return(app.VendorLogin{SessionID: sessionID, AuthURL: "https://auth.example/authorize?state=" + state, ExpiresAt: time.Now().Add(5 * time.Minute)}, nil)
-	f.logins.EXPECT().CompleteLogin(mock.Anything, sessionID, callback).Return(codexAccount, nil)
-	f.quota.EXPECT().QuotaSignals().Return(nil)
-	f.recordAudits()
+	fixture.logins.EXPECT().CompleteLogin(mock.Anything, sessionID, callback).Return(codexAccount, nil)
+	fixture.quota.EXPECT().QuotaSignals().Return(nil)
+	fixture.recordAudits()
 
 	actor := providerAdmin()
-	login, err := f.svc.StartLogin(context.Background(), actor, "chatgpt")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
-	account, err := f.svc.CompleteLogin(context.Background(), actor, login.SessionID, callback)
-	if err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
-	if account.ID != codexAccount.ID {
-		t.Fatalf("CompleteLogin returned %+v, want the added account", account)
-	}
 
-	if len(f.events) != 2 || f.events[0].Action != "provider.login_start" || f.events[1].Action != "provider.account_add" ||
-		f.events[1].Detail["account_id"] != codexAccount.ID || f.events[1].Detail["provider"] != "chatgpt" {
-		t.Fatalf("audit = %+v, want login_start then account_add naming the chatgpt account", f.events)
-	}
-	for _, e := range f.events {
+	login, err := fixture.svc.StartLogin(context.Background(), actor, "chatgpt")
+	require.NoError(t, err, "StartLogin")
+
+	account, err := fixture.svc.CompleteLogin(context.Background(), actor, login.SessionID, callback)
+	require.NoError(t, err, "CompleteLogin")
+	require.Equal(t, codexAccount.ID, account.ID, "CompleteLogin: want the added account")
+
+	require.Len(t, fixture.events, 2, "audit: want login_start then account_add")
+	require.Equal(t, "provider.login_start", fixture.events[0].Action, "first audit action")
+	require.Equal(t, "provider.account_add", fixture.events[1].Action, "second audit action")
+	require.Equal(t, codexAccount.ID, fixture.events[1].Detail["account_id"], "account_add detail account_id")
+	require.Equal(t, "chatgpt", fixture.events[1].Detail["provider"], "account_add detail provider")
+
+	for _, e := range fixture.events {
 		rendered := fmt.Sprintf("%s %s %v %s %s", e.Action, e.Target, e.Detail, e.IP, e.UserAgent)
 		for _, secret := range []string{callback, code, state, sessionID} {
-			if strings.Contains(rendered, secret) {
-				t.Fatalf("audit event %q carries %q", rendered, secret)
-			}
+			require.NotContains(t, rendered, secret, "audit event carries a secret")
 		}
 	}
 }
@@ -237,24 +236,23 @@ func TestProvidersFailedLoginIsNotAudited(t *testing.T) {
 	f := newProvidersFixture(t)
 	f.logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(app.VendorAccount{}, app.ErrLoginExpired)
 
-	if _, err := f.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("CompleteLogin = %v, want ErrLoginExpired", err)
-	}
+	_, err := f.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, app.ErrLoginExpired, "CompleteLogin")
 }
 
 // TestProvidersWithdrawsAnAccountWhoseAuditFails: a vendor account must not
 // enter service unrecorded, so an added account whose account_add audit fails
 // is removed through the gateway and the audit error returned.
 func TestProvidersWithdrawsAnAccountWhoseAuditFails(t *testing.T) {
-	f := newProvidersFixture(t)
-	f.logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(codexAccount, nil)
-	auditDown := errors.New("audit store down")
-	f.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(auditDown)
-	f.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(nil).Once()
+	fixture := newProvidersFixture(t)
+	fixture.logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(codexAccount, nil)
 
-	if _, err := f.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, auditDown) {
-		t.Fatalf("CompleteLogin with a failing audit = %v, want the audit error", err)
-	}
+	auditDown := errors.New("audit store down")
+	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(auditDown)
+	fixture.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(nil).Once()
+
+	_, err := fixture.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, auditDown, "CompleteLogin with a failing audit: want the audit error")
 }
 
 // TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw: when the removal
@@ -265,17 +263,17 @@ func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	audit, logger := mocks.NewAuditSink(t), mocks.NewLogger(t)
 	svc := app.NewProviders(accounts, logins, mocks.NewVendorQuota(t), mocks.NewAccountMetrics(t), audit, systemClock{}, logger)
 	logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(codexAccount, nil)
+
 	auditDown := errors.New("audit store down")
 	audit.EXPECT().Record(mock.Anything, mock.Anything).Return(auditDown)
 	accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(errors.New("credential not deleted"))
+
 	var warned string
+
 	logger.EXPECT().Warn(mock.Anything, mock.Anything).
 		Run(func(msg string, attrs ...slog.Attr) { warned = fmt.Sprint(msg, attrs) })
 
-	if _, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, auditDown) {
-		t.Fatalf("CompleteLogin = %v, want the audit error", err)
-	}
-	if !strings.Contains(warned, codexAccount.ID) {
-		t.Fatalf("warning %q does not name the stranded account", warned)
-	}
+	_, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, auditDown, "CompleteLogin: want the audit error")
+	require.Contains(t, warned, codexAccount.ID, "warning does not name the stranded account")
 }

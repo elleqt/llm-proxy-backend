@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // padding streams n bytes of 'x' without holding them.
@@ -23,12 +26,14 @@ func (b repeatByte) Read(p []byte) (int, error) {
 	for i := range p {
 		p[i] = byte(b)
 	}
+
 	return len(p), nil
 }
 
-// jsonBodyOf is a chat request naming model, padded to exactly size bytes.
-func jsonBodyOf(model string, size int64) io.Reader {
-	head, tail := `{"model":"`+model+`","messages":[],"pad":"`, `"}`
+// jsonBodyOf is a chat request naming gpt-5.6, padded to exactly size bytes.
+func jsonBodyOf(size int64) io.Reader {
+	head, tail := `{"model":"gpt-5.6","messages":[],"pad":"`, `"}`
+
 	return io.MultiReader(strings.NewReader(head), padding(size-int64(len(head)+len(tail))), strings.NewReader(tail))
 }
 
@@ -36,16 +41,18 @@ func jsonBodyOf(model string, size int64) io.Reader {
 // whole body exactly size bytes, and its Content-Type.
 func imageEditOf(t *testing.T, model string, size int64) (io.Reader, string) {
 	t.Helper()
+
 	var head bytes.Buffer
-	w := multipart.NewWriter(&head)
-	if err := w.WriteField("model", model); err != nil {
-		t.Fatalf("write field: %v", err)
-	}
-	if _, err := w.CreateFormFile("image", "cat.png"); err != nil {
-		t.Fatalf("create file: %v", err)
-	}
-	tail := "\r\n--" + w.Boundary() + "--\r\n"
-	return io.MultiReader(bytes.NewReader(head.Bytes()), padding(size-int64(head.Len()+len(tail))), strings.NewReader(tail)), w.FormDataContentType()
+
+	mw := multipart.NewWriter(&head)
+	require.NoError(t, mw.WriteField("model", model), "write field")
+
+	_, err := mw.CreateFormFile("image", "cat.png")
+	require.NoError(t, err, "create file")
+
+	tail := "\r\n--" + mw.Boundary() + "--\r\n"
+
+	return io.MultiReader(bytes.NewReader(head.Bytes()), padding(size-int64(head.Len()+len(tail))), strings.NewReader(tail)), mw.FormDataContentType()
 }
 
 // TestModelRouteBodiesAreCapped: a body at its route's limit is decided on;
@@ -55,18 +62,22 @@ func imageEditOf(t *testing.T, model string, size int64) (io.Reader, string) {
 func TestModelRouteBodiesAreCapped(t *testing.T) {
 	// A large multipart upload spills to temporary files.
 	t.Setenv("TMPDIR", t.TempDir())
+
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}, "gpt-image-2": {"chatgpt"}})
 	engine, reached := gated(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"), catalog)
 
 	send := func(path, contentType string, body io.Reader, length int64) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, path, body)
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, body)
 		req.ContentLength = length
 		req.Header.Set("Content-Type", contentType)
 		req.Header.Set("Authorization", "Bearer "+gateSecret)
+
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, req)
+
 		return rec
 	}
+
 	const tooLarge = `{"error":{"message":"request body too large","type":"invalid_request_error"}}`
 
 	for _, tc := range []struct {
@@ -75,27 +86,32 @@ func TestModelRouteBodiesAreCapped(t *testing.T) {
 		body       func(size int64) (io.Reader, string)
 	}{
 		{"a JSON chat request", "/v1/chat/completions", 64 << 20, func(size int64) (io.Reader, string) {
-			return jsonBodyOf("gpt-5.6", size), "application/json"
+			return jsonBodyOf(size), "application/json"
 		}},
 		{"a multipart image edit", "/v1/images/edits", 256 << 20, func(size int64) (io.Reader, string) {
 			return imageEditOf(t, "gpt-image-2", size)
 		}},
 	} {
 		*reached = false
+
 		body, contentType := tc.body(tc.limit)
-		if rec := send(tc.path, contentType, body, -1); rec.Code != http.StatusOK || !*reached {
-			t.Fatalf("%s of exactly %d bytes = %d %s (reached %t), want 200", tc.what, tc.limit, rec.Code, rec.Body, *reached)
-		}
+		rec := send(tc.path, contentType, body, -1)
+		require.Equal(t, http.StatusOK, rec.Code, "%s of exactly %d bytes: %s", tc.what, tc.limit, rec.Body)
+		require.True(t, *reached, "%s of exactly %d bytes did not reach the handler", tc.what, tc.limit)
+
 		*reached = false
+
 		body, contentType = tc.body(tc.limit + 1)
-		if rec := send(tc.path, contentType, body, -1); rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Fatalf("%s of %d bytes = %d %s (reached %t), want 413 %s", tc.what, tc.limit+1, rec.Code, rec.Body, *reached, tooLarge)
-		}
+		rec = send(tc.path, contentType, body, -1)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s of %d bytes", tc.what, tc.limit+1)
+		require.JSONEq(t, tooLarge, rec.Body.String(), "%s of %d bytes", tc.what, tc.limit+1)
+		require.False(t, *reached, "%s of %d bytes reached the handler", tc.what, tc.limit+1)
 		// A body that declares its length is refused on it, unread: any
 		// read of this one fails the request some other way.
-		if rec := send(tc.path, contentType, iotest.ErrReader(io.ErrUnexpectedEOF), tc.limit+1); rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Fatalf("%s declaring %d bytes = %d %s (reached %t), want 413 %s", tc.what, tc.limit+1, rec.Code, rec.Body, *reached, tooLarge)
-		}
+		rec = send(tc.path, contentType, iotest.ErrReader(io.ErrUnexpectedEOF), tc.limit+1)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s declaring %d bytes", tc.what, tc.limit+1)
+		require.JSONEq(t, tooLarge, rec.Body.String(), "%s declaring %d bytes", tc.what, tc.limit+1)
+		require.False(t, *reached, "%s declaring %d bytes reached the handler", tc.what, tc.limit+1)
 	}
 }
 
@@ -111,6 +127,7 @@ type zstdFrame struct {
 func newZstdFrame(windowLog uint) *zstdFrame {
 	f := &zstdFrame{}
 	f.out.Write([]byte{0x28, 0xb5, 0x2f, 0xfd, 0x00, byte((windowLog - 10) << 3)})
+
 	return f
 }
 
@@ -125,6 +142,7 @@ func (f *zstdFrame) block(kind byte, size int, content []byte) {
 // raw appends s as one raw block.
 func (f *zstdFrame) raw(s string) *zstdFrame {
 	f.block(0, len(s), []byte(s))
+
 	return f
 }
 
@@ -135,6 +153,7 @@ func (f *zstdFrame) run(b byte, n int64) *zstdFrame {
 		f.block(1, int(size), []byte{b})
 		n -= size
 	}
+
 	return f
 }
 
@@ -142,6 +161,7 @@ func (f *zstdFrame) run(b byte, n int64) *zstdFrame {
 func (f *zstdFrame) last() []byte {
 	b := f.out.Bytes()
 	b[f.lastHeader] |= 1
+
 	return b
 }
 
@@ -149,6 +169,7 @@ func (f *zstdFrame) last() []byte {
 // exactly size bytes long.
 func chatDecodingTo(model string, size int64) []byte {
 	head, tail := `{"model":"`+model+`","messages":[],"pad":"`, `"}`
+
 	return newZstdFrame(17).raw(head).run('x', size-int64(len(head)+len(tail))).raw(tail).last()
 }
 
@@ -162,24 +183,31 @@ func TestZstdBodiesAreCappedDecoded(t *testing.T) {
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}})
 	engine, reached := gated(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"), catalog)
 	send := func(frame []byte) (*httptest.ResponseRecorder, uint64) {
-		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(frame))
+		req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/chat/completions", bytes.NewReader(frame))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Content-Encoding", "zstd")
 		req.Header.Set("Authorization", "Bearer "+gateSecret)
+
 		rec := httptest.NewRecorder()
+
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		engine.ServeHTTP(rec, req)
 		runtime.ReadMemStats(&after)
+
 		return rec, after.TotalAlloc - before.TotalAlloc
 	}
-	const limit = 64 << 20
-	const tooLarge = `{"error":{"message":"request body too large","type":"invalid_request_error"}}`
+
+	const (
+		limit    = 64 << 20
+		tooLarge = `{"error":{"message":"request body too large","type":"invalid_request_error"}}`
+	)
 
 	*reached = false
-	if rec, _ := send(chatDecodingTo("gpt-5.6", limit)); rec.Code != http.StatusOK || !*reached {
-		t.Fatalf("a frame decoding to exactly %d bytes = %d %s (reached %t), want 200", limit, rec.Code, rec.Body, *reached)
-	}
+	rec, _ := send(chatDecodingTo("gpt-5.6", limit))
+	require.Equal(t, http.StatusOK, rec.Code, "a frame decoding to exactly %d bytes: %s", limit, rec.Body)
+	require.True(t, *reached, "a frame decoding to exactly %d bytes did not reach the handler", limit)
+
 	for _, tc := range []struct {
 		what  string
 		frame []byte
@@ -189,15 +217,14 @@ func TestZstdBodiesAreCappedDecoded(t *testing.T) {
 		{"a frame claiming a 512 MiB window", newZstdFrame(29).raw(`{"model":"gpt-5.6"}`).last()},
 	} {
 		*reached = false
+
 		rec, allocated := send(tc.frame)
-		if rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Errorf("%s (%d bytes sent) = %d %s (reached %t), want 413 %s", tc.what, len(tc.frame), rec.Code, rec.Body, *reached, tooLarge)
-		}
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s (%d bytes sent)", tc.what, len(tc.frame))
+		assert.JSONEq(t, tooLarge, rec.Body.String(), "%s (%d bytes sent)", tc.what, len(tc.frame))
+		assert.False(t, *reached, "%s (%d bytes sent) reached the handler", tc.what, len(tc.frame))
 		// Reading up to the limit costs a few times the limit as the buffer
 		// grows (more under the race detector); decoding the gigabyte, many
 		// times more.
-		if allocated > 8*limit {
-			t.Errorf("%s allocated %d MiB, want at most %d", tc.what, allocated>>20, 8*limit>>20)
-		}
+		assert.LessOrEqual(t, allocated, uint64(8*limit), "%s allocated too much", tc.what)
 	}
 }

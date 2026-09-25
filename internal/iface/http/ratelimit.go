@@ -51,28 +51,33 @@ func (l *limiter) allow(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	b, ok := l.buckets[key]
+	entry, ok := l.buckets[key]
 	if !ok {
 		l.makeRoom(now)
-		b = &bucket{tokens: float64(l.rate.Burst), last: now}
-		l.buckets[key] = b
+		entry = &bucket{tokens: float64(l.rate.Burst), last: now}
+		l.buckets[key] = entry
 	}
-	b.tokens = l.refilled(b, now)
-	b.last = now
-	if b.tokens >= 1 {
-		b.tokens--
+
+	entry.tokens = l.refilled(entry, now)
+
+	entry.last = now
+	if entry.tokens >= 1 {
+		entry.tokens--
+
 		return true, 0
 	}
-	return false, time.Duration((1 - b.tokens) * float64(l.rate.Every))
+
+	return false, time.Duration((1 - entry.tokens) * float64(l.rate.Every))
 }
 
 // refilled is b's token count at now.
-func (l *limiter) refilled(b *bucket, now time.Time) float64 {
-	elapsed := now.Sub(b.last)
+func (l *limiter) refilled(entry *bucket, now time.Time) float64 {
+	elapsed := now.Sub(entry.last)
 	if elapsed <= 0 {
-		return b.tokens
+		return entry.tokens
 	}
-	return min(float64(l.rate.Burst), b.tokens+float64(elapsed)/float64(l.rate.Every))
+
+	return min(float64(l.rate.Burst), entry.tokens+float64(elapsed)/float64(l.rate.Every))
 }
 
 // makeRoom keeps the map within MaxClients before a new client is added. A bucket
@@ -85,19 +90,24 @@ func (l *limiter) makeRoom(now time.Time) {
 	if len(l.buckets) < l.rate.MaxClients {
 		return
 	}
+
 	for k, b := range l.buckets {
 		if l.refilled(b, now) >= float64(l.rate.Burst) {
 			delete(l.buckets, k)
 		}
 	}
+
 	for len(l.buckets) >= l.rate.MaxClients {
-		var oldest string
-		var at time.Time
+		var (
+			oldest string
+			at     time.Time
+		)
 		for k, b := range l.buckets {
 			if oldest == "" || b.last.Before(at) {
 				oldest, at = k, b.last
 			}
 		}
+
 		delete(l.buckets, oldest)
 	}
 }

@@ -60,8 +60,10 @@ type Request struct {
 // Start serves v on a loopback listener for the duration of the test.
 func Start(t *testing.T, v *Vendor) *httptest.Server {
 	t.Helper()
+
 	srv := httptest.NewServer(v)
 	t.Cleanup(srv.Close)
+
 	return srv
 }
 
@@ -80,6 +82,7 @@ func Compatibility(name, baseURL, apiKey, model, alias string) cliproxyconfig.Op
 func (v *Vendor) Requests() []Request {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
 	return append([]Request(nil), v.requests...)
 }
 
@@ -91,71 +94,88 @@ func (v *Vendor) ChunksStarted() int {
 }
 
 // ServeHTTP answers as the vendor would.
-func (v *Vendor) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+func (v *Vendor) ServeHTTP(writer http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(writer, err.Error(), http.StatusBadRequest)
+
 		return
 	}
+
 	v.mu.Lock()
-	v.requests = append(v.requests, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone(), Body: body})
+	v.requests = append(v.requests, Request{Method: req.Method, Path: req.URL.Path, Header: req.Header.Clone(), Body: body})
 	v.mu.Unlock()
 
 	if v.FailStatus != 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(v.FailStatus)
-		_, _ = w.Write(v.FailBody)
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(v.FailStatus)
+		_, _ = writer.Write(v.FailBody)
+
 		return
 	}
 
 	var mode struct {
 		Stream bool `json:"stream"`
 	}
+
 	_ = json.Unmarshal(body, &mode)
 	if !mode.Stream {
-		if !wait(r, v.Latency) {
+		if !wait(req, v.Latency) {
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(v.Payload)
+
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write(v.Payload)
+
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
+	flusher, ok := writer.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		http.Error(writer, "streaming unsupported", http.StatusInternalServerError)
+
 		return
 	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.WriteHeader(http.StatusOK)
+
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.Header().Set("Cache-Control", "no-cache")
+	writer.WriteHeader(http.StatusOK)
 	flusher.Flush()
-	for _, c := range v.Chunks {
-		if !wait(r, v.Latency) {
+
+	for _, chunk := range v.Chunks {
+		if !wait(req, v.Latency) {
 			return
 		}
+
 		v.started.Add(1)
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", c); err != nil {
+
+		if _, err := fmt.Fprintf(writer, "data: %s\n\n", chunk); err != nil {
 			return
 		}
+
 		flusher.Flush()
 	}
+
 	if v.DieMidStream {
 		panic(http.ErrAbortHandler)
 	}
-	_, _ = io.WriteString(w, "data: [DONE]\n\n")
+
+	_, _ = io.WriteString(writer, "data: [DONE]\n\n")
+
 	flusher.Flush()
 }
 
 // wait sleeps for d and reports whether the caller is still there.
-func wait(r *http.Request, d time.Duration) bool {
+func wait(req *http.Request, d time.Duration) bool {
 	if d <= 0 {
-		return r.Context().Err() == nil
+		return req.Context().Err() == nil
 	}
+
 	timer := time.NewTimer(d)
 	defer timer.Stop()
+
 	select {
-	case <-r.Context().Done():
+	case <-req.Context().Done():
 		return false
 	case <-timer.C:
 		return true

@@ -48,12 +48,27 @@ type Deps struct {
 	SignInRate RateLimit
 }
 
+// The route patterns more than one access table below names.
+const (
+	routeLogin        = "POST /api/auth/login"
+	routePassword     = "POST /api/auth/password" //nolint:gosec // a route pattern, not a credential
+	routeOIDCStart    = "GET /api/auth/oidc/start"
+	routeOIDCCallback = "GET /api/auth/oidc/callback"
+)
+
+// NewRouter's refusals of an incomplete Deps.
+var (
+	errMissingDependency = errors.New("web: router is missing a dependency")
+	errNoPublicAPIURL    = errors.New("web: router needs the public API URL")
+	errBadSignInRate     = errors.New("web: sign-in rate limit needs a positive burst, interval and client bound")
+)
+
 // anonymous lists the routes that need no session. Every other route needs one.
 var anonymous = map[string]bool{
-	"GET /api/auth/config":        true,
-	"POST /api/auth/login":        true,
-	"GET /api/auth/oidc/start":    true,
-	"GET /api/auth/oidc/callback": true,
+	"GET /api/auth/config": true,
+	routeLogin:             true,
+	routeOIDCStart:         true,
+	routeOIDCCallback:      true,
 	// Signing out needs no session: a cookie whose session is already gone must
 	// still be cleared (logout signs out the session when there is one).
 	"POST /api/auth/logout": true,
@@ -65,18 +80,18 @@ var anonymous = map[string]bool{
 // route, including any added later, requires a full session: the restriction is the
 // default, and this list is the only way out of it.
 var restrictedAllowed = map[string]bool{
-	"GET /api/me":             true,
-	"POST /api/auth/password": true,
+	"GET /api/me": true,
+	routePassword: true,
 }
 
 // signInLimited lists the routes the per-client rate limit applies to — the ones that
 // spend password work or start a sign-in — with how each refuses. The OIDC routes are
 // browser navigations, so they redirect to the login page instead of answering JSON.
 var signInLimited = map[string]func(http.ResponseWriter, *http.Request, time.Duration){
-	"POST /api/auth/login":        refuseJSON,
-	"POST /api/auth/password":     refuseJSON,
-	"GET /api/auth/oidc/start":    refuseNavigation,
-	"GET /api/auth/oidc/callback": refuseNavigation,
+	routeLogin:        refuseJSON,
+	routePassword:     refuseJSON,
+	routeOIDCStart:    refuseNavigation,
+	routeOIDCCallback: refuseNavigation,
 }
 
 // adminPrefix starts every administration route. Each one needs a full session of an
@@ -85,12 +100,14 @@ const adminPrefix = "/api/admin/"
 
 func adminOnly(pattern string) bool {
 	_, path, _ := strings.Cut(pattern, " ")
+
 	return strings.HasPrefix(path, adminPrefix)
 }
 
 // router holds the handlers' dependencies.
 type router struct {
 	Deps
+
 	cookies cookies
 	sealer  *challengeSealer // nil without OIDC
 }
@@ -104,36 +121,43 @@ type router struct {
 // cap, the JSON content-type requirement for mutating requests, session loading,
 // then per route the rate limit, the session guard and, on /api/admin/*, the
 // administrator guard.
-func NewRouter(d Deps) (http.Handler, error) {
-	if d.Auth == nil || d.Tokens == nil || d.Usage == nil || d.Models == nil || d.Clock == nil || d.Log == nil ||
-		d.AdminUsers == nil || d.Settings == nil || d.Prices == nil || d.Providers == nil {
-		return nil, errors.New("web: router is missing a dependency")
+func NewRouter(deps Deps) (http.Handler, error) {
+	if deps.Auth == nil || deps.Tokens == nil || deps.Usage == nil || deps.Models == nil || deps.Clock == nil || deps.Log == nil ||
+		deps.AdminUsers == nil || deps.Settings == nil || deps.Prices == nil || deps.Providers == nil {
+		return nil, errMissingDependency
 	}
-	if d.PublicAPIURL == "" {
-		return nil, errors.New("web: router needs the public API URL")
+
+	if deps.PublicAPIURL == "" {
+		return nil, errNoPublicAPIURL
 	}
-	if d.SignInRate == (RateLimit{}) {
-		d.SignInRate = DefaultSignInRate
+
+	if deps.SignInRate == (RateLimit{}) {
+		deps.SignInRate = DefaultSignInRate
 	}
-	if d.SignInRate.Burst < 1 || d.SignInRate.Every <= 0 || d.SignInRate.MaxClients < 1 {
-		return nil, errors.New("web: sign-in rate limit needs a positive burst, interval and client bound")
+
+	if deps.SignInRate.Burst < 1 || deps.SignInRate.Every <= 0 || deps.SignInRate.MaxClients < 1 {
+		return nil, errBadSignInRate
 	}
-	rt := &router{Deps: d, cookies: cookies{secure: d.CookieSecure, clock: d.Clock}}
-	if d.OIDC != nil {
-		s, err := newChallengeSealer(d.SessionKey, d.Clock)
+
+	rt := &router{Deps: deps, cookies: cookies{secure: deps.CookieSecure, clock: deps.Clock}}
+	if deps.OIDC != nil {
+		s, err := newChallengeSealer(deps.SessionKey, deps.Clock)
 		if err != nil {
 			return nil, err
 		}
+
 		rt.sealer = s
 	}
 
-	limit := newLimiter(d.SignInRate, d.Clock)
+	limit := newLimiter(deps.SignInRate, deps.Clock)
 	mux := http.NewServeMux()
+
 	for pattern, h := range rt.routes() {
 		var handler http.Handler = h
 		if adminOnly(pattern) {
 			handler = requireAdmin(handler)
 		}
+
 		switch {
 		case anonymous[pattern]:
 		case restrictedAllowed[pattern]:
@@ -141,9 +165,11 @@ func NewRouter(d Deps) (http.Handler, error) {
 		default:
 			handler = requireFullSession(handler)
 		}
+
 		if refuse, ok := signInLimited[pattern]; ok {
 			handler = rateLimited(limit, refuse, handler)
 		}
+
 		mux.Handle(pattern, handler)
 	}
 	// Everything unrouted — an unknown path, or a known one with another method —
@@ -152,7 +178,7 @@ func NewRouter(d Deps) (http.Handler, error) {
 		writeError(w, http.StatusNotFound, codeNotFound, "no such endpoint")
 	})
 
-	return recoverPanics(d.Log, limitBody(requireJSON(loadSession(d.Auth, d.Log, mux)))), nil
+	return recoverPanics(deps.Log, limitBody(requireJSON(loadSession(deps.Auth, deps.Log, mux)))), nil
 }
 
 // routes is every endpoint by its ServeMux pattern. Access is not decided here:
@@ -161,11 +187,11 @@ func NewRouter(d Deps) (http.Handler, error) {
 func (rt *router) routes() map[string]http.HandlerFunc {
 	routes := map[string]http.HandlerFunc{
 		"GET /api/auth/config":            rt.getAuthConfig,
-		"POST /api/auth/login":            rt.login,
+		routeLogin:                        rt.login,
 		"POST /api/auth/logout":           rt.logout,
-		"POST /api/auth/password":         rt.changePassword,
-		"GET /api/auth/oidc/start":        rt.startOIDC,
-		"GET /api/auth/oidc/callback":     rt.oidcCallback,
+		routePassword:                     rt.changePassword,
+		routeOIDCStart:                    rt.startOIDC,
+		routeOIDCCallback:                 rt.oidcCallback,
 		"GET /api/me":                     rt.getMe,
 		"GET /api/me/tokens":              rt.listMyTokens,
 		"POST /api/me/tokens":             rt.issueMyToken,
@@ -175,11 +201,13 @@ func (rt *router) routes() map[string]http.HandlerFunc {
 		"GET /api/connect":                rt.getConnectInfo,
 	}
 	if !rt.LocalLogin {
-		delete(routes, "POST /api/auth/login")
+		delete(routes, routeLogin)
 	}
+
 	rt.registerAdminUsers(routes)
 	rt.registerAdminSettings(routes)
 	rt.registerAdminProviders(routes)
+
 	return routes
 }
 

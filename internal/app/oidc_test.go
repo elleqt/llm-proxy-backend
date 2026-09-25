@@ -6,17 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 const testIssuer = "https://idp.example.com"
@@ -27,12 +27,13 @@ const testIssuer = "https://idp.example.com"
 var loginChallenge = app.Challenge{State: "state-1", Nonce: "nonce-1", Verifier: "verifier-1"}
 
 func newOIDC(t *testing.T, users app.UserRepo, idents app.IdentityRepo, sessions app.SessionRepo,
-	idp app.IdentityProvider, cfg app.OIDCConfig) *app.OIDCService {
+	idp app.IdentityProvider, cfg app.OIDCConfig,
+) *app.OIDCService {
 	t.Helper()
+
 	svc, err := app.NewOIDCService(users, idents, sessions, idp, nopAudit{}, systemClock{}, cfg)
-	if err != nil {
-		t.Fatalf("NewOIDCService: %v", err)
-	}
+	require.NoError(t, err, "NewOIDCService")
+
 	return svc
 }
 
@@ -42,16 +43,22 @@ func complete(svc *app.OIDCService) (app.Session, error) {
 
 // acceptingSessions stands in for a store that takes exactly one new session.
 func acceptingSessions(t *testing.T) *mocks.SessionRepo {
+	t.Helper()
+
 	sessions := mocks.NewSessionRepo(t)
 	sessions.EXPECT().Create(mock.Anything, mock.Anything).Return(nil).Once()
+
 	return sessions
 }
 
-func idpAsserting(t *testing.T, c app.Claims) *mocks.IdentityProvider {
+func idpAsserting(t *testing.T, claims app.Claims) *mocks.IdentityProvider {
+	t.Helper()
+
 	idp := mocks.NewIdentityProvider(t)
 	// The challenge is matched exactly: the provider must receive the same nonce and
 	// verifier the login started with, or it cannot bind the token to this browser.
-	idp.EXPECT().Exchange(mock.Anything, "code", loginChallenge).Return(c, nil)
+	idp.EXPECT().Exchange(mock.Anything, "code", loginChallenge).Return(claims, nil)
+
 	return idp
 }
 
@@ -60,7 +67,9 @@ func ruleStrings(p access.Policy) []string {
 	for i, r := range p {
 		out[i] = r.String()
 	}
+
 	slices.Sort(out)
+
 	return out
 }
 
@@ -78,9 +87,8 @@ func TestLoginRejectedWithoutRequiredGroup(t *testing.T) {
 		AllowSignUp:   true,
 	})
 
-	if _, err := complete(svc); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrForbidden)
 }
 
 func TestUnknownSubjectRejectedWhenSignUpDisabled(t *testing.T) {
@@ -97,9 +105,9 @@ func TestUnknownSubjectRejectedWhenSignUpDisabled(t *testing.T) {
 		AllowSignUp:   false,
 	})
 
-	if _, err := complete(svc); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrForbidden)
+
 	users.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
 }
 
@@ -122,12 +130,9 @@ func TestPendingIdentityLinksSubjectOnce(t *testing.T) {
 	})
 
 	sess, err := complete(svc)
-	if err != nil {
-		t.Fatalf("first login: %v", err)
-	}
-	if sess.UserID != invited.ID {
-		t.Fatalf("session for %v, want the invited account %v", sess.UserID, invited.ID)
-	}
+	require.NoError(t, err, "first login")
+	require.Equal(t, invited.ID, sess.UserID, "session, want the invited account")
+
 	users.AssertNotCalled(t, "Create", mock.Anything, mock.Anything)
 }
 
@@ -143,6 +148,7 @@ func TestGroupMappingSetsPolicyAndMarksItIDPManaged(t *testing.T) {
 	users.EXPECT().ByID(mock.Anything, existing.ID).Return(existing, nil)
 
 	var saved identity.User
+
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = u }).Return(nil)
 
@@ -151,15 +157,11 @@ func TestGroupMappingSetsPolicyAndMarksItIDPManaged(t *testing.T) {
 		GroupPolicy:   map[string][]string{"/team-a": {"chatgpt:*"}},
 	})
 
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if saved.PolicySource != identity.PolicyIDP {
-		t.Fatalf("PolicySource = %v, want idp", saved.PolicySource)
-	}
-	if got := ruleStrings(saved.Policy); !slices.Equal(got, []string{"chatgpt:*"}) {
-		t.Fatalf("policy = %v, want [chatgpt:*]", got)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "Complete")
+
+	require.Equal(t, identity.PolicyIDP, saved.PolicySource, "PolicySource")
+	require.Equal(t, []string{"chatgpt:*"}, ruleStrings(saved.Policy), "policy")
 }
 
 func TestWithoutGroupMappingPolicyStaysLocal(t *testing.T) {
@@ -178,9 +180,9 @@ func TestWithoutGroupMappingPolicyStaysLocal(t *testing.T) {
 		RequiredGroup: "/gate",
 	})
 
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "Complete")
+
 	users.AssertNotCalled(t, "SaveIdentityState", mock.Anything, mock.Anything)
 }
 
@@ -208,10 +210,9 @@ func TestCompleteRefusesAMismatchedStateWithoutCallingTheIdP(t *testing.T) {
 
 			ch := loginChallenge
 			ch.State = tc.expected
+
 			_, err := svc.Complete(context.Background(), "code", tc.state, ch, app.SessionMeta{})
-			if !errors.Is(err, app.ErrInvalidCredentials) {
-				t.Fatalf("err = %v, want ErrInvalidCredentials", err)
-			}
+			require.ErrorIs(t, err, app.ErrInvalidCredentials)
 		})
 	}
 }
@@ -234,9 +235,9 @@ func TestUnverifiedEmailDoesNotRedeemAnInvitation(t *testing.T) {
 		RequiredGroup: "/gate", AllowSignUp: false,
 	})
 
-	if _, err := complete(svc); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("err = %v, want ErrForbidden", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrForbidden)
+
 	idents.AssertNotCalled(t, "Link", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 	idents.AssertNotCalled(t, "ConsumePending", mock.Anything, mock.Anything)
 }
@@ -263,9 +264,8 @@ func TestBlockedUserIsRefusedWithoutASession(t *testing.T) {
 		GroupPolicy:   map[string][]string{"/gate": {"claude:*"}},
 	})
 
-	if _, err := complete(svc); !errors.Is(err, app.ErrInvalidCredentials) {
-		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrInvalidCredentials)
 }
 
 // Every mapped group the user holds contributes; unmapped groups contribute
@@ -280,7 +280,9 @@ func TestGroupPolicyIsTheUnionOfEveryMappedGroup(t *testing.T) {
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(existing.ID, nil)
 	users.EXPECT().ByID(mock.Anything, existing.ID).Return(existing, nil)
+
 	var saved identity.User
+
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = u }).Return(nil)
 
@@ -292,12 +294,10 @@ func TestGroupPolicyIsTheUnionOfEveryMappedGroup(t *testing.T) {
 		},
 	})
 
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if got, want := ruleStrings(saved.Policy), []string{"claude:*", "openai:gpt-*"}; !slices.Equal(got, want) {
-		t.Fatalf("policy = %v, want %v", got, want)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "Complete")
+
+	require.Equal(t, []string{"claude:*", "openai:gpt-*"}, ruleStrings(saved.Policy), "policy")
 }
 
 // The mapping owns the policy. Holding none of the mapped groups is an empty
@@ -315,7 +315,9 @@ func TestUserWithNoMappedGroupGetsAnEmptyPolicy(t *testing.T) {
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(existing.ID, nil)
 	users.EXPECT().ByID(mock.Anything, existing.ID).Return(existing, nil)
+
 	var saved *identity.User
+
 	users.EXPECT().SaveIdentityState(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { saved = &u }).Return(nil)
 
@@ -324,15 +326,12 @@ func TestUserWithNoMappedGroupGetsAnEmptyPolicy(t *testing.T) {
 		GroupPolicy:   map[string][]string{"/team-a": {"claude:*"}},
 	})
 
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if saved == nil {
-		t.Fatal("the stale policy was not overwritten")
-	}
-	if len(saved.Policy) != 0 || saved.PolicySource != identity.PolicyIDP {
-		t.Fatalf("saved policy = %v (%s), want empty and idp-managed", ruleStrings(saved.Policy), saved.PolicySource)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "Complete")
+
+	require.NotNil(t, saved, "the stale policy was not overwritten")
+	require.Empty(t, saved.Policy, "saved policy, want empty")
+	require.Equal(t, identity.PolicyIDP, saved.PolicySource, "saved policy source, want idp-managed")
 }
 
 // A typo in the mapping or the default policy is the operator's problem at
@@ -344,9 +343,8 @@ func TestNewOIDCServiceRejectsAMalformedRule(t *testing.T) {
 	} {
 		_, err := app.NewOIDCService(mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t),
 			mocks.NewIdentityProvider(t), nopAudit{}, systemClock{}, cfg)
-		if !errors.Is(err, access.ErrMalformedRule) || !strings.Contains(err.Error(), "no-colon") {
-			t.Fatalf("%s: err = %v, want access.ErrMalformedRule naming the rule", name, err)
-		}
+		require.ErrorIs(t, err, access.ErrMalformedRule, name)
+		require.ErrorContains(t, err, "no-colon", "%s: the error must name the rule", name)
 	}
 }
 
@@ -360,10 +358,14 @@ func TestSignUpProvisionsWithTheDefaultPolicy(t *testing.T) {
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-new").Return(uuid.Nil, app.ErrNotFound)
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "new@example.com").Return(uuid.Nil, app.ErrNotFound)
+
 	var created identity.User
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { created = u }).Return(nil)
+
 	var linked uuid.UUID
+
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-new").
 		Run(func(_ context.Context, id uuid.UUID, _, _ string) { linked = id }).Return(nil)
 
@@ -374,20 +376,15 @@ func TestSignUpProvisionsWithTheDefaultPolicy(t *testing.T) {
 	})
 
 	sess, err := complete(svc)
-	if err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if !created.CanSignIn() || created.Role != identity.RoleUser || created.Email != "new@example.com" ||
-		created.DisplayName != "New Person" {
-		t.Fatalf("created = %+v, want an active human user with the asserted address and name", created)
-	}
-	if got := ruleStrings(created.Policy); !slices.Equal(got, []string{"claude:claude-sonnet-5"}) ||
-		created.PolicySource != identity.PolicyLocal {
-		t.Fatalf("policy = %v (%s), want the default, locally managed", got, created.PolicySource)
-	}
-	if linked != created.ID || sess.UserID != created.ID {
-		t.Fatalf("linked %v, session for %v, want both to be the new account %v", linked, sess.UserID, created.ID)
-	}
+	require.NoError(t, err, "Complete")
+	require.True(t, created.CanSignIn(), "created user %+v cannot sign in", created)
+	require.Equal(t, identity.RoleUser, created.Role, "created role")
+	require.Equal(t, "new@example.com", created.Email, "created email, want the asserted address")
+	require.Equal(t, "New Person", created.DisplayName, "created name, want the asserted name")
+	require.Equal(t, []string{"claude:claude-sonnet-5"}, ruleStrings(created.Policy), "policy, want the default")
+	require.Equal(t, identity.PolicyLocal, created.PolicySource, "policy source, want locally managed")
+	require.Equal(t, created.ID, linked, "linked id, want the new account")
+	require.Equal(t, created.ID, sess.UserID, "session user, want the new account")
 }
 
 // A federated sign-in opens the same kind of session a password does, and the
@@ -402,61 +399,60 @@ func TestOIDCSignInOpensASessionAndAuditsTheMethod(t *testing.T) {
 	idp := idpAsserting(t, app.Claims{Issuer: testIssuer, Subject: "sub-1", Email: "user@example.com", EmailVerified: true})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
 	users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
+
 	var stored app.Session
+
 	sessions.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, s app.Session) { stored = s }).Return(nil)
+
 	var recorded app.AuditEvent
+
 	audit.EXPECT().Record(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, e app.AuditEvent) { recorded = e }).Return(nil)
 
 	svc, err := app.NewOIDCService(users, idents, sessions, idp, audit, fixedClock{now: now}, app.OIDCConfig{})
-	if err != nil {
-		t.Fatalf("NewOIDCService: %v", err)
-	}
+	require.NoError(t, err, "NewOIDCService")
+
 	got, err := svc.Complete(context.Background(), "code", loginChallenge.State, loginChallenge,
 		app.SessionMeta{IP: "198.51.100.7", UserAgent: "a browser"})
-	if err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-
-	if got.ID == "" || stored.ID != "" || stored.IDHash != app.HashSessionID(got.ID) {
-		t.Fatalf("returned id %q, stored %+v: want the plaintext returned and only its hash stored", got.ID, stored)
-	}
-	if !stored.ExpiresAt.Equal(now.Add(app.SessionTTL)) {
-		t.Fatalf("session = %+v, want the local window", got)
-	}
-	if recorded.Action != "auth.signin.oidc" || recorded.ActorID != user.ID || recorded.IP != "198.51.100.7" {
-		t.Fatalf("audit = %+v, want an oidc sign-in by %v", recorded, user.ID)
-	}
+	require.NoError(t, err, "Complete")
+	require.NotEmpty(t, got.ID, "want the plaintext id returned")
+	require.Empty(t, stored.ID, "the stored session carries the plaintext id")
+	require.Equal(t, app.HashSessionID(got.ID), stored.IDHash, "stored hash, want the hash of the returned id")
+	require.True(t, stored.ExpiresAt.Equal(now.Add(app.SessionTTL)),
+		"session expires at %v, want the local window ending %v", stored.ExpiresAt, now.Add(app.SessionTTL))
+	require.Equal(t, "auth.signin.oidc", recorded.Action, "audit action")
+	require.Equal(t, user.ID, recorded.ActorID, "audit actor")
+	require.Equal(t, "198.51.100.7", recorded.IP, "audit IP")
 }
 
 // Begin hands the transport the very challenge the IdP was told about, and the three
 // secrets in it are independent full-strength values.
 func TestBeginReturnsTheChallengeTheAuthURLWasBuiltFrom(t *testing.T) {
 	idp := mocks.NewIdentityProvider(t)
+
 	var sent app.Challenge
+
 	idp.EXPECT().AuthURL(mock.Anything).
 		Run(func(ch app.Challenge) { sent = ch }).Return("https://idp.example.com/auth?x=1")
 
 	svc := newOIDC(t, mocks.NewUserRepo(t), mocks.NewIdentityRepo(t), mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
+
 	url, ch, err := svc.Begin()
-	if err != nil {
-		t.Fatalf("Begin: %v", err)
-	}
-	if url != "https://idp.example.com/auth?x=1" || ch != sent {
-		t.Fatalf("Begin = %q, %+v; the IdP was sent %+v", url, ch, sent)
-	}
+	require.NoError(t, err, "Begin")
+	require.Equal(t, "https://idp.example.com/auth?x=1", url, "Begin URL")
+	require.Equal(t, sent, ch, "Begin challenge, want the one the IdP was sent")
 
 	fields := []string{ch.State, ch.Nonce, ch.Verifier}
 	for _, f := range fields {
 		raw, err := base64.RawURLEncoding.DecodeString(f)
-		if err != nil || len(raw) != 32 {
-			t.Fatalf("challenge field %q: %d bytes (%v), want 32 bytes of base64url", f, len(raw), err)
-		}
+		require.NoError(t, err, "challenge field %q, want base64url", f)
+		require.Len(t, raw, 32, "challenge field %q", f)
 	}
-	if ch.State == ch.Nonce || ch.Nonce == ch.Verifier || ch.State == ch.Verifier {
-		t.Fatalf("challenge fields are not independent: %+v", ch)
-	}
+
+	require.NotEqual(t, ch.State, ch.Nonce, "challenge fields are not independent")
+	require.NotEqual(t, ch.Nonce, ch.Verifier, "challenge fields are not independent")
+	require.NotEqual(t, ch.State, ch.Verifier, "challenge fields are not independent")
 }
 
 // An unverified address must not occupy users.email: whoever typed a colleague's
@@ -468,18 +464,18 @@ func TestUnverifiedSignUpStoresNoEmail(t *testing.T) {
 		Issuer: testIssuer, Subject: "sub-new", Email: "colleague@example.com", EmailVerified: false,
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-new").Return(uuid.Nil, app.ErrNotFound)
+
 	var created identity.User
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { created = u }).Return(nil)
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-new").Return(nil)
 
 	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("Complete: %v", err)
-	}
-	if created.Email != "" {
-		t.Fatalf("created.Email = %q, want empty for an unverified address", created.Email)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "Complete")
+
+	require.Empty(t, created.Email, "want no email stored for an unverified address")
 }
 
 // Create and Link are two writes. When the second one fails, the same subject's next
@@ -494,6 +490,7 @@ func TestSignUpResumesAfterALinkFailure(t *testing.T) {
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "new@example.com").Return(uuid.Nil, app.ErrNotFound).Times(2)
 
 	var orphan identity.User
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { orphan = u }).Return(nil).Once()
 	users.EXPECT().Create(mock.Anything, mock.Anything).
@@ -502,21 +499,17 @@ func TestSignUpResumesAfterALinkFailure(t *testing.T) {
 		Return(errors.New("connection reset")).Once()
 
 	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
-	if _, err := complete(svc); err == nil {
-		t.Fatal("first attempt: want the Link failure reported")
-	}
+	_, err := complete(svc)
+	require.Error(t, err, "first attempt: want the Link failure reported")
 
 	// The retry: Create now conflicts with the orphan, which is found by the id
 	// derived from this subject and linked.
 	users.EXPECT().ByID(mock.Anything, orphan.ID).Return(orphan, nil).Once()
 	idents.EXPECT().Link(mock.Anything, orphan.ID, testIssuer, "sub-new").Return(nil).Once()
+
 	sess, err := complete(svc)
-	if err != nil {
-		t.Fatalf("retry: %v", err)
-	}
-	if sess.UserID != orphan.ID {
-		t.Fatalf("retry opened a session for %v, want the resumed account %v", sess.UserID, orphan.ID)
-	}
+	require.NoError(t, err, "retry")
+	require.Equal(t, orphan.ID, sess.UserID, "retry session, want the resumed account")
 }
 
 // A sign-up whose address belongs to another account is refused. Resolving the
@@ -529,7 +522,9 @@ func TestSignUpConflictWithAnotherAccountIsRefusedAndNeverLinked(t *testing.T) {
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-stranger").Return(uuid.Nil, app.ErrNotFound)
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "taken@example.com").Return(uuid.Nil, app.ErrNotFound)
+
 	var derived uuid.UUID
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) { derived = u.ID }).
 		Return(fmt.Errorf("%w: users_email_lower_key", app.ErrConflict))
@@ -537,16 +532,14 @@ func TestSignUpConflictWithAnotherAccountIsRefusedAndNeverLinked(t *testing.T) {
 	// nothing: the conflicting row is somebody else's.
 	users.EXPECT().ByID(mock.Anything, mock.Anything).
 		RunAndReturn(func(_ context.Context, id uuid.UUID) (identity.User, error) {
-			if id != derived {
-				t.Errorf("ByID(%v), want only the derived id %v", id, derived)
-			}
+			assert.Equal(t, derived, id, "ByID, want only the derived id")
+
 			return identity.User{}, app.ErrNotFound
 		})
 
 	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{AllowSignUp: true})
-	if _, err := complete(svc); !errors.Is(err, app.ErrConflict) {
-		t.Fatalf("err = %v, want ErrConflict", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrConflict)
 }
 
 // Redemption spends the invitation before it links. When the link then fails, the
@@ -564,9 +557,8 @@ func TestInvitationIsSpentEvenWhenTheLinkFails(t *testing.T) {
 	idents.EXPECT().Link(mock.Anything, invited.ID, testIssuer, "sub-1").Return(errors.New("connection reset"))
 
 	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
-	if _, err := complete(svc); err == nil {
-		t.Fatal("want the Link failure reported")
-	}
+	_, err := complete(svc)
+	require.Error(t, err, "want the Link failure reported")
 	// The mock's cleanup fails the test if ConsumePending was not called.
 }
 
@@ -585,9 +577,8 @@ func TestBlockedInviteeIsNeitherLinkedNorConsumed(t *testing.T) {
 
 	// No Link or ConsumePending expectation: either call fails the test.
 	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{})
-	if _, err := complete(svc); !errors.Is(err, app.ErrInvalidCredentials) {
-		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrInvalidCredentials)
 }
 
 // The derived id belongs to the subject, not to the address. Two subjects asserting
@@ -598,14 +589,17 @@ func TestSecondSubjectWithTheSameEmailIsNotResumedOntoTheFirstAccount(t *testing
 
 	// A minimal users table: unique by id and by address.
 	stored := map[uuid.UUID]identity.User{}
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
-		RunAndReturn(func(_ context.Context, u identity.User) error {
+		RunAndReturn(func(_ context.Context, user identity.User) error {
 			for _, other := range stored {
-				if other.ID == u.ID || (u.Email != "" && other.Email == u.Email) {
+				if other.ID == user.ID || (user.Email != "" && other.Email == user.Email) {
 					return fmt.Errorf("%w: users_email_lower_key", app.ErrConflict)
 				}
 			}
-			stored[u.ID] = u
+
+			stored[user.ID] = user
+
 			return nil
 		})
 	users.EXPECT().ByID(mock.Anything, mock.Anything).
@@ -613,6 +607,7 @@ func TestSecondSubjectWithTheSameEmailIsNotResumedOntoTheFirstAccount(t *testing
 			if u, ok := stored[id]; ok {
 				return u, nil
 			}
+
 			return identity.User{}, app.ErrNotFound
 		}).Maybe()
 
@@ -621,25 +616,26 @@ func TestSecondSubjectWithTheSameEmailIsNotResumedOntoTheFirstAccount(t *testing
 	idp := mocks.NewIdentityProvider(t)
 	idp.EXPECT().Exchange(mock.Anything, "code", loginChallenge).Return(claimsA, nil).Once()
 	idp.EXPECT().Exchange(mock.Anything, "code", loginChallenge).Return(claimsB, nil).Once()
+
 	for _, sub := range []string{"sub-a", "sub-b"} {
 		idents.EXPECT().BySubject(mock.Anything, testIssuer, sub).Return(uuid.Nil, app.ErrNotFound)
 	}
+
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "shared@example.com").Return(uuid.Nil, app.ErrNotFound)
 	// Only subject A is ever linked; a Link for sub-b fails the test.
 	var linkedA uuid.UUID
+
 	idents.EXPECT().Link(mock.Anything, mock.Anything, testIssuer, "sub-a").
 		Run(func(_ context.Context, id uuid.UUID, _, _ string) { linkedA = id }).Return(nil).Once()
 
 	svc := newOIDC(t, users, idents, acceptingSessions(t), idp, app.OIDCConfig{AllowSignUp: true})
-	if _, err := complete(svc); err != nil {
-		t.Fatalf("subject A: %v", err)
-	}
-	if _, err := complete(svc); !errors.Is(err, app.ErrConflict) {
-		t.Fatalf("subject B: err = %v, want ErrConflict", err)
-	}
-	if len(stored) != 1 || stored[linkedA].Email != "shared@example.com" {
-		t.Fatalf("stored = %v, want only subject A's account", stored)
-	}
+	_, err := complete(svc)
+	require.NoError(t, err, "subject A")
+
+	_, err = complete(svc)
+	require.ErrorIs(t, err, app.ErrConflict, "subject B")
+	require.Len(t, stored, 1, "want only subject A's account")
+	require.Equal(t, "shared@example.com", stored[linkedA].Email, "want only subject A's account")
 }
 
 // Resuming is itself a sign-in and goes through the one sign-in rule: an orphan an
@@ -651,7 +647,9 @@ func TestResumeOntoABlockedOrphanIsRefused(t *testing.T) {
 	})
 	idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-new").Return(uuid.Nil, app.ErrNotFound)
 	idents.EXPECT().PendingByEmail(mock.Anything, testIssuer, "new@example.com").Return(uuid.Nil, app.ErrNotFound)
+
 	var orphan identity.User
+
 	users.EXPECT().Create(mock.Anything, mock.Anything).
 		Run(func(_ context.Context, u identity.User) {
 			orphan = u
@@ -663,14 +661,14 @@ func TestResumeOntoABlockedOrphanIsRefused(t *testing.T) {
 			if id != orphan.ID {
 				return identity.User{}, app.ErrNotFound
 			}
+
 			return orphan, nil
 		})
 
 	// No Link expectation and no session store expectation: either fails the test.
 	svc := newOIDC(t, users, idents, mocks.NewSessionRepo(t), idp, app.OIDCConfig{AllowSignUp: true})
-	if _, err := complete(svc); !errors.Is(err, app.ErrInvalidCredentials) {
-		t.Fatalf("err = %v, want ErrInvalidCredentials", err)
-	}
+	_, err := complete(svc)
+	require.ErrorIs(t, err, app.ErrInvalidCredentials)
 }
 
 // A linked account that has no name yet gets the provider's at its next login; one
@@ -685,9 +683,9 @@ func TestOIDCLoginFillsOnlyAMissingDisplayName(t *testing.T) {
 		idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		users.EXPECT().FillDisplayName(mock.Anything, user.ID, "From The IdP").Return(true, nil).Once()
-		if _, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{})); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
+
+		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{}))
+		require.NoError(t, err, "Complete")
 	})
 
 	t.Run("a name already set is kept", func(t *testing.T) {
@@ -697,8 +695,7 @@ func TestOIDCLoginFillsOnlyAMissingDisplayName(t *testing.T) {
 		idents.EXPECT().BySubject(mock.Anything, testIssuer, "sub-1").Return(user.ID, nil)
 		users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 		// No FillDisplayName expectation: a call fails the test.
-		if _, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{})); err != nil {
-			t.Fatalf("Complete: %v", err)
-		}
+		_, err := complete(newOIDC(t, users, idents, acceptingSessions(t), idpAsserting(t, claims), app.OIDCConfig{}))
+		require.NoError(t, err, "Complete")
 	})
 }

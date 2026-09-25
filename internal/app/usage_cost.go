@@ -24,22 +24,22 @@ type UsageCost struct {
 }
 
 // TotalUSD is the sum of the four priced parts.
-func (c UsageCost) TotalUSD() float64 {
+func (c *UsageCost) TotalUSD() float64 {
 	return c.InputUSD + c.OutputUSD + c.CacheReadUSD + c.CacheWriteUSD
 }
 
-// Add adds o to c; the sum is priced when either is.
-func (c *UsageCost) Add(o UsageCost) {
-	c.InputUSD += o.InputUSD
-	c.OutputUSD += o.OutputUSD
-	c.CacheReadUSD += o.CacheReadUSD
-	c.CacheWriteUSD += o.CacheWriteUSD
-	c.CacheSavingsUSD += o.CacheSavingsUSD
-	c.UnpricedTokens += o.UnpricedTokens
-	c.Priced = c.Priced || o.Priced
+// Add adds other to c; the sum is priced when either is.
+func (c *UsageCost) Add(other UsageCost) {
+	c.InputUSD += other.InputUSD
+	c.OutputUSD += other.OutputUSD
+	c.CacheReadUSD += other.CacheReadUSD
+	c.CacheWriteUSD += other.CacheWriteUSD
+	c.CacheSavingsUSD += other.CacheSavingsUSD
+	c.UnpricedTokens += other.UnpricedTokens
+	c.Priced = c.Priced || other.Priced
 }
 
-// PriceUsage prices ev's tokens at p; ok is false when the model has no price. The
+// PriceUsage prices ev's tokens at price; ok is false when the model has no price. The
 // token kinds partition the request (the usage sink maps upstream's canonical
 // breakdown that way), so each token is priced once: reasoning tokens are output
 // tokens and cost the output rate. Tokens the vendor could not classify
@@ -49,32 +49,36 @@ func (c *UsageCost) Add(o UsageCost) {
 //
 // The migration that added the ledger's cost columns backfilled them with the same
 // arithmetic in SQL (0003_usage_cost.sql): a change here must change it there.
-func PriceUsage(ev UsageEvent, p ModelPrice, ok bool) UsageCost {
+func PriceUsage(ev UsageEvent, price ModelPrice, ok bool) UsageCost {
 	in := positive(ev.TokensInput)
 	out := positive(ev.TokensOutput) + positive(ev.TokensReasoning)
 	cacheRead, cacheWrite := positive(ev.TokensCacheRead), positive(ev.TokensCacheWrite)
 	classified := in + out + cacheRead + cacheWrite
+
 	unclassified := max(positive(ev.TokensTotal)-classified, 0)
 	if !ok || classified == 0 {
 		if !ok {
 			unclassified += classified
 		}
+
 		return UsageCost{UnpricedTokens: unclassified}
 	}
 	// A price without a cache-write rate is a vendor that bills written tokens as
 	// ordinary input (OpenAI): they cost the input rate, and writing costs nothing
 	// extra, so it takes nothing off the savings.
-	cacheWriteRate := p.CacheWrite
+	cacheWriteRate := price.CacheWrite
 	if cacheWriteRate == 0 {
-		cacheWriteRate = p.Input
+		cacheWriteRate = price.Input
 	}
+
 	fin, fout, fread, fwrite := float64(in), float64(out), float64(cacheRead), float64(cacheWrite)
+
 	return UsageCost{
-		InputUSD:        fin * p.Input / 1e6,
-		OutputUSD:       fout * p.Output / 1e6,
-		CacheReadUSD:    fread * p.CacheRead / 1e6,
+		InputUSD:        fin * price.Input / 1e6,
+		OutputUSD:       fout * price.Output / 1e6,
+		CacheReadUSD:    fread * price.CacheRead / 1e6,
 		CacheWriteUSD:   fwrite * cacheWriteRate / 1e6,
-		CacheSavingsUSD: (fread*(p.Input-p.CacheRead) - fwrite*(cacheWriteRate-p.Input)) / 1e6,
+		CacheSavingsUSD: (fread*(price.Input-price.CacheRead) - fwrite*(cacheWriteRate-price.Input)) / 1e6,
 		UnpricedTokens:  unclassified,
 		Priced:          true,
 	}

@@ -5,43 +5,47 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
-
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/mock"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAuthConfigReportsTheSignInMethods(t *testing.T) {
 	var off api.AuthConfig
 	decodeBody(t, newEnv(t).do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &off)
-	if !off.LocalLogin || off.Oidc.Enabled || off.Oidc.DisplayName != nil {
-		t.Fatalf("without OIDC: %+v, want local login only", off)
-	}
+
+	require.True(t, off.LocalLogin, "without OIDC: local login")
+	require.False(t, off.Oidc.Enabled, "without OIDC: oidc enabled")
+	require.Nil(t, off.Oidc.DisplayName, "without OIDC: button label")
 
 	var on api.AuthConfig
 	decodeBody(t, newEnv(t, withOIDC).do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &on)
-	if !on.LocalLogin || !on.Oidc.Enabled || on.Oidc.DisplayName == nil || *on.Oidc.DisplayName != "Example SSO" {
-		t.Fatalf("with OIDC: %+v, want both methods and the button label", on)
-	}
+
+	require.True(t, on.LocalLogin, "with OIDC: local login")
+	require.True(t, on.Oidc.Enabled, "with OIDC: oidc enabled")
+	require.NotNil(t, on.Oidc.DisplayName, "with OIDC: button label")
+	require.Equal(t, "Example SSO", *on.Oidc.DisplayName, "with OIDC: button label")
 }
 
 // With local sign-in off, the login screen is not offered the form and the login
 // route does not exist: it answers as any unknown route does, before any password
 // work or throttle charge (the strict mocks expect neither).
 func TestLocalLoginOffRemovesThePasswordSignIn(t *testing.T) {
-	e := newEnv(t, withOIDC, func(e *testEnv) { e.deps.LocalLogin = false })
+	env := newEnv(t, withOIDC, func(e *testEnv) { e.deps.LocalLogin = false })
+
 	var cfg api.AuthConfig
-	decodeBody(t, e.do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &cfg)
-	if cfg.LocalLogin || !cfg.Oidc.Enabled {
-		t.Fatalf("config = %+v, want OIDC only", cfg)
-	}
-	apiError(t, e.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"right password"}`),
+	decodeBody(t, env.do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &cfg)
+
+	require.False(t, cfg.LocalLogin, "local login is offered")
+	require.True(t, cfg.Oidc.Enabled, "oidc is not offered")
+
+	apiError(t, env.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"right password"}`),
 		http.StatusNotFound, codeNotFound)
 }
 
@@ -54,49 +58,50 @@ func (e *testEnv) admitAttempt(email string) {
 // A successful sign-in sets the session cookie with every protective flag, and
 // answers with the user as GET /api/me would — restricted included.
 func TestLoginSetsTheSessionCookieAndDescribesTheUser(t *testing.T) {
-	e := newEnv(t)
-	u := person("person@example.com")
-	u.MustChangePassword = true
-	e.admitAttempt(u.Email)
-	e.users.EXPECT().ByEmail(mock.Anything, u.Email).Return(u, nil)
-	e.pwds.EXPECT().Get(mock.Anything, u.ID).Return("plain:right password", nil, nil)
-	e.attempts.EXPECT().Clear(mock.Anything, u.Email).Return(nil)
+	env := newEnv(t)
+	user := person("person@example.com")
+	user.MustChangePassword = true
+	env.admitAttempt(user.Email)
+	env.users.EXPECT().ByEmail(mock.Anything, user.Email).Return(user, nil)
+	env.pwds.EXPECT().Get(mock.Anything, user.ID).Return("plain:right password", nil, nil)
+	env.attempts.EXPECT().Clear(mock.Anything, user.Email).Return(nil)
+
 	var stored app.Session
-	e.sessions.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, s app.Session) error {
+
+	env.sessions.EXPECT().Create(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, s app.Session) error {
 		stored = s
+
 		return nil
 	})
 
-	rec := e.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"right password"}`)
+	rec := env.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"right password"}`)
+
 	var me api.Me
 	decodeBody(t, rec, http.StatusOK, &me)
-	if me.Id != u.ID || !me.Restricted || me.Email == nil || *me.Email != u.Email {
-		t.Fatalf("me = %+v, want %s, restricted", me, u.ID)
-	}
 
-	c := cookieNamed(t, rec, sessionCookieName)
-	if app.HashSessionID(c.Value) != stored.IDHash {
-		t.Fatal("the cookie does not carry the id of the session that was stored")
-	}
-	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != "/" {
-		t.Fatalf("cookie HttpOnly=%t Secure=%t SameSite=%v Path=%q; want HttpOnly, Secure, Lax, /",
-			c.HttpOnly, c.Secure, c.SameSite, c.Path)
-	}
-	if c.MaxAge != int(app.SessionTTL/time.Second) {
-		t.Fatalf("MaxAge = %d, want the session TTL %d", c.MaxAge, int(app.SessionTTL/time.Second))
-	}
-	if strings.Contains(rec.Body.String(), c.Value) {
-		t.Fatal("the session id is in the response body")
-	}
+	require.Equal(t, user.ID, me.Id, "me id")
+	require.True(t, me.Restricted, "me restricted")
+	require.NotNil(t, me.Email, "me email")
+	require.Equal(t, user.Email, *me.Email, "me email")
+
+	cookie := cookieNamed(t, rec, sessionCookieName)
+	require.Equal(t, stored.IDHash, app.HashSessionID(cookie.Value), "the cookie does not carry the id of the session that was stored")
+
+	require.True(t, cookie.HttpOnly, "cookie HttpOnly")
+	require.True(t, cookie.Secure, "cookie Secure")
+	require.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "cookie SameSite")
+	require.Equal(t, "/", cookie.Path, "cookie Path")
+	require.Equal(t, int(app.SessionTTL/time.Second), cookie.MaxAge, "MaxAge is not the session TTL")
+	require.NotContains(t, rec.Body.String(), cookie.Value, "the session id is in the response body")
 }
 
 // Secure comes off only when the deployment says so (local development over http).
 func TestTheCookieIsNotSecureOnlyWhenConfiguredSo(t *testing.T) {
 	e := newEnv(t, withInsecureCookies)
+
 	rec := e.do(http.MethodPost, "/api/auth/logout", "")
-	if c := cookieNamed(t, rec, sessionCookieName); c.Secure {
-		t.Fatal("Secure is set although the deployment turned it off")
-	}
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.False(t, c.Secure, "Secure is set although the deployment turned it off")
 }
 
 func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
@@ -106,9 +111,8 @@ func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
 		e.users.EXPECT().ByEmail(mock.Anything, "nobody@example.com").Return(person(""), app.ErrNotFound)
 		rec := e.do(http.MethodPost, "/api/auth/login", `{"email":"nobody@example.com","password":"guess"}`)
 		apiError(t, rec, http.StatusUnauthorized, codeInvalidCredentials)
-		if len(rec.Result().Cookies()) != 0 {
-			t.Fatal("a refused sign-in set a cookie")
-		}
+
+		require.Empty(t, rec.Result().Cookies(), "a refused sign-in set a cookie")
 	})
 
 	t.Run("locked address", func(t *testing.T) {
@@ -117,9 +121,8 @@ func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
 		e.attempts.EXPECT().Failures(mock.Anything, "person@example.com").Return(testMaxFailures, &until, nil)
 		rec := e.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"guess"}`)
 		apiError(t, rec, http.StatusTooManyRequests, codeLockedOut)
-		if got := rec.Header().Get("Retry-After"); got != "91" {
-			t.Fatalf("Retry-After = %q, want 91 (the lock's remaining time, rounded up)", got)
-		}
+
+		require.Equal(t, "91", rec.Header().Get("Retry-After"), "Retry-After is not the lock's remaining time, rounded up")
 	})
 
 	t.Run("store down", func(t *testing.T) {
@@ -138,21 +141,22 @@ func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
 // the cookie.
 func TestLogoutEndsTheSessionAndClearsTheCookie(t *testing.T) {
 	var events []app.AuditEvent
+
 	e := newEnv(t, auditInto(&events))
-	u := person("person@example.com")
-	cookie := e.signedIn(u)
+	user := person("person@example.com")
+	cookie := e.signedIn(user)
 	e.sessions.EXPECT().Delete(mock.Anything, app.HashSessionID(cookie.Value)).Return(nil)
 
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(cookie))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 || c.Value != "" {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
-	if len(events) != 1 || events[0].Action != "auth.signout" || events[0].ActorID != u.ID {
-		t.Fatalf("audit = %+v, want one auth.signout by %s", events, u.ID)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status")
+
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
+	require.Empty(t, c.Value, "cookie %+v was not cleared", c)
+
+	require.Len(t, events, 1, "audit")
+	require.Equal(t, "auth.signout", events[0].Action, "audit action")
+	require.Equal(t, user.ID, events[0].ActorID, "audit actor")
 }
 
 // A cookie whose session is already gone must still be cleared, or the browser keeps
@@ -160,13 +164,12 @@ func TestLogoutEndsTheSessionAndClearsTheCookie(t *testing.T) {
 func TestLogoutClearsTheCookieOfASessionAlreadyGone(t *testing.T) {
 	e := newEnv(t)
 	e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, app.ErrNotFound)
+
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "stale"}))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status")
+
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
 }
 
 func TestLogoutReportsASessionThatCouldNotBeEnded(t *testing.T) {
@@ -175,9 +178,9 @@ func TestLogoutReportsASessionThatCouldNotBeEnded(t *testing.T) {
 	e.sessions.EXPECT().Delete(mock.Anything, mock.Anything).Return(errors.New("connection refused"))
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(cookie))
 	apiError(t, rec, http.StatusInternalServerError, codeInternal)
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
+
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
 }
 
 func TestPasswordChange(t *testing.T) {
@@ -185,38 +188,36 @@ func TestPasswordChange(t *testing.T) {
 		u := person("person@example.com")
 		u.MustChangePassword = true
 		e.pwds.EXPECT().Get(mock.Anything, u.ID).Return("plain:temporary", nil, nil).Maybe()
+
 		return e.signedIn(u), app.Session{UserID: u.ID}
 	}
 
 	t.Run("a restricted session sets a new password without the old one", func(t *testing.T) {
-		e := newEnv(t)
-		cookie, sess := restricted(e)
-		e.pwds.EXPECT().Set(mock.Anything, sess.UserID, "plain:a long new password", (*time.Time)(nil)).Return(nil)
-		e.users.EXPECT().SetMustChangePassword(mock.Anything, sess.UserID, false).Return(nil)
+		env := newEnv(t)
+		cookie, sess := restricted(env)
+		env.pwds.EXPECT().Set(mock.Anything, sess.UserID, "plain:a long new password", (*time.Time)(nil)).Return(nil)
+		env.users.EXPECT().SetMustChangePassword(mock.Anything, sess.UserID, false).Return(nil)
 		// Every other session of the account ends; the one that changed it stays.
-		e.sessions.EXPECT().DeleteByUserExcept(mock.Anything, sess.UserID, app.HashSessionID(cookie.Value)).Return(nil)
-		rec := e.do(http.MethodPost, "/api/auth/password", `{"newPassword":"a long new password"}`, withCookie(cookie))
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-		}
+		env.sessions.EXPECT().DeleteByUserExcept(mock.Anything, sess.UserID, app.HashSessionID(cookie.Value)).Return(nil)
+
+		rec := env.do(http.MethodPost, "/api/auth/password", `{"newPassword":"a long new password"}`, withCookie(cookie))
+		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 	})
 
 	t.Run("too short", func(t *testing.T) {
 		e := newEnv(t)
 		cookie, _ := restricted(e)
+
 		rec := e.do(http.MethodPost, "/api/auth/password", `{"newPassword":"short"}`, withCookie(cookie))
-		if f := apiError(t, rec, http.StatusBadRequest, codeWeakPassword).Field; f == nil || *f != "newPassword" {
-			t.Fatalf("field = %v, want newPassword", f)
-		}
+		wantField(t, apiError(t, rec, http.StatusBadRequest, codeWeakPassword), "newPassword")
 	})
 
 	t.Run("empty", func(t *testing.T) {
 		e := newEnv(t)
 		cookie, _ := restricted(e)
+
 		rec := e.do(http.MethodPost, "/api/auth/password", `{"newPassword":""}`, withCookie(cookie))
-		if f := apiError(t, rec, http.StatusBadRequest, codeEmptyPassword).Field; f == nil || *f != "newPassword" {
-			t.Fatalf("field = %v, want newPassword", f)
-		}
+		wantField(t, apiError(t, rec, http.StatusBadRequest, codeEmptyPassword), "newPassword")
 	})
 
 	// A federated user has no local password to prove: the same answer as a wrong one.
@@ -232,16 +233,17 @@ func TestPasswordChange(t *testing.T) {
 	// Blocked between the session check and the change: the session no longer
 	// stands, so the answer is the signed-out one, not a credential verdict.
 	t.Run("blocked mid-request", func(t *testing.T) {
-		e := newEnv(t)
-		u := person("person@example.com")
-		blocked := u
+		env := newEnv(t)
+		user := person("person@example.com")
+		blocked := user
 		blocked.Status = identity.StatusBlocked
+
 		const id = "the-session"
-		e.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
-			Return(app.Session{IDHash: app.HashSessionID(id), UserID: u.ID, ExpiresAt: e.clock.Now().Add(time.Hour)}, nil)
-		e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil).Once()
-		e.users.EXPECT().ByID(mock.Anything, u.ID).Return(blocked, nil).Once()
-		rec := e.do(http.MethodPost, "/api/auth/password",
+		env.sessions.EXPECT().ByHash(mock.Anything, app.HashSessionID(id)).
+			Return(app.Session{IDHash: app.HashSessionID(id), UserID: user.ID, ExpiresAt: env.clock.Now().Add(time.Hour)}, nil)
+		env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil).Once()
+		env.users.EXPECT().ByID(mock.Anything, user.ID).Return(blocked, nil).Once()
+		rec := env.do(http.MethodPost, "/api/auth/password",
 			`{"currentPassword":"anything","newPassword":"a long new password"}`,
 			withCookie(&http.Cookie{Name: sessionCookieName, Value: id}))
 		apiError(t, rec, http.StatusUnauthorized, codeUnauthenticated)
@@ -256,33 +258,34 @@ func TestPasswordChange(t *testing.T) {
 		rec := e.do(http.MethodPost, "/api/auth/password",
 			`{"currentPassword":"a guess","newPassword":"a long new password"}`, withCookie(e.signedIn(u)))
 		apiError(t, rec, http.StatusUnauthorized, codeInvalidCredentials)
-		if len(rec.Result().Cookies()) != 0 {
-			t.Fatal("a wrong current password touched the session cookie")
-		}
+
+		require.Empty(t, rec.Result().Cookies(), "a wrong current password touched the session cookie")
 	})
 }
 
 // startOIDC redirects to the IdP and hands back the sealed challenge; the helper
 // returns both.
-func startOIDC(t *testing.T, e *testEnv) (*http.Cookie, url.Values) {
+func startOIDC(t *testing.T, env *testEnv) (*http.Cookie, url.Values) {
 	t.Helper()
-	e.idp.EXPECT().AuthURL(mock.Anything).RunAndReturn(func(ch app.Challenge) string {
+	env.idp.EXPECT().AuthURL(mock.Anything).RunAndReturn(func(ch app.Challenge) string {
 		return "https://idp.example.com/auth?state=" + url.QueryEscape(ch.State)
 	})
-	rec := e.do(http.MethodGet, "/api/auth/oidc/start", "")
-	if rec.Code != http.StatusFound {
-		t.Fatalf("start: status = %d, want 302", rec.Code)
-	}
+
+	rec := env.do(http.MethodGet, "/api/auth/oidc/start", "")
+	require.Equal(t, http.StatusFound, rec.Code, "start: status")
+
 	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil || loc.Host != "idp.example.com" {
-		t.Fatalf("start redirected to %q, want the IdP", rec.Header().Get("Location"))
-	}
-	c := cookieNamed(t, rec, oidcCookieName)
-	if !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteLaxMode || c.Path != oidcCookiePath ||
-		c.MaxAge != int(oidcChallengeTTL/time.Second) {
-		t.Fatalf("challenge cookie %+v: want HttpOnly, Secure, Lax, path %s, ten minutes", c, oidcCookiePath)
-	}
-	return c, loc.Query()
+	require.NoError(t, err, "start redirected to %q", rec.Header().Get("Location"))
+	require.Equal(t, "idp.example.com", loc.Host, "start did not redirect to the IdP")
+
+	cookie := cookieNamed(t, rec, oidcCookieName)
+	require.True(t, cookie.HttpOnly, "challenge cookie HttpOnly")
+	require.True(t, cookie.Secure, "challenge cookie Secure")
+	require.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "challenge cookie SameSite")
+	require.Equal(t, oidcCookiePath, cookie.Path, "challenge cookie Path")
+	require.Equal(t, int(oidcChallengeTTL/time.Second), cookie.MaxAge, "challenge cookie MaxAge")
+
+	return cookie, loc.Query()
 }
 
 func TestOIDCStartIsNotFoundWhenOIDCIsOff(t *testing.T) {
@@ -292,35 +295,38 @@ func TestOIDCStartIsNotFoundWhenOIDCIsOff(t *testing.T) {
 // The challenge travels in the cookie, sealed: the verifier the IdP exchange needs is
 // not readable in it, and the callback that presents it signs the person in.
 func TestOIDCCallbackCompletesTheLoginTheCookieStarted(t *testing.T) {
-	e := newEnv(t, withOIDC)
-	cookie, q := startOIDC(t, e)
+	env := newEnv(t, withOIDC)
+	cookie, query := startOIDC(t, env)
 
-	u := person("person@example.com")
+	user := person("person@example.com")
+
 	var exchanged app.Challenge
-	e.idp.EXPECT().Exchange(mock.Anything, "the-code", mock.Anything).RunAndReturn(
+
+	env.idp.EXPECT().Exchange(mock.Anything, "the-code", mock.Anything).RunAndReturn(
 		func(_ context.Context, _ string, ch app.Challenge) (app.Claims, error) {
 			exchanged = ch
+
 			return app.Claims{Issuer: "https://idp.example.com", Subject: "sub-1"}, nil
 		})
-	e.idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-1").Return(u.ID, nil)
-	e.users.EXPECT().ByID(mock.Anything, u.ID).Return(u, nil)
-	e.sessions.EXPECT().Create(mock.Anything, mock.Anything).Return(nil)
+	env.idents.EXPECT().BySubject(mock.Anything, "https://idp.example.com", "sub-1").Return(user.ID, nil)
+	env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
+	env.sessions.EXPECT().Create(mock.Anything, mock.Anything).Return(nil)
 
-	if strings.Contains(cookie.Value, q.Get("state")) {
-		t.Fatal("the challenge cookie carries the state in the clear")
-	}
-	rec := e.do(http.MethodGet, "/api/auth/oidc/callback?code=the-code&state="+url.QueryEscape(q.Get("state")), "",
+	require.NotContains(t, cookie.Value, query.Get("state"), "the challenge cookie carries the state in the clear")
+
+	rec := env.do(http.MethodGet, "/api/auth/oidc/callback?code=the-code&state="+url.QueryEscape(query.Get("state")), "",
 		withCookie(cookie))
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
-		t.Fatalf("callback: status %d to %q, want 302 to /", rec.Code, rec.Header().Get("Location"))
-	}
-	if exchanged.State != q.Get("state") || exchanged.Verifier == "" || strings.Contains(cookie.Value, exchanged.Verifier) {
-		t.Fatalf("the exchange did not get the sealed challenge back intact")
-	}
+	require.Equal(t, http.StatusFound, rec.Code, "callback status")
+	require.Equal(t, "/", rec.Header().Get("Location"), "callback redirect")
+
+	require.Equal(t, query.Get("state"), exchanged.State, "the exchange did not get the sealed state back")
+	require.NotEmpty(t, exchanged.Verifier, "the exchange got no verifier")
+	require.NotContains(t, cookie.Value, exchanged.Verifier, "the challenge cookie carries the verifier in the clear")
+
 	cookieNamed(t, rec, sessionCookieName)
-	if c := cookieNamed(t, rec, oidcCookieName); c.MaxAge >= 0 {
-		t.Fatal("the spent challenge cookie was not cleared")
-	}
+
+	c := cookieNamed(t, rec, oidcCookieName)
+	require.Negative(t, c.MaxAge, "the spent challenge cookie was not cleared")
 }
 
 // Every failure is a redirect to the login page, never a JSON body: the callback is a
@@ -332,63 +338,85 @@ func TestOIDCCallbackFailuresRedirectToTheLoginPage(t *testing.T) {
 		want  string
 	}{
 		{"no challenge cookie", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			_, q := startOIDC(t, e)
+
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), nil
 		}, oidcFailed},
 		{"tampered cookie", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, q := startOIDC(t, e)
 			b := []byte(c.Value)
 			b[len(b)/2] ^= 1
+
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), &http.Cookie{Name: oidcCookieName, Value: string(b)}
 		}, oidcFailed},
 		{"expired challenge", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, q := startOIDC(t, e)
 			e.clock.advance(oidcChallengeTTL)
+
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcFailed},
 		{"state mismatch", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, _ := startOIDC(t, e)
+
 			return "code=c&state=someone-elses", c
 		}, oidcFailed},
 		{"unknown subject, sign-up closed", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, q := startOIDC(t, e)
 			e.idp.EXPECT().Exchange(mock.Anything, "c", mock.Anything).Return(app.Claims{Subject: "stranger"}, nil)
 			e.idents.EXPECT().BySubject(mock.Anything, mock.Anything, "stranger").Return(uuid.Nil, app.ErrNotFound)
+
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcForbidden},
 		{"IdP unreachable", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, q := startOIDC(t, e)
 			e.idp.EXPECT().Exchange(mock.Anything, "c", mock.Anything).Return(app.Claims{}, errors.New("dial tcp: timeout"))
+
 			return "code=c&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcFailed},
 		{"IdP denied access", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, q := startOIDC(t, e)
+
 			return "error=access_denied&state=" + url.QueryEscape(q.Get("state")), c
 		}, oidcForbidden},
 		{"IdP denial for another login", func(t *testing.T, e *testEnv) (string, *http.Cookie) {
+			t.Helper()
+
 			c, _ := startOIDC(t, e)
+
 			return "error=access_denied&state=someone-elses", c
 		}, oidcFailed},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			e := newEnv(t, withOIDC)
-			query, cookie := c.setup(t, e)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newEnv(t, withOIDC)
+			query, cookie := tc.setup(t, env)
+
 			var mods []func(*http.Request)
 			if cookie != nil {
 				mods = append(mods, withCookie(cookie))
 			}
-			rec := e.do(http.MethodGet, "/api/auth/oidc/callback?"+query, "", mods...)
-			if rec.Code != http.StatusFound || rec.Header().Get("Location") != c.want {
-				t.Fatalf("status %d to %q, want 302 to %s", rec.Code, rec.Header().Get("Location"), c.want)
-			}
-			if rec.Header().Get("Content-Type") == "application/json" {
-				t.Fatal("a navigational route answered with JSON")
-			}
+
+			rec := env.do(http.MethodGet, "/api/auth/oidc/callback?"+query, "", mods...)
+			require.Equal(t, http.StatusFound, rec.Code, "status")
+			require.Equal(t, tc.want, rec.Header().Get("Location"), "redirect")
+			require.NotEqual(t, "application/json", rec.Header().Get("Content-Type"), "a navigational route answered with JSON")
+
 			for _, sc := range rec.Result().Cookies() {
-				if sc.Name == sessionCookieName {
-					t.Fatal("a refused login set a session cookie")
-				}
+				require.NotEqual(t, sessionCookieName, sc.Name, "a refused login set a session cookie")
 			}
 		})
 	}
