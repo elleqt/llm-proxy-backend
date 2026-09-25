@@ -22,6 +22,8 @@ import (
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // fakeOAuth is upstream's management start handler with the vendor's code
@@ -152,7 +154,7 @@ func (f *fakeOAuth) awaitStopped(t *testing.T, state string) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("upstream's waiter for the login is still running: the login was not ended")
+			require.Fail(t, "upstream's waiter for the login is still running: the login was not ended")
 		}
 	}
 }
@@ -222,14 +224,10 @@ func stateOf(t *testing.T, authURL string) string {
 	t.Helper()
 
 	u, err := url.Parse(authURL)
-	if err != nil {
-		t.Fatalf("auth URL %q: %v", authURL, err)
-	}
+	require.NoError(t, err, "auth URL %q", authURL)
 
 	state := u.Query().Get("state")
-	if state == "" {
-		t.Fatalf("auth URL %q carries no state", authURL)
-	}
+	require.NotEmpty(t, state, "auth URL %q carries no state", authURL)
 
 	return state
 }
@@ -250,9 +248,7 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 	srv := startBooted(t, params)
 	grant := claudeGrant(t)
 	login, _ := fakeLogin(t, func(code string) *coreauth.Auth {
-		if code != "code-1" {
-			t.Errorf("the exchange got code %q, want the pasted one", code)
-		}
+		assert.Equal(t, "code-1", code, "the exchange got a code other than the pasted one")
 
 		return grant
 	}, srv.gateway.AddAccount)
@@ -260,38 +256,27 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 	before := time.Now()
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
-	if session.SessionID == "" || session.SessionID == stateOf(t, session.AuthURL) {
-		t.Fatalf("session id %q: want our own id, not upstream's state", session.SessionID)
-	}
+	require.NotEmpty(t, session.SessionID, "session id: want our own id")
+	require.NotEqual(t, stateOf(t, session.AuthURL), session.SessionID, "session id: want our own id, not upstream's state")
 
-	if session.ExpiresAt.Before(before.Add(loginTTL)) || session.ExpiresAt.After(time.Now().Add(loginTTL)) {
-		t.Fatalf("ExpiresAt = %v, want %s after the start", session.ExpiresAt, loginTTL)
-	}
+	require.False(t, session.ExpiresAt.Before(before.Add(loginTTL)), "ExpiresAt = %v, want %s after the start", session.ExpiresAt, loginTTL)
+	require.False(t, session.ExpiresAt.After(time.Now().Add(loginTTL)), "ExpiresAt = %v, want %s after the start", session.ExpiresAt, loginTTL)
 
 	account, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1"))
-	if err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
+	require.NoError(t, err, "CompleteLogin")
 
-	if account.ID != grant.ID || account.Provider != "claude" {
-		t.Fatalf("CompleteLogin returned %+v, want account %s of provider claude", account, grant.ID)
-	}
+	require.Equal(t, grant.ID, account.ID, "CompleteLogin account")
+	require.Equal(t, "claude", account.Provider, "CompleteLogin provider")
 
-	if _, ok := params.CoreAuth.GetByID(grant.ID); !ok {
-		t.Fatal("the completed login's account is not held by the manager")
-	}
+	_, ok := params.CoreAuth.GetByID(grant.ID)
+	require.True(t, ok, "the completed login's account is not held by the manager")
 
-	if registeredModels(grant.ID) == 0 {
-		t.Fatal("the completed login's account has no registered models: it is not routable")
-	}
+	require.NotZero(t, registeredModels(grant.ID), "the completed login's account has no registered models: it is not routable")
 
-	if _, err := os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName)); err != nil {
-		t.Fatalf("the completed login's credential was not persisted: %v", err)
-	}
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
+	require.NoError(t, err, "the completed login's credential was not persisted")
 }
 
 // claudeTokenFile is a login record's token storage, as upstream's
@@ -356,43 +341,25 @@ func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
 	login, _ := fakeLogin(t, func(string) *coreauth.Auth { return grant }, r.gateway.AddAccount)
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	account, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1"))
-	if err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
+	require.NoError(t, err, "CompleteLogin")
 
-	if account.ID != grant.FileName || account.Email != storage.email {
-		t.Fatalf("CompleteLogin returned %+v, want account %s of %s", account, grant.FileName, storage.email)
-	}
+	require.Equal(t, grant.FileName, account.ID, "CompleteLogin account")
+	require.Equal(t, storage.email, account.Email, "CompleteLogin account email")
 
 	held, ok := params.CoreAuth.GetByID(account.ID)
-	if !ok {
-		t.Fatal("the completed login's account is not held by the manager")
-	}
+	require.True(t, ok, "the completed login's account is not held by the manager")
 
-	if got := held.Metadata["access_token"]; got != storage.accessToken {
-		t.Errorf("held account's Metadata[access_token] = %v, want the login's token: requests would carry no credential", got)
-	}
-
-	if got := held.Metadata["refresh_token"]; got != storage.refreshToken {
-		t.Errorf("held account's Metadata[refresh_token] = %v, want the login's refresh token", got)
-	}
-
-	if got, want := held.Attributes[coreauth.AttributePath], filepath.Join(params.Config.AuthDir, grant.FileName); got != want {
-		t.Errorf("held account's path attribute = %q, want its credential %q", got, want)
-	}
-
-	if held.Status != coreauth.StatusActive || held.Disabled {
-		t.Errorf("held account is status %q, disabled=%t; want active", held.Status, held.Disabled)
-	}
-
-	if registeredModels(account.ID) == 0 {
-		t.Error("the completed login's account has no registered models: it is not routable")
-	}
+	assert.Equal(t, storage.accessToken, held.Metadata["access_token"],
+		"held account's Metadata[access_token]: want the login's token, requests would carry no credential")
+	assert.Equal(t, storage.refreshToken, held.Metadata["refresh_token"], "held account's Metadata[refresh_token]")
+	assert.Equal(t, filepath.Join(params.Config.AuthDir, grant.FileName), held.Attributes[coreauth.AttributePath],
+		"held account's path attribute: want its credential")
+	assert.Equal(t, coreauth.StatusActive, held.Status, "held account status")
+	assert.False(t, held.Disabled, "held account is disabled")
+	assert.NotZero(t, registeredModels(account.ID), "the completed login's account has no registered models: it is not routable")
 }
 
 // TestLoginWithAnUnsavedCredentialAddsNothing: when the token store cannot
@@ -407,25 +374,18 @@ func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
 	login, _ := fakeLogin(t, func(string) *coreauth.Auth { return grant }, r.gateway.AddAccount)
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1")); !errors.Is(err, errWrite) {
-		t.Fatalf("CompleteLogin with a failing credential write = %v, want the write's error", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "code-1"))
+	require.ErrorIs(t, err, errWrite, "CompleteLogin with a failing credential write: want the write's error")
 
-	if got, ok := params.CoreAuth.GetByID(grant.ID); ok {
-		t.Fatalf("the unsaved login's account is held (disabled=%t)", got.Disabled)
-	}
+	got, ok := params.CoreAuth.GetByID(grant.ID)
+	require.False(t, ok, "the unsaved login's account is held (disabled=%t)", got != nil && got.Disabled)
 
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("the unsaved login's account has %d registered models", n)
-	}
+	require.Zero(t, registeredModels(grant.ID), "the unsaved login's account has registered models")
 
-	if _, err := os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName)); !os.IsNotExist(err) {
-		t.Fatalf("the unsaved login's credential is in the auth directory (stat: %v)", err)
-	}
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
+	require.ErrorIs(t, err, os.ErrNotExist, "the unsaved login's credential is in the auth directory")
 }
 
 // listeningSockets returns the inodes of this process's listening TCP
@@ -479,31 +439,27 @@ func TestLoginStartsWithoutAListener(t *testing.T) {
 	t.Cleanup(func() { endLogins(login) })
 
 	before := listeningSockets(t)
-	if len(before) == 0 {
-		t.Fatal("found no listening socket of this process, not even the gateway's: the probe proves nothing")
-	}
+	require.NotEmpty(t, before, "found no listening socket of this process, not even the gateway's: the probe proves nothing")
 
 	for _, provider := range []string{"claude", "chatgpt"} {
 		session, err := login.StartLogin(context.Background(), provider)
-		if err != nil {
-			t.Fatalf("StartLogin(%s): %v", provider, err)
-		}
+		require.NoError(t, err, "StartLogin(%s)", provider)
+
+		const want = "want the vendor's https authorisation URL with state and PKCE challenge"
 
 		u, err := url.Parse(session.AuthURL)
-		if err != nil || u.Scheme != "https" || u.Query().Get("state") == "" || u.Query().Get("code_challenge") == "" {
-			t.Fatalf("StartLogin(%s) AuthURL = %q, want the vendor's https authorisation URL with state and PKCE challenge", provider, session.AuthURL)
-		}
+		require.NoError(t, err, "StartLogin(%s) AuthURL = %q: %s", provider, session.AuthURL, want)
+		require.Equal(t, "https", u.Scheme, "StartLogin(%s) AuthURL = %q: %s", provider, session.AuthURL, want)
+		require.NotEmpty(t, u.Query().Get("state"), "StartLogin(%s) AuthURL = %q: %s", provider, session.AuthURL, want)
+		require.NotEmpty(t, u.Query().Get("code_challenge"), "StartLogin(%s) AuthURL = %q: %s", provider, session.AuthURL, want)
 	}
 
 	for inode := range listeningSockets(t) {
-		if !before[inode] {
-			t.Fatalf("a listening socket (inode %s) appeared while logins were pending", inode)
-		}
+		require.True(t, before[inode], "a listening socket (inode %s) appeared while logins were pending", inode)
 	}
 
-	if _, err := login.StartLogin(context.Background(), "codex"); !errors.Is(err, app.ErrUnsupportedProvider) {
-		t.Fatalf("StartLogin(codex) = %v, want ErrUnsupportedProvider: the wizard speaks policy names", err)
-	}
+	_, err := login.StartLogin(context.Background(), "codex")
+	require.ErrorIs(t, err, app.ErrUnsupportedProvider, "StartLogin(codex): the wizard speaks policy names")
 }
 
 // TestLoginHandsTheCallbackToUpstream runs upstream's real Codex flow with the
@@ -519,29 +475,21 @@ func TestLoginHandsTheCallbackToUpstream(t *testing.T) {
 	t.Cleanup(func() { endLogins(login) })
 
 	session, err := login.StartLogin(context.Background(), "chatgpt")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	state := stateOf(t, session.AuthURL)
 
 	_, err = login.CompleteLogin(context.Background(), session.SessionID,
 		"http://localhost:1455/auth/callback?code=vendor-code&state="+state)
-	if !errors.Is(err, app.ErrLoginFailed) {
-		t.Fatalf("CompleteLogin with the exchange failing = %v, want ErrLoginFailed", err)
-	}
+	require.ErrorIs(t, err, app.ErrLoginFailed, "CompleteLogin with the exchange failing")
 
-	if strings.Contains(err.Error(), "vendor-code") || strings.Contains(err.Error(), state) {
-		t.Fatalf("the error %q carries the code or state", err)
-	}
+	require.NotContains(t, err.Error(), "vendor-code", "the error carries the code")
+	require.NotContains(t, err.Error(), state, "the error carries the state")
 
-	if _, err := os.Stat(filepath.Join(params.Config.AuthDir, ".oauth-codex-"+state+".oauth")); !os.IsNotExist(err) {
-		t.Fatalf("the callback file is still in the auth directory (stat: %v): upstream did not read it", err)
-	}
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, ".oauth-codex-"+state+".oauth"))
+	require.ErrorIs(t, err, os.ErrNotExist, "the callback file is still in the auth directory: upstream did not read it")
 
-	if n := len(params.CoreAuth.List()); n != 0 {
-		t.Fatalf("a failed login left %d accounts", n)
-	}
+	require.Empty(t, params.CoreAuth.List(), "a failed login left accounts")
 }
 
 func net127(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
@@ -554,22 +502,17 @@ func TestLoginRefusesACallbackForAnotherSignIn(t *testing.T) {
 	login, vendor := fakeLogin(t, codeGrant, adds.add)
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	other := "http://localhost:54545/callback?code=stolen&state=someone-elses-state"
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, other); !errors.Is(err, app.ErrLoginFailed) {
-		t.Fatalf("CompleteLogin with another sign-in's callback = %v, want ErrLoginFailed", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, other)
+	require.ErrorIs(t, err, app.ErrLoginFailed, "CompleteLogin with another sign-in's callback")
 
-	if n := adds.count(); n != 0 || vendor.hookCalls() != 0 {
-		t.Fatalf("a callback for another sign-in reached the exchange (%d hook calls) or added %d accounts", vendor.hookCalls(), n)
-	}
+	require.Zero(t, adds.count(), "a callback for another sign-in added accounts")
+	require.Zero(t, vendor.hookCalls(), "a callback for another sign-in reached the exchange")
 
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "own")); err != nil {
-		t.Fatalf("CompleteLogin with the session's own callback after a refused one: %v", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "own"))
+	require.NoError(t, err, "CompleteLogin with the session's own callback after a refused one")
 }
 
 // TestLoginSessionIsUsedOnce: a completed session, and one nobody issued, are
@@ -579,26 +522,19 @@ func TestLoginSessionIsUsedOnce(t *testing.T) {
 	login, _ := fakeLogin(t, codeGrant, adds.add)
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	callback := callbackFor(t, session.AuthURL, "code")
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callback); err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callback)
+	require.NoError(t, err, "CompleteLogin")
 
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callback); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("second CompleteLogin = %v, want ErrLoginExpired", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callback)
+	require.ErrorIs(t, err, app.ErrLoginExpired, "second CompleteLogin")
 
-	if _, err := login.CompleteLogin(context.Background(), "never-issued", callback); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("CompleteLogin of an unknown session = %v, want ErrLoginExpired", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), "never-issued", callback)
+	require.ErrorIs(t, err, app.ErrLoginExpired, "CompleteLogin of an unknown session")
 
-	if n := adds.count(); n != 1 {
-		t.Fatalf("%d accounts added, want 1", n)
-	}
+	require.Equal(t, 1, adds.count(), "accounts added")
 }
 
 // TestLoginExpiresAndIsCleanedUp: an unclaimed login expires, upstream's
@@ -610,24 +546,18 @@ func TestLoginExpiresAndIsCleanedUp(t *testing.T) {
 	login.max = 1
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	vendor.awaitStopped(t, stateOf(t, session.AuthURL))
 
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "late")); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("CompleteLogin after expiry = %v, want ErrLoginExpired", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "late"))
+	require.ErrorIs(t, err, app.ErrLoginExpired, "CompleteLogin after expiry")
 
-	if n := adds.count(); n != 0 {
-		t.Fatalf("an expired login added %d accounts", n)
-	}
+	require.Zero(t, adds.count(), "an expired login added accounts")
 
 	login.ttl = loginTTL
-	if _, err := login.StartLogin(context.Background(), "claude"); err != nil {
-		t.Fatalf("StartLogin after the only slot's login expired: %v", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.NoError(t, err, "StartLogin after the only slot's login expired")
 }
 
 // TestPendingLoginsAreBounded: past the bound StartLogin refuses with its own
@@ -638,33 +568,25 @@ func TestPendingLoginsAreBounded(t *testing.T) {
 	login.max = 2
 
 	first, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin 1: %v", err)
-	}
+	require.NoError(t, err, "StartLogin 1")
 
-	if _, err := login.StartLogin(context.Background(), "claude"); err != nil {
-		t.Fatalf("StartLogin 2: %v", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.NoError(t, err, "StartLogin 2")
 
-	if _, err := login.StartLogin(context.Background(), "claude"); !errors.Is(err, app.ErrLoginsBusy) {
-		t.Fatalf("StartLogin past the bound = %v, want ErrLoginsBusy", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.ErrorIs(t, err, app.ErrLoginsBusy, "StartLogin past the bound")
 
 	vendor.mu.Lock()
 	started := len(vendor.states)
 	vendor.mu.Unlock()
 
-	if started != 2 {
-		t.Fatalf("upstream started %d logins, want 2: the refused one must not start", started)
-	}
+	require.Equal(t, 2, started, "upstream started logins: the refused one must not start")
 
-	if _, err := login.CompleteLogin(context.Background(), first.SessionID, callbackFor(t, first.AuthURL, "code")); err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
+	_, err = login.CompleteLogin(context.Background(), first.SessionID, callbackFor(t, first.AuthURL, "code"))
+	require.NoError(t, err, "CompleteLogin")
 
-	if _, err := login.StartLogin(context.Background(), "claude"); err != nil {
-		t.Fatalf("StartLogin after a login finished: %v", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.NoError(t, err, "StartLogin after a login finished")
 }
 
 // TestLoginCompletesOnlyThroughComplete: a callback that reaches upstream any
@@ -675,32 +597,21 @@ func TestLoginCompletesOnlyThroughComplete(t *testing.T) {
 	login, vendor := fakeLogin(t, codeGrant, adds.add)
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	state := stateOf(t, session.AuthURL)
-	if _, err := sdkapi.WriteOAuthCallbackFileForPendingSession(vendor.authDir, "anthropic", state, "planted", ""); err != nil {
-		t.Fatalf("write a callback file: %v", err)
-	}
+	_, err = sdkapi.WriteOAuthCallbackFileForPendingSession(vendor.authDir, "anthropic", state, "planted", "")
+	require.NoError(t, err, "write a callback file")
 
 	vendor.awaitStopped(t, state)
 
-	if vendor.hookCalls() != 1 {
-		t.Fatalf("the planted callback reached the hook %d times, want 1: the test did not exercise the hook", vendor.hookCalls())
-	}
+	require.Equal(t, 1, vendor.hookCalls(), "the planted callback reached the hook: the test did not exercise the hook")
+	require.Zero(t, adds.count(), "a callback the gateway did not complete added accounts")
 
-	if n := adds.count(); n != 0 {
-		t.Fatalf("a callback the gateway did not complete added %d accounts", n)
-	}
+	_, err = login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "planted"))
+	require.ErrorIs(t, err, app.ErrLoginExpired, "CompleteLogin after upstream consumed the session")
 
-	if _, err := login.CompleteLogin(context.Background(), session.SessionID, callbackFor(t, session.AuthURL, "planted")); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("CompleteLogin after upstream consumed the session = %v, want ErrLoginExpired", err)
-	}
-
-	if n := adds.count(); n != 0 {
-		t.Fatalf("%d accounts added, want none", n)
-	}
+	require.Zero(t, adds.count(), "accounts added, want none")
 }
 
 // TestLoginGivenUpDuringTheExchangeAddsNothing: a completion given up (the
@@ -714,33 +625,26 @@ func TestLoginGivenUpDuringTheExchangeAddsNothing(t *testing.T) {
 	login.max = 1
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	state := stateOf(t, session.AuthURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	if _, err := login.CompleteLogin(ctx, session.SessionID, callbackFor(t, session.AuthURL, "code")); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("CompleteLogin given up = %v, want the context's error", err)
-	}
+	_, err = login.CompleteLogin(ctx, session.SessionID, callbackFor(t, session.AuthURL, "code"))
+	require.ErrorIs(t, err, context.DeadlineExceeded, "CompleteLogin given up: want the context's error")
 
-	if sdkapi.IsOAuthSessionPending(state, "anthropic") {
-		t.Fatal("upstream's session is still pending after the login was given up")
-	}
+	require.False(t, sdkapi.IsOAuthSessionPending(state, "anthropic"), "upstream's session is still pending after the login was given up")
 
 	close(vendor.hold)
 	vendor.awaitStopped(t, state)
 
-	if n := adds.count(); n != 0 || vendor.hookCalls() != 0 {
-		t.Fatalf("an exchange finishing after the give-up reached the hook %d times and added %d accounts", vendor.hookCalls(), n)
-	}
+	require.Zero(t, adds.count(), "an exchange finishing after the give-up added accounts")
+	require.Zero(t, vendor.hookCalls(), "an exchange finishing after the give-up reached the hook")
 
-	if _, err := login.StartLogin(context.Background(), "claude"); err != nil {
-		t.Fatalf("StartLogin after the only slot's login was given up: %v", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.NoError(t, err, "StartLogin after the only slot's login was given up")
 }
 
 // TestLoginStartFailureFreesTheSlot: a start upstream refuses frees its slot
@@ -751,15 +655,13 @@ func TestLoginStartFailureFreesTheSlot(t *testing.T) {
 	vendor.failStart = true
 
 	_, err := login.StartLogin(context.Background(), "claude")
-	if err == nil || strings.Contains(err.Error(), "%!") {
-		t.Fatalf("StartLogin refused upstream = %v, want a readable error", err)
-	}
+	require.Error(t, err, "StartLogin refused upstream: want a readable error")
+	require.NotContains(t, err.Error(), "%!", "StartLogin refused upstream: want a readable error")
 
 	vendor.failStart = false
 
-	if _, err := login.StartLogin(context.Background(), "claude"); err != nil {
-		t.Fatalf("StartLogin after a failed start: %v", err)
-	}
+	_, err = login.StartLogin(context.Background(), "claude")
+	require.NoError(t, err, "StartLogin after a failed start")
 }
 
 // TestLoginFailureCarriesNoCallbackSecret: a vendor refusal is login_failed,
@@ -773,9 +675,7 @@ func TestLoginFailureCarriesNoCallbackSecret(t *testing.T) {
 	}
 
 	session, err := login.StartLogin(context.Background(), "claude")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	const code = "SECRET-AUTH-CODE-4242"
 
@@ -783,17 +683,11 @@ func TestLoginFailureCarriesNoCallbackSecret(t *testing.T) {
 	callback := callbackFor(t, session.AuthURL, code)
 
 	_, err = login.CompleteLogin(context.Background(), session.SessionID, callback)
-	if !errors.Is(err, app.ErrLoginFailed) {
-		t.Fatalf("CompleteLogin with a refused exchange = %v, want ErrLoginFailed", err)
-	}
+	require.ErrorIs(t, err, app.ErrLoginFailed, "CompleteLogin with a refused exchange")
 
 	for _, secret := range []string{code, state, callback} {
-		if strings.Contains(err.Error(), secret) {
-			t.Fatalf("the error %q carries %q", err, secret)
-		}
+		require.NotContains(t, err.Error(), secret, "the error carries a secret")
 	}
 
-	if n := adds.count(); n != 0 {
-		t.Fatalf("a failed login added %d accounts", n)
-	}
+	require.Zero(t, adds.count(), "a failed login added accounts")
 }

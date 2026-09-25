@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -17,11 +16,13 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestAdminRepos covers the repository methods the administration service reads and
 // writes through, on one container.
-func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
+func TestAdminRepos(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
 	users := postgres.NewUserRepo(pool)
@@ -40,9 +41,7 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			Role: identity.RoleUser, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
 			CreatedAt: base.Add(time.Duration(seq) * time.Second),
 		}
-		if err := users.Create(ctx, user); err != nil {
-			t.Fatalf("create %s: %v", name, err)
-		}
+		require.NoError(t, users.Create(ctx, user), "create %s", name)
 
 		return user
 	}
@@ -56,9 +55,7 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		bot := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 
 		bot.CreatedAt = base.Add(time.Duration(seq) * time.Second)
-		if err := users.Create(ctx, bot); err != nil {
-			t.Fatalf("create bot: %v", err)
-		}
+		require.NoError(t, users.Create(ctx, bot), "create bot")
 
 		eve := human(t, "eve@example.com", "Eve")
 		fay := human(t, "fay@example.com", "Fay")
@@ -66,15 +63,11 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 
 		lapsed := time.Now().UTC().Add(-time.Minute)
 		for id, exp := range map[uuid.UUID]*time.Time{alice.ID: nil, eve.ID: nil, fay.ID: &lapsed} {
-			if err := passwords.Set(ctx, id, "hash", exp); err != nil {
-				t.Fatalf("set password: %v", err)
-			}
+			require.NoError(t, passwords.Set(ctx, id, "hash", exp), "set password")
 		}
 
 		for i, id := range []uuid.UUID{bob.ID, eve.ID, gus.ID} {
-			if err := idents.Link(ctx, id, "issuer-a", "subject-"+string(rune('a'+i))); err != nil {
-				t.Fatalf("link: %v", err)
-			}
+			require.NoError(t, idents.Link(ctx, id, "issuer-a", "subject-"+string(rune('a'+i))), "link")
 		}
 
 		addPending(ctx, t, pool, carol.ID, "issuer-a", carol.Email, time.Hour)
@@ -98,44 +91,32 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		}
 
 		all, err := users.List(ctx)
-		if err != nil {
-			t.Fatalf("List: %v", err)
-		}
+		require.NoError(t, err, "List")
 
-		if got, order := viewIDs(all), []uuid.UUID{alice.ID, bob.ID, carol.ID, dave.ID, bot.ID, eve.ID, fay.ID, gus.ID}; !slices.Equal(got, order) {
-			t.Fatalf("List order = %v, want oldest first %v", got, order)
-		}
+		order := []uuid.UUID{alice.ID, bob.ID, carol.ID, dave.ID, bot.ID, eve.ID, fay.ID, gus.ID}
+		require.Equal(t, order, viewIDs(all), "List order, want oldest first")
 
 		for _, view := range all {
 			expected := want[view.User.ID]
-			if !slices.Equal(view.SignIn, expected.signIn) {
-				t.Errorf("%s: sign-in = %v, want %v", view.User.DisplayName, view.SignIn, expected.signIn)
-			}
-
-			if (view.InvitationExpiresAt != nil) != expected.invited {
-				t.Errorf("%s: invitation expiry = %v, want set: %v", view.User.DisplayName, view.InvitationExpiresAt, expected.invited)
-			}
+			assert.Equal(t, expected.signIn, view.SignIn, "%s: sign-in", view.User.DisplayName)
+			assert.Equal(t, expected.invited, view.InvitationExpiresAt != nil,
+				"%s: invitation expiry = %v, want set: %v", view.User.DisplayName, view.InvitationExpiresAt, expected.invited)
 		}
 
+		// want the lapsed invitation's expiry
 		daveView, err := users.View(ctx, dave.ID)
-		if err != nil {
-			t.Fatalf("View: %v", err)
-		}
+		require.NoError(t, err, "View")
+		require.Equal(t, dave.Email, daveView.User.Email, "View email")
+		require.NotNil(t, daveView.InvitationExpiresAt, "View invitation expiry")
+		require.True(t, daveView.InvitationExpiresAt.Before(time.Now()), "View invitation expiry %v is not lapsed", *daveView.InvitationExpiresAt)
 
-		if daveView.User.Email != dave.Email || daveView.InvitationExpiresAt == nil || !daveView.InvitationExpiresAt.Before(time.Now()) {
-			t.Fatalf("View = %+v, want the lapsed invitation's expiry", daveView)
-		}
-
-		if _, err := users.View(ctx, uuid.New()); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("View unknown: err = %v, want app.ErrNotFound", err)
-		}
+		_, err = users.View(ctx, uuid.New())
+		require.ErrorIs(t, err, app.ErrNotFound, "View unknown")
 	})
 
 	t.Run("UpdateAdminState", func(t *testing.T) {
 		user := human(t, "hana@example.com", "Hana")
-		if err := users.SetMustChangePassword(ctx, user.ID, true); err != nil {
-			t.Fatalf("SetMustChangePassword: %v", err)
-		}
+		require.NoError(t, users.SetMustChangePassword(ctx, user.ID, true), "SetMustChangePassword")
 		// A rename and a block racing each other: each writes only its own column,
 		// so both land whichever commits first.
 		name, blocked := "Hana H.", identity.StatusBlocked
@@ -152,56 +133,45 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 
 		wg.Wait()
 
-		if err := errors.Join(errs...); err != nil {
-			t.Fatalf("UpdateAdminState: %v", err)
-		}
+		require.NoError(t, errors.Join(errs...), "UpdateAdminState")
 
 		admin, policy := identity.RoleAdmin, mustPolicy(t, "alpha:model-*")
-		if err := users.UpdateAdminState(ctx, user.ID, app.AdminChange{Role: &admin, Policy: &policy}); err != nil {
-			t.Fatalf("UpdateAdminState role+policy: %v", err)
-		}
+		err := users.UpdateAdminState(ctx, user.ID, app.AdminChange{Role: &admin, Policy: &policy})
+		require.NoError(t, err, "UpdateAdminState role+policy")
 
 		got, err := users.ByID(ctx, user.ID)
-		if err != nil {
-			t.Fatalf("ByID: %v", err)
-		}
-
-		if got.DisplayName != name || got.Status != identity.StatusBlocked || got.Role != identity.RoleAdmin ||
-			!got.Policy.Allows("alpha", "model-x") || got.PolicySource != identity.PolicyLocal {
-			t.Fatalf("an edit was lost: %+v", got)
-		}
-
-		if got.Email != "hana@example.com" || !got.MustChangePassword {
-			t.Fatalf("UpdateAdminState widened its write: email %q, must change %v", got.Email, got.MustChangePassword)
-		}
+		require.NoError(t, err, "ByID")
+		// An edit was lost if any of these differ.
+		require.Equal(t, name, got.DisplayName, "display name")
+		require.Equal(t, identity.StatusBlocked, got.Status, "status")
+		require.Equal(t, identity.RoleAdmin, got.Role, "role")
+		require.True(t, got.Policy.Allows("alpha", "model-x"), "policy lost: %+v", got.Policy)
+		require.Equal(t, identity.PolicyLocal, got.PolicySource, "policy source")
+		// UpdateAdminState widened its write if any of these changed.
+		require.Equal(t, "hana@example.com", got.Email, "email")
+		require.True(t, got.MustChangePassword, "must change password")
 
 		// The IdP lock is decided by the write itself, against the stored source.
 		fed := human(t, "ian@example.com", "Ian")
 
 		fed.Policy, fed.PolicySource = mustPolicy(t, "beta:*"), identity.PolicyIDP
-		if err := users.SaveIdentityState(ctx, fed); err != nil {
-			t.Fatalf("SaveIdentityState: %v", err)
-		}
+		require.NoError(t, users.SaveIdentityState(ctx, fed), "SaveIdentityState")
 
-		if err := users.UpdateAdminState(ctx, fed.ID, app.AdminChange{Policy: &policy, RefuseIDPPolicy: true}); !errors.Is(err, app.ErrPolicyManagedByIDP) {
-			t.Fatalf("locked policy: err = %v, want app.ErrPolicyManagedByIDP", err)
-		}
+		err = users.UpdateAdminState(ctx, fed.ID, app.AdminChange{Policy: &policy, RefuseIDPPolicy: true})
+		require.ErrorIs(t, err, app.ErrPolicyManagedByIDP, "locked policy")
 
-		if got, _ := users.ByID(ctx, fed.ID); got.PolicySource != identity.PolicyIDP || !got.Policy.Allows("beta", "m") {
-			t.Fatalf("a refused edit was written: %+v", got)
-		}
+		got, _ = users.ByID(ctx, fed.ID)
+		require.Equal(t, identity.PolicyIDP, got.PolicySource, "a refused edit was written")
+		require.True(t, got.Policy.Allows("beta", "m"), "a refused edit was written: %+v", got)
 
-		if err := users.UpdateAdminState(ctx, fed.ID, app.AdminChange{Policy: &policy}); err != nil {
-			t.Fatalf("unlocked policy: %v", err)
-		}
+		require.NoError(t, users.UpdateAdminState(ctx, fed.ID, app.AdminChange{Policy: &policy}), "unlocked policy")
 
-		if got, _ := users.ByID(ctx, fed.ID); got.PolicySource != identity.PolicyLocal || got.Policy.Allows("beta", "m") {
-			t.Fatalf("frozen idp policy not converted: %+v", got)
-		}
+		got, _ = users.ByID(ctx, fed.ID)
+		require.Equal(t, identity.PolicyLocal, got.PolicySource, "frozen idp policy not converted")
+		require.False(t, got.Policy.Allows("beta", "m"), "frozen idp policy not converted: %+v", got)
 
-		if err := users.UpdateAdminState(ctx, uuid.New(), app.AdminChange{DisplayName: &name}); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("unknown user: err = %v, want app.ErrNotFound", err)
-		}
+		err = users.UpdateAdminState(ctx, uuid.New(), app.AdminChange{DisplayName: &name})
+		require.ErrorIs(t, err, app.ErrNotFound, "unknown user")
 	})
 
 	// The shell's unblock: the status and its audit row land together or not at all.
@@ -209,17 +179,13 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		user := human(t, "locked@example.com", "Locked")
 
 		blocked := identity.StatusBlocked
-		if err := users.UpdateAdminState(ctx, user.ID, app.AdminChange{Status: &blocked}); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, users.UpdateAdminState(ctx, user.ID, app.AdminChange{Status: &blocked}), "block")
 
 		status := func() identity.Status {
 			t.Helper()
 
 			got, err := users.ByID(ctx, user.ID)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err, "ByID")
 
 			return got.Status
 		}
@@ -230,31 +196,20 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			}
 		}
 		// The audit row fails (its actor does not exist): the account stays blocked.
-		if err := users.Unblock(ctx, user.ID, event(uuid.New())); err == nil {
-			t.Fatal("Unblock succeeded with an audit row that cannot be written")
-		}
+		require.Error(t, users.Unblock(ctx, user.ID, event(uuid.New())), "Unblock succeeded with an audit row that cannot be written")
+		require.Equal(t, identity.StatusBlocked, status(), "status after a failed unblock")
 
-		if s := status(); s != identity.StatusBlocked {
-			t.Fatalf("status after a failed unblock = %s, want blocked", s)
-		}
-
-		if err := users.Unblock(ctx, user.ID, event(uuid.Nil)); err != nil {
-			t.Fatalf("Unblock: %v", err)
-		}
-
-		if s := status(); s != identity.StatusActive {
-			t.Fatalf("status = %s, want active", s)
-		}
+		require.NoError(t, users.Unblock(ctx, user.ID, event(uuid.Nil)), "Unblock")
+		require.Equal(t, identity.StatusActive, status(), "status")
 
 		var n int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE target = $1 AND action = 'user.update'
-		   AND actor_user_id IS NULL AND detail->>'via' = 'cli'`, user.ID.String()).Scan(&n); err != nil || n != 1 {
-			t.Fatalf("unblock audit rows = %d, %v; want 1", n, err)
-		}
 
-		if err := users.Unblock(ctx, uuid.New(), event(uuid.Nil)); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("unknown user: err = %v, want ErrNotFound", err)
-		}
+		err := pool.QueryRow(ctx, `SELECT count(*) FROM audit_events WHERE target = $1 AND action = 'user.update'
+		   AND actor_user_id IS NULL AND detail->>'via' = 'cli'`, user.ID.String()).Scan(&n)
+		require.NoError(t, err, "unblock audit rows")
+		require.Equal(t, 1, n, "unblock audit rows")
+
+		require.ErrorIs(t, users.Unblock(ctx, uuid.New(), event(uuid.Nil)), app.ErrNotFound, "unknown user")
 	})
 
 	t.Run("CreateAccount", func(t *testing.T) {
@@ -276,9 +231,7 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			t.Helper()
 
 			var n int
-			if err := pool.QueryRow(ctx, query, args...).Scan(&n); err != nil {
-				t.Fatalf("count: %v", err)
-			}
+			require.NoError(t, pool.QueryRow(ctx, query, args...).Scan(&n), "count")
 
 			return n
 		}
@@ -286,52 +239,36 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		// The audit row is the last write, and it fails (its actor does not exist).
 		// Everything before it must go with it.
 		failed := account(uuid.New())
-		if err := users.CreateAccount(ctx, failed); err == nil {
-			t.Fatal("CreateAccount succeeded with an audit row that cannot be written")
-		}
-
-		if n := count(t, `SELECT count(*) FROM users WHERE lower(email) = 'jo@example.com'`); n != 0 {
-			t.Fatalf("a failed creation left %d user rows", n)
-		}
-
-		if n := count(t, `SELECT count(*) FROM user_passwords WHERE user_id = $1`, failed.User.ID); n != 0 {
-			t.Fatalf("a failed creation left a password")
-		}
-
-		if n := count(t, `SELECT count(*) FROM audit_events WHERE target = $1`, failed.User.ID.String()); n != 0 {
-			t.Fatalf("a failed creation left an audit row")
-		}
+		require.Error(t, users.CreateAccount(ctx, failed), "CreateAccount succeeded with an audit row that cannot be written")
+		require.Zero(t, count(t, `SELECT count(*) FROM users WHERE lower(email) = 'jo@example.com'`), "a failed creation left user rows")
+		require.Zero(t, count(t, `SELECT count(*) FROM user_passwords WHERE user_id = $1`, failed.User.ID), "a failed creation left a password")
+		require.Zero(t, count(t, `SELECT count(*) FROM audit_events WHERE target = $1`, failed.User.ID.String()), "a failed creation left an audit row")
 
 		// So the retry finds nothing in its way.
 		retry := account(actor.ID)
-		if err := users.CreateAccount(ctx, retry); err != nil {
-			t.Fatalf("retry: %v", err)
-		}
+		require.NoError(t, users.CreateAccount(ctx, retry), "retry")
 
-		if hash, exp, err := passwords.Get(ctx, retry.User.ID); err != nil || hash != "temp-hash" || exp == nil || !exp.Equal(expiry) {
-			t.Fatalf("password = %q / %v / %v", hash, exp, err)
-		}
+		hash, exp, err := passwords.Get(ctx, retry.User.ID)
+		require.NoError(t, err, "password")
+		require.Equal(t, "temp-hash", hash, "password hash")
+		require.NotNil(t, exp, "password expiry")
+		require.True(t, exp.Equal(expiry), "password expiry = %v, want %v", *exp, expiry)
 
-		if n := count(t, `SELECT count(*) FROM audit_events WHERE target = $1 AND action = 'user.create'`, retry.User.ID.String()); n != 1 {
-			t.Fatalf("audit rows = %d, want 1", n)
-		}
+		auditRows := count(t, `SELECT count(*) FROM audit_events WHERE target = $1 AND action = 'user.create'`, retry.User.ID.String())
+		require.Equal(t, 1, auditRows, "audit rows")
 
-		if err := users.CreateAccount(ctx, account(actor.ID)); !errors.Is(err, app.ErrConflict) {
-			t.Fatalf("same address again: err = %v, want app.ErrConflict", err)
-		}
+		require.ErrorIs(t, users.CreateAccount(ctx, account(actor.ID)), app.ErrConflict, "same address again")
 
 		// An invitation is written in the same unit.
 		invited := account(actor.ID)
 		invited.User.Email, invited.Password = "kim@example.com", nil
 
 		invited.Invitation = &app.Invitation{Issuer: "https://idp.example.com/", Email: "kim@example.com", ExpiresAt: expiry}
-		if err := users.CreateAccount(ctx, invited); err != nil {
-			t.Fatalf("CreateAccount invited: %v", err)
-		}
+		require.NoError(t, users.CreateAccount(ctx, invited), "CreateAccount invited")
 
-		if got, err := idents.PendingByEmail(ctx, "https://idp.example.com/", "kim@example.com"); err != nil || got != invited.User.ID {
-			t.Fatalf("PendingByEmail = %s / %v, want %s", got, err, invited.User.ID)
-		}
+		got, err := idents.PendingByEmail(ctx, "https://idp.example.com/", "kim@example.com")
+		require.NoError(t, err, "PendingByEmail")
+		require.Equal(t, invited.User.ID, got, "PendingByEmail")
 	})
 
 	t.Run("SessionsDeleteByUser", func(t *testing.T) {
@@ -343,28 +280,20 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			{IDHash: "gina-1", UserID: target.ID}, {IDHash: "gina-2", UserID: target.ID}, {IDHash: "hal-1", UserID: bystander.ID},
 		} {
 			s.CreatedAt, s.ExpiresAt = now, now.Add(time.Duration(i+1)*time.Hour)
-			if err := repo.Create(ctx, s); err != nil {
-				t.Fatalf("Create: %v", err)
-			}
+			require.NoError(t, repo.Create(ctx, s), "Create")
 		}
 
-		if err := repo.DeleteByUser(ctx, target.ID); err != nil {
-			t.Fatalf("DeleteByUser: %v", err)
-		}
+		require.NoError(t, repo.DeleteByUser(ctx, target.ID), "DeleteByUser")
 
 		for _, h := range []string{"gina-1", "gina-2"} {
-			if _, err := repo.ByHash(ctx, h); !errors.Is(err, app.ErrNotFound) {
-				t.Fatalf("%s survived DeleteByUser: err = %v", h, err)
-			}
+			_, err := repo.ByHash(ctx, h)
+			require.ErrorIs(t, err, app.ErrNotFound, "%s survived DeleteByUser", h)
 		}
 
-		if _, err := repo.ByHash(ctx, "hal-1"); err != nil {
-			t.Fatalf("another user's session was deleted: %v", err)
-		}
+		_, err := repo.ByHash(ctx, "hal-1")
+		require.NoError(t, err, "another user's session was deleted")
 
-		if err := repo.DeleteByUser(ctx, target.ID); err != nil {
-			t.Fatalf("DeleteByUser with nothing left: %v", err)
-		}
+		require.NoError(t, repo.DeleteByUser(ctx, target.ID), "DeleteByUser with nothing left")
 	})
 
 	t.Run("SessionsDeleteByUserExcept", func(t *testing.T) {
@@ -379,25 +308,19 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			{IDHash: "jon-1", UserID: bystander.ID},
 		} {
 			session.CreatedAt, session.ExpiresAt = now, now.Add(time.Hour)
-			if err := repo.Create(ctx, session); err != nil {
-				t.Fatalf("Create: %v", err)
-			}
+			require.NoError(t, repo.Create(ctx, session), "Create")
 		}
 
-		if err := repo.DeleteByUserExcept(ctx, target.ID, "iris-kept"); err != nil {
-			t.Fatalf("DeleteByUserExcept: %v", err)
-		}
+		require.NoError(t, repo.DeleteByUserExcept(ctx, target.ID, "iris-kept"), "DeleteByUserExcept")
 
 		for _, h := range []string{"iris-1", "iris-2"} {
-			if _, err := repo.ByHash(ctx, h); !errors.Is(err, app.ErrNotFound) {
-				t.Fatalf("%s survived DeleteByUserExcept: err = %v", h, err)
-			}
+			_, err := repo.ByHash(ctx, h)
+			require.ErrorIs(t, err, app.ErrNotFound, "%s survived DeleteByUserExcept", h)
 		}
 
 		for _, h := range []string{"iris-kept", "jon-1"} {
-			if _, err := repo.ByHash(ctx, h); err != nil {
-				t.Fatalf("%s was deleted: %v", h, err)
-			}
+			_, err := repo.ByHash(ctx, h)
+			require.NoError(t, err, "%s was deleted", h)
 		}
 	})
 
@@ -407,17 +330,15 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		in := time.Now().UTC().Add(time.Hour)
 
 		invited := human(t, "ivy@example.com", "Ivy")
-		if err := idents.Invite(ctx, invited.ID, app.Invitation{Issuer: issuer, Email: "Ivy@Example.com", ExpiresAt: in}); err != nil {
-			t.Fatalf("Invite: %v", err)
-		}
+		err := idents.Invite(ctx, invited.ID, app.Invitation{Issuer: issuer, Email: "Ivy@Example.com", ExpiresAt: in})
+		require.NoError(t, err, "Invite")
 
-		if got, err := idents.PendingByEmail(ctx, issuer, "ivy@example.com"); err != nil || got != invited.ID {
-			t.Fatalf("PendingByEmail = %s / %v, want %s", got, err, invited.ID)
-		}
+		got, err := idents.PendingByEmail(ctx, issuer, "ivy@example.com")
+		require.NoError(t, err, "PendingByEmail")
+		require.Equal(t, invited.ID, got, "PendingByEmail")
 		// Stored byte for byte: the issuer without its trailing slash is another issuer.
-		if _, err := idents.PendingByEmail(ctx, "https://idp.example.com/realms/demo", "ivy@example.com"); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("normalised issuer matched: err = %v", err)
-		}
+		_, err = idents.PendingByEmail(ctx, "https://idp.example.com/realms/demo", "ivy@example.com")
+		require.ErrorIs(t, err, app.ErrNotFound, "normalised issuer matched")
 
 		// A stale invitation for the address, expired or live, whoever it was for, is
 		// replaced rather than colliding with the case-insensitive unique index.
@@ -426,18 +347,18 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			addPending(ctx, t, pool, stale.ID, issuer, "Again-"+name+"@example.com", ttl)
 
 			fresh := human(t, "again-"+name+"@example.com", "Fresh "+name)
-			if err := idents.Invite(ctx, fresh.ID, app.Invitation{Issuer: issuer, Email: "again-" + name + "@example.com", ExpiresAt: in}); err != nil {
-				t.Fatalf("%s: re-invite: %v", name, err)
-			}
+			err := idents.Invite(ctx, fresh.ID, app.Invitation{Issuer: issuer, Email: "again-" + name + "@example.com", ExpiresAt: in})
+			require.NoError(t, err, "%s: re-invite", name)
 
-			if got, err := idents.PendingByEmail(ctx, issuer, "AGAIN-"+name+"@example.com"); err != nil || got != fresh.ID {
-				t.Fatalf("%s: PendingByEmail = %s / %v, want the new account %s", name, got, err, fresh.ID)
-			}
+			got, err := idents.PendingByEmail(ctx, issuer, "AGAIN-"+name+"@example.com")
+			require.NoError(t, err, "%s: PendingByEmail", name)
+			require.Equal(t, fresh.ID, got, "%s: PendingByEmail, want the new account", name)
 
 			var n int
-			if err := pool.QueryRow(ctx, `SELECT count(*) FROM pending_identities WHERE user_id = $1`, stale.ID).Scan(&n); err != nil || n != 0 {
-				t.Fatalf("%s: stale invitation rows = %d / %v, want 0", name, n, err)
-			}
+
+			err = pool.QueryRow(ctx, `SELECT count(*) FROM pending_identities WHERE user_id = $1`, stale.ID).Scan(&n)
+			require.NoError(t, err, "%s: stale invitation rows", name)
+			require.Zero(t, n, "%s: stale invitation rows", name)
 		}
 
 		// The same address at another issuer is another invitation and is left alone;
@@ -445,38 +366,33 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		other := human(t, "other-issuer@example.org", "Other issuer")
 		addPending(ctx, t, pool, other.ID, "https://other.example.com", "ivy@example.com", time.Hour)
 
-		if err := idents.Invite(ctx, invited.ID, app.Invitation{Issuer: issuer, Email: "ivy.new@example.com", ExpiresAt: in}); err != nil {
-			t.Fatalf("Invite to a new address: %v", err)
-		}
+		err = idents.Invite(ctx, invited.ID, app.Invitation{Issuer: issuer, Email: "ivy.new@example.com", ExpiresAt: in})
+		require.NoError(t, err, "Invite to a new address")
 
-		if _, err := idents.PendingByEmail(ctx, issuer, "ivy@example.com"); !errors.Is(err, app.ErrNotFound) {
-			t.Fatalf("the account's old invitation survived: err = %v", err)
-		}
+		_, err = idents.PendingByEmail(ctx, issuer, "ivy@example.com")
+		require.ErrorIs(t, err, app.ErrNotFound, "the account's old invitation survived")
 
-		if got, err := idents.PendingByEmail(ctx, issuer, "ivy.new@example.com"); err != nil || got != invited.ID {
-			t.Fatalf("new address: %s / %v, want %s", got, err, invited.ID)
-		}
+		got, err = idents.PendingByEmail(ctx, issuer, "ivy.new@example.com")
+		require.NoError(t, err, "new address")
+		require.Equal(t, invited.ID, got, "new address")
 
-		if got, err := idents.PendingByEmail(ctx, "https://other.example.com", "ivy@example.com"); err != nil || got != other.ID {
-			t.Fatalf("other issuer's invitation: %s / %v, want %s", got, err, other.ID)
-		}
+		got, err = idents.PendingByEmail(ctx, "https://other.example.com", "ivy@example.com")
+		require.NoError(t, err, "other issuer's invitation")
+		require.Equal(t, other.ID, got, "other issuer's invitation")
 
 		// A linked account gets no invitation, and the refusal writes nothing: the
 		// invitation it already held is still there, untouched.
 		linked := human(t, "lee@example.com", "Lee")
 		addPending(ctx, t, pool, linked.ID, issuer, "lee@example.com", time.Hour)
 
-		if err := idents.Link(ctx, linked.ID, issuer, "subject-lee"); err != nil {
-			t.Fatalf("Link: %v", err)
-		}
+		require.NoError(t, idents.Link(ctx, linked.ID, issuer, "subject-lee"), "Link")
 
-		if err := idents.Invite(ctx, linked.ID, app.Invitation{Issuer: issuer, Email: "lee.new@example.com", ExpiresAt: in}); !errors.Is(err, app.ErrAlreadyLinked) {
-			t.Fatalf("linked: err = %v, want app.ErrAlreadyLinked", err)
-		}
+		err = idents.Invite(ctx, linked.ID, app.Invitation{Issuer: issuer, Email: "lee.new@example.com", ExpiresAt: in})
+		require.ErrorIs(t, err, app.ErrAlreadyLinked, "linked")
 
-		if got, err := idents.PendingByEmail(ctx, issuer, "lee@example.com"); err != nil || got != linked.ID {
-			t.Fatalf("a refused invite deleted the old row: %s / %v", got, err)
-		}
+		got, err = idents.PendingByEmail(ctx, issuer, "lee@example.com")
+		require.NoError(t, err, "a refused invite deleted the old row")
+		require.Equal(t, linked.ID, got, "a refused invite deleted the old row")
 	})
 
 	t.Run("RecentUsage", func(t *testing.T) {
@@ -484,13 +400,8 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		user, other := human(t, "uma@example.com", "Uma"), human(t, "vic@example.com", "Vic")
 
 		tok, _, err := credentials.Generate(user.ID, "laptop")
-		if err != nil {
-			t.Fatalf("Generate: %v", err)
-		}
-
-		if err := postgres.NewTokenRepo(pool).Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "Generate")
+		require.NoError(t, postgres.NewTokenRepo(pool).Create(ctx, tok), "create token")
 
 		at := time.Now().UTC().Truncate(time.Microsecond)
 		addUsage(ctx, t, pool, user.ID, &tok.ID, at.Add(-3*time.Minute), "alpha", "old")
@@ -498,41 +409,35 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 		addUsage(ctx, t, pool, user.ID, &tok.ID, at.Add(-time.Minute), "beta", "newest")
 		addUsage(ctx, t, pool, other.ID, nil, at, "alpha", "someone else's")
 
-		if _, err := pool.Exec(ctx, `UPDATE usage_events SET cost_input_usd = 0.5, cost_output_usd = 1,
+		_, err = pool.Exec(ctx, `UPDATE usage_events SET cost_input_usd = 0.5, cost_output_usd = 1,
 			cost_cache_read_usd = 0.25, cost_cache_write_usd = 2, cache_savings_usd = -1, unpriced_tokens = 3, priced = true
-			WHERE user_id = $1 AND model = 'newest'`, user.ID); err != nil {
-			t.Fatalf("price the newest row: %v", err)
-		}
+			WHERE user_id = $1 AND model = 'newest'`, user.ID)
+		require.NoError(t, err, "price the newest row")
 
 		got, err := repo.RecentUsage(ctx, user.ID, 2)
-		if err != nil {
-			t.Fatalf("RecentUsage: %v", err)
-		}
-
-		if len(got) != 2 || got[0].Model != "newest" || got[1].Model != "middle" {
-			t.Fatalf("RecentUsage = %+v, want newest then middle", got)
-		}
+		require.NoError(t, err, "RecentUsage")
+		// want newest then middle
+		require.Len(t, got, 2, "RecentUsage")
+		require.Equal(t, "newest", got[0].Model, "RecentUsage first")
+		require.Equal(t, "middle", got[1].Model, "RecentUsage second")
 
 		event := got[0]
-		if !event.At.Equal(at.Add(-time.Minute)) || event.UserID != user.ID || event.TokenID != tok.ID || event.Provider != "beta" ||
-			!event.Stream || event.StatusCode != http.StatusOK || event.TokensTotal != 42 || event.LatencyMS != 1500 {
-			t.Fatalf("event = %+v", event)
-		}
+		require.True(t, event.At.Equal(at.Add(-time.Minute)), "event at = %v, want %v", event.At, at.Add(-time.Minute))
+		require.Equal(t, user.ID, event.UserID, "event user")
+		require.Equal(t, tok.ID, event.TokenID, "event token")
+		require.Equal(t, "beta", event.Provider, "event provider")
+		require.True(t, event.Stream, "event stream")
+		require.Equal(t, http.StatusOK, event.StatusCode, "event status")
+		require.Equal(t, int64(42), event.TokensTotal, "event tokens")
+		require.Equal(t, 1500, event.LatencyMS, "event latency")
 
-		if want := (app.UsageCost{
+		want := app.UsageCost{
 			InputUSD: 0.5, OutputUSD: 1, CacheReadUSD: 0.25, CacheWriteUSD: 2,
 			CacheSavingsUSD: -1, UnpricedTokens: 3, Priced: true,
-		}); event.Cost != want {
-			t.Fatalf("stored cost = %+v, want %+v", event.Cost, want)
 		}
-
-		if got[1].TokenID != uuid.Nil {
-			t.Fatalf("NULL token = %s, want uuid.Nil", got[1].TokenID)
-		}
-
-		if got[1].Cost != (app.UsageCost{}) {
-			t.Fatalf("unpriced row's cost = %+v, want none", got[1].Cost)
-		}
+		require.Equal(t, want, event.Cost, "stored cost")
+		require.Equal(t, uuid.Nil, got[1].TokenID, "NULL token")
+		require.Zero(t, got[1].Cost, "unpriced row's cost")
 	})
 
 	t.Run("RecentAudit", func(t *testing.T) {
@@ -554,32 +459,27 @@ func TestAdminRepos(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests
 			{At: at.Add(-2 * time.Minute), ActorID: admin.ID, Action: "user.update", Target: other.ID.String()},
 			{At: at.Add(-time.Minute), Action: "system.prune"},
 		} {
-			if err := sink.Record(ctx, event); err != nil {
-				t.Fatalf("Record: %v", err)
-			}
+			require.NoError(t, sink.Record(ctx, event), "Record")
 		}
 
 		got, err := repo.RecentAudit(ctx, user.ID, 10)
-		if err != nil {
-			t.Fatalf("RecentAudit: %v", err)
-		}
+		require.NoError(t, err, "RecentAudit")
 
 		actions := make([]string, 0, len(got))
 		for _, e := range got {
 			actions = append(actions, e.Action)
 		}
 
-		if want := []string{"token.issue", "user.update", "auth.signin"}; !slices.Equal(actions, want) {
-			t.Fatalf("RecentAudit = %v, want %v", actions, want)
-		}
+		require.Equal(t, []string{"token.issue", "user.update", "auth.signin"}, actions, "RecentAudit")
+		require.Equal(t, admin.ID, got[1].ActorID, "event actor")
+		require.Equal(t, "blocked", got[1].Detail["status"], "event detail status")
+		require.True(t, got[1].At.Equal(at.Add(-4*time.Minute)), "event at = %v, want %v", got[1].At, at.Add(-4*time.Minute))
 
-		if got[1].ActorID != admin.ID || got[1].Detail["status"] != "blocked" || !got[1].At.Equal(at.Add(-4*time.Minute)) {
-			t.Fatalf("event = %+v", got[1])
-		}
-
-		if page, err := repo.RecentAudit(ctx, user.ID, 1); err != nil || len(page) != 1 || page[0].Action != "token.issue" {
-			t.Fatalf("RecentAudit limit 1 = %+v / %v, want only the newest", page, err)
-		}
+		// want only the newest
+		page, err := repo.RecentAudit(ctx, user.ID, 1)
+		require.NoError(t, err, "RecentAudit limit 1")
+		require.Len(t, page, 1, "RecentAudit limit 1")
+		require.Equal(t, "token.issue", page[0].Action, "RecentAudit limit 1")
 	})
 }
 
@@ -595,10 +495,9 @@ func viewIDs(views []app.UserView) []uuid.UUID {
 func addUsage(ctx context.Context, t *testing.T, pool *pgxpool.Pool, userID uuid.UUID, tokenID *uuid.UUID, at time.Time, provider, model string) {
 	t.Helper()
 
-	if _, err := pool.Exec(ctx,
+	_, err := pool.Exec(ctx,
 		`INSERT INTO usage_events (at, user_id, token_id, provider, model, stream, tokens_total, latency_ms, status_code)
 		 VALUES ($1, $2, $3, $4, $5, true, 42, 1500, 200)`,
-		at, userID, tokenID, provider, model); err != nil {
-		t.Fatalf("seed usage event: %v", err)
-	}
+		at, userID, tokenID, provider, model)
+	require.NoError(t, err, "seed usage event")
 }

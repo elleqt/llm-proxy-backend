@@ -13,7 +13,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // pathOf turns a ServeMux pattern into a request line that matches it.
@@ -64,9 +66,8 @@ func TestARestrictedSessionReachesOnlyTheContractsAllowList(t *testing.T) {
 
 			rec := env.do(method, path, "{", withCookie(env.signedIn(user)))
 			if contract[pattern] {
-				if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
-					t.Fatalf("status = %d, body %s: the contract lets a restricted session reach this", rec.Code, rec.Body)
-				}
+				require.NotEqual(t, http.StatusForbidden, rec.Code, "the contract lets a restricted session reach this; body %s", rec.Body)
+				require.NotEqual(t, http.StatusUnauthorized, rec.Code, "the contract lets a restricted session reach this; body %s", rec.Body)
 
 				return
 			}
@@ -122,9 +123,8 @@ func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
 		d := env.deps
 		drop(&d)
 
-		if _, err := NewRouter(d); err == nil {
-			t.Errorf("NewRouter without the %s service: no error", name)
-		}
+		_, err := NewRouter(d)
+		assert.Error(t, err, "NewRouter without the %s service", name)
 	}
 }
 
@@ -200,13 +200,8 @@ func TestAnInternalErrorKeepsItsTextOutOfTheResponse(t *testing.T) {
 	rec := env.do(http.MethodGet, "/api/me", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "x"}))
 	apiError(t, rec, http.StatusInternalServerError, codeInternal)
 
-	if strings.Contains(rec.Body.String(), "relation") {
-		t.Fatalf("the response describes the failure: %s", rec.Body)
-	}
-
-	if !strings.Contains(env.log.text(), detail) {
-		t.Fatalf("the failure was not logged; log %q", env.log.text())
-	}
+	require.NotContains(t, rec.Body.String(), "relation", "the response describes the failure")
+	require.Contains(t, env.log.text(), detail, "the failure was not logged")
 }
 
 // A JSON content type with parameters is still JSON.
@@ -216,9 +211,7 @@ func TestAJSONContentTypeWithACharsetIsAccepted(t *testing.T) {
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", func(r *http.Request) {
 		r.Header.Set("Content-Type", "application/json; charset=utf-8")
 	})
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 }
 
 // DELETE carries no body, so it needs no content type: the frontend sets the header
@@ -228,17 +221,13 @@ func TestADeleteWithoutAContentTypeIsServed(t *testing.T) {
 	user := person("person@example.com")
 
 	mine, _, err := credentials.Generate(user.ID, "mine")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Generate")
 
 	env.tokens.EXPECT().ByID(mock.Anything, mine.ID).Return(mine, nil)
 	env.tokens.EXPECT().Save(mock.Anything, mock.Anything).Return(nil)
 
 	rec := env.do(http.MethodDelete, "/api/me/tokens/"+mine.ID.String(), "", withCookie(env.signedIn(user)))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 }
 
 // rateRefused reports whether rec is a rate-limit refusal of either kind.
@@ -266,9 +255,8 @@ func TestSignInRoutesAreRateLimitedPerClient(t *testing.T) {
 	t.Run("other routes", func(t *testing.T) {
 		e := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
 		for i := range 3 {
-			if rec := e.do(http.MethodGet, "/api/auth/config", ""); rec.Code != http.StatusOK {
-				t.Fatalf("attempt %d: status = %d, want 200", i+1, rec.Code)
-			}
+			rec := e.do(http.MethodGet, "/api/auth/config", "")
+			require.Equal(t, http.StatusOK, rec.Code, "attempt %d: status", i+1)
 		}
 	})
 }
@@ -282,52 +270,35 @@ func checkSignInRouteLimit(t *testing.T, pattern string, navigational bool) {
 	env := newEnv(t, withRate(RateLimit{Burst: 1, Every: 10 * time.Second, MaxClients: 10}))
 
 	method, path := pathOf(pattern)
-	if rec := env.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
-		t.Fatal("the first attempt was refused")
-	}
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.1"))), "the first attempt was refused")
 
 	rec := env.do(method, path, "{", fromIP("198.51.100.1"))
 	if navigational {
-		if rec.Code != http.StatusFound || rec.Header().Get("Location") != loginRateLimited {
-			t.Fatalf("status %d to %q, want 302 to %s", rec.Code, rec.Header().Get("Location"), loginRateLimited)
-		}
-
-		if ct := rec.Header().Get("Content-Type"); ct == "application/json" {
-			t.Fatal("a navigational route answered with JSON")
-		}
+		require.Equal(t, http.StatusFound, rec.Code, "status")
+		require.Equal(t, loginRateLimited, rec.Header().Get("Location"), "redirect")
+		require.NotEqual(t, "application/json", rec.Header().Get("Content-Type"), "a navigational route answered with JSON")
 	} else {
 		apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
-
-		if got := rec.Header().Get("Retry-After"); got != "10" {
-			t.Fatalf("Retry-After = %q, want 10", got)
-		}
+		require.Equal(t, "10", rec.Header().Get("Retry-After"), "Retry-After")
 	}
 	// Another client behind the same proxy connection is not limited.
-	if rec := env.do(method, path, "{", fromIP("198.51.100.2")); rateRefused(rec) {
-		t.Fatal("a different client was refused")
-	}
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.2"))), "a different client was refused")
 	// Once the bucket refills the first client is admitted again.
 	env.clock.advance(10 * time.Second)
 
-	if rec := env.do(method, path, "{", fromIP("198.51.100.1")); rateRefused(rec) {
-		t.Fatal("the client was still refused after the bucket refilled")
-	}
+	require.False(t, rateRefused(env.do(method, path, "{", fromIP("198.51.100.1"))), "the client was still refused after the bucket refilled")
 }
 
 // An IPv6 client can use any address of its /64, so the /64 is what is limited: two
 // addresses in one /64 share a bucket, and a neighbouring /64 has its own.
 func TestIPv6ClientsAreLimitedByTheirSlash64(t *testing.T) {
 	env := newEnv(t, withRate(RateLimit{Burst: 1, Every: time.Hour, MaxClients: 10}))
-	if rec := env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1::1")); rateRefused(rec) {
-		t.Fatal("the first attempt was refused")
-	}
+	require.False(t, rateRefused(env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1::1"))), "the first attempt was refused")
 
 	rec := env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:1:ffff:ffff:ffff:ffff"))
 	apiError(t, rec, http.StatusTooManyRequests, codeRateLimited)
 
-	if rec := env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:2::1")); rateRefused(rec) {
-		t.Fatal("a client in another /64 was refused")
-	}
+	require.False(t, rateRefused(env.do(http.MethodPost, "/api/auth/login", "{", fromIP("2001:db8:0:2::1"))), "a client in another /64 was refused")
 }
 
 // Without X-Real-IP (or with garbage in it) the connection's peer is the client.
@@ -346,9 +317,7 @@ func TestClientIPFallsBackToThePeerAddress(t *testing.T) {
 			req.Header.Set("X-Real-IP", header)
 		}
 
-		if got := clientIP(req); got != want {
-			t.Errorf("X-Real-IP %q: clientIP = %q, want %q", header, got, want)
-		}
+		assert.Equal(t, want, clientIP(req), "X-Real-IP %q: clientIP", header)
 	}
 }
 
@@ -364,9 +333,7 @@ func TestRetryAfterRoundsUp(t *testing.T) {
 		rec := httptest.NewRecorder()
 		writeRetryAfter(rec, wait, codeRateLimited, "slow down")
 
-		if got := rec.Header().Get("Retry-After"); got != strconv.Itoa(want) {
-			t.Errorf("wait %v: Retry-After = %q, want %d", wait, got, want)
-		}
+		assert.Equal(t, strconv.Itoa(want), rec.Header().Get("Retry-After"), "wait %v: Retry-After", wait)
 	}
 }
 
@@ -375,14 +342,15 @@ func TestNewRouterRefusesOIDCWithoutAUsableKey(t *testing.T) {
 	d := e.deps
 
 	d.SessionKey = []byte("too short")
-	if _, err := NewRouter(d); err == nil {
-		t.Fatal("NewRouter accepted OIDC with a short session key")
-	}
+	_, err := NewRouter(d)
+	require.Error(t, err, "NewRouter accepted OIDC with a short session key")
 }
 
 func TestServerHasEveryTimeoutSet(t *testing.T) {
 	s := NewServer("127.0.0.1:0", http.NotFoundHandler())
-	if s.ReadHeaderTimeout <= 0 || s.ReadTimeout <= 0 || s.WriteTimeout <= 0 || s.IdleTimeout <= 0 || s.MaxHeaderBytes <= 0 {
-		t.Fatalf("server = %+v: a zero timeout lets a client hold a connection forever", s)
-	}
+	require.Positive(t, s.ReadHeaderTimeout, "ReadHeaderTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.ReadTimeout, "ReadTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.WriteTimeout, "WriteTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.IdleTimeout, "IdleTimeout: a zero timeout lets a client hold a connection forever")
+	require.Positive(t, s.MaxHeaderBytes, "MaxHeaderBytes must be set")
 }

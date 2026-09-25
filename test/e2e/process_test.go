@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/require"
 )
 
 // upstreamShutdownWindow is the deadline upstream gives its own shutdown,
@@ -63,18 +63,15 @@ func TestTheProcessKeepsItsListenersApartAndStopsCleanly(t *testing.T) {
 		{http.MethodGet, proc.metricsURL + "/v1/models", ""},
 		{http.MethodGet, proc.metricsURL + "/api/auth/config", ""},
 	} {
-		if code, body := send(t, tc.method, tc.target, secret, tc.body); code != http.StatusNotFound {
-			t.Fatalf("%s %s = %d (%s), want 404", tc.method, tc.target, code, body)
-		}
+		code, body := send(t, tc.method, tc.target, secret, tc.body)
+		require.Equal(t, http.StatusNotFound, code, "%s %s (%s)", tc.method, tc.target, body)
 	}
 
 	// The strategy stored in the settings is the one routing requests, with no
 	// configuration pushed since boot: fill-first keeps every request on vendor
 	// A's first key, where the default round-robin would alternate between both.
 	for range 4 {
-		if code := proc.chat(t, secret, proc.a.alias); code != http.StatusOK {
-			t.Fatalf("POST /v1/chat/completions (A) = %d, want 200", code)
-		}
+		require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "POST /v1/chat/completions (A)")
 	}
 
 	keys := map[string]bool{}
@@ -82,29 +79,22 @@ func TestTheProcessKeepsItsListenersApartAndStopsCleanly(t *testing.T) {
 		keys[r.Header.Get("Authorization")] = true
 	}
 
-	if len(keys) != 1 {
-		t.Fatalf("vendor A saw keys %v over 4 requests; the stored fill-first strategy is not in force", keys)
-	}
+	require.Len(t, keys, 1, "vendor A's keys over 4 requests; the stored fill-first strategy is not in force")
 
 	// The metrics listener exposes the service's families, the usage sink's
 	// health counters among them, the requests just served, and the gate's
 	// refusals under the refused user.
-	if code := proc.chat(t, secret, "e2e-model-nobody-serves"); code != http.StatusForbidden {
-		t.Fatalf("a model no vendor serves = %d, want 403", code)
-	}
+	require.Equal(t, http.StatusForbidden, proc.chat(t, secret, "e2e-model-nobody-serves"), "a model no vendor serves")
 
 	eventually(t, "the served requests are counted", func() bool { return proc.metricFamilies(t)["llmproxy_requests_total"] })
 
 	families := proc.metricFamilies(t)
 	for _, want := range []string{"llmproxy_build_info", "llmproxy_usage_dropped_total", "llmproxy_usage_panics_total"} {
-		if !families[want] {
-			t.Fatalf("metrics families %v lack %s", families, want)
-		}
+		require.True(t, families[want], "metrics families %v lack %s", families, want)
 	}
 
-	if want := `llmproxy_policy_denied_total{model="unknown",reason="unknown_model",user="` + proc.adminEmail + `"} 1`; !strings.Contains(proc.scrapeMetrics(t), want) {
-		t.Fatalf("metrics lack %s", want)
-	}
+	denied := `llmproxy_policy_denied_total{model="unknown",reason="unknown_model",user="` + proc.adminEmail + `"} 1`
+	require.Contains(t, proc.scrapeMetrics(t), denied, "metrics lack the gate's refusal")
 
 	// Past upstream's own shutdown window, SIGTERM while a request is with the
 	// slow vendor: the request completes before Run returns, and Run returns
@@ -119,34 +109,26 @@ func TestTheProcessKeepsItsListenersApartAndStopsCleanly(t *testing.T) {
 	inFlight := proc.sendSlowRequest(t, secret)
 	eventually(t, "the request reaches vendor B", func() bool { return len(proc.b.fake.Requests()) == 1 })
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := proc.awaitReturn(60 * time.Second); err != nil {
-		t.Fatalf("Run after SIGTERM = %v, want nil", err)
-	}
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
+	require.NoError(t, proc.awaitReturn(60*time.Second), "Run after SIGTERM")
 
 	select {
 	case res := <-inFlight:
-		if res.status != "200 OK" {
-			t.Fatalf("the request in flight at SIGTERM = %s, want 200 OK", res.status)
-		}
+		require.Equal(t, "200 OK", res.status, "the request in flight at SIGTERM")
 		// The client reads the last bytes a moment after the server has
 		// written them; a stop that did not wait would return a whole vendor
 		// latency earlier. Half that latency is the margin: wide enough for a
 		// loaded runner under -race, far short of what an undrained stop shows.
-		if late := res.at.Sub(proc.returnedAt); late > slowVendorLatency/2 {
-			t.Fatalf("the request in flight at SIGTERM completed %s after Run returned: it was not drained", late)
-		}
+		require.LessOrEqual(t, res.at.Sub(proc.returnedAt), slowVendorLatency/2,
+			"the request in flight at SIGTERM completed that long after Run returned: it was not drained")
 	case <-time.After(slowVendorLatency + 5*time.Second):
-		t.Fatal("the request in flight at SIGTERM never completed")
+		require.Fail(t, "the request in flight at SIGTERM never completed")
 	}
 
 	for _, target := range []string{proc.apiURL + "/healthz", proc.webURL + "/api/auth/config", proc.metricsURL + "/metrics"} {
 		if resp, err := get(t, target); err == nil {
 			_ = resp.Body.Close()
-			t.Fatalf("GET %s after Run returned: %d, want the listener closed", target, resp.StatusCode)
+			require.Failf(t, "a listener outlived Run", "GET %s after Run returned: %d, want the listener closed", target, resp.StatusCode)
 		}
 	}
 }
@@ -159,14 +141,12 @@ func TestASecondSignalEndsTheProcessAtOnce(t *testing.T) {
 		out, err := runChild(t)
 
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			t.Fatalf("the process ended with %v, want killed by the second SIGTERM\n%s", err, out)
-		}
+		require.ErrorAs(t, err, &exit, "want killed by the second SIGTERM\n%s", out)
 
 		status, ok := exit.Sys().(syscall.WaitStatus)
-		if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
-			t.Fatalf("the process ended with %v, want killed by the second SIGTERM\n%s", err, out)
-		}
+		require.True(t, ok, "the process ended with %v, want killed by the second SIGTERM\n%s", err, out)
+		require.True(t, status.Signaled(), "the process ended with %v, want killed by the second SIGTERM\n%s", err, out)
+		require.Equal(t, syscall.SIGTERM, status.Signal(), "the process ended with %v, want killed by the second SIGTERM\n%s", err, out)
 
 		return
 	}
@@ -180,18 +160,14 @@ func TestASecondSignalEndsTheProcessAtOnce(t *testing.T) {
 	proc.sendSlowRequest(t, secret)
 	eventually(t, "the request reaches vendor B", func() bool { return len(proc.b.fake.Requests()) == 1 })
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 
 	eventually(t, "the process begins to stop", func() bool { return strings.Contains(proc.out.String(), "stopping") })
 
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, syscall.Kill(os.Getpid(), syscall.SIGTERM))
 	// Only reached if the second signal was caught.
 	err := proc.awaitReturn(60 * time.Second)
-	t.Fatalf("the process outlived a second SIGTERM; Run returned %v after draining", err)
+	require.Failf(t, "the process outlived a second SIGTERM", "Run returned %v after draining", err)
 }
 
 // slowResult is how a request to the slow vendor ended, and when.
@@ -207,9 +183,7 @@ func (p *process) sendSlowRequest(t *testing.T, secret string) <-chan slowResult
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, p.apiURL+"/v1/chat/completions", strings.NewReader(
 		`{"model":"`+p.b.alias+`","messages":[{"role":"user","content":"say hello"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+secret)
@@ -247,21 +221,14 @@ func TestLocalLoginOffLeavesOnlyFederatedSignIn(t *testing.T) {
 	var cfg api.AuthConfig
 	proc.webJSON(t, http.MethodGet, "/api/auth/config", "", http.StatusOK, &cfg)
 
-	if cfg.LocalLogin {
-		t.Fatal("GET /api/auth/config offers the password form with local login off")
-	}
+	require.False(t, cfg.LocalLogin, "GET /api/auth/config offers the password form with local login off")
 
 	var refused api.Error
 	proc.webJSON(t, http.MethodPost, "/api/auth/login",
 		`{"email":"`+proc.adminEmail+`","password":"`+proc.adminPassword+`"}`, http.StatusNotFound, &refused)
 
-	if refused.Code != "not_found" {
-		t.Fatalf("POST /api/auth/login: code %q, want not_found", refused.Code)
-	}
-
-	if out := proc.out.String(); !strings.Contains(out, "LLMPROXY_LOCAL_LOGIN is false") {
-		t.Fatalf("no warning that the bootstrap administrator cannot sign in:\n%s", out)
-	}
+	require.Equal(t, "not_found", refused.Code, "POST /api/auth/login")
+	require.Contains(t, proc.out.String(), "LLMPROXY_LOCAL_LOGIN is false", "no warning that the bootstrap administrator cannot sign in")
 }
 
 // catalogueHost is where upstream's model catalogue updaters fetch from first
@@ -342,13 +309,11 @@ func TestModelCatalogUpdatersStartWhenOn(t *testing.T) {
 		select {
 		case <-h.seen:
 		case <-time.After(30 * time.Second):
-			t.Fatalf("upstream never logged %q", h.msg)
+			require.Failf(t, "an updater never started", "upstream never logged %q", h.msg)
 		}
 	}
 
-	if hosts := proxy.asked(); !slices.Contains(hosts, catalogueHost) {
-		t.Fatalf("the proxy was asked for %v, not the catalogue host %s", hosts, catalogueHost)
-	}
+	require.Contains(t, proxy.asked(), catalogueHost, "the proxy was not asked for the catalogue host")
 }
 
 // TestModelCatalogUpdatersStayOffWhenOff: with LLMPROXY_MODEL_CATALOG_UPDATES
@@ -366,12 +331,10 @@ func TestModelCatalogUpdatersStayOffWhenOff(t *testing.T) {
 	for _, h := range hooks {
 		select {
 		case <-h.seen:
-			t.Fatalf("upstream logged %q with the updates off", h.msg)
+			require.Failf(t, "an updater started with the updates off", "upstream logged %q", h.msg)
 		default:
 		}
 	}
 
-	if hosts := proxy.asked(); len(hosts) > 0 {
-		t.Fatalf("the process fetched through the proxy with the updates off: %v", hosts)
-	}
+	require.Empty(t, proxy.asked(), "the process fetched through the proxy with the updates off")
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
+	"github.com/stretchr/testify/require"
 )
 
 // TestEndToEnd is the path a person takes through the process as cmd/gateway runs
@@ -14,8 +15,6 @@ import (
 // change it, issues an API token in the cabinet, and uses it on the proxied API —
 // where their policy decides which vendor's model they may call and see — then
 // revokes it, and finds what they spent in the cabinet.
-//
-//nolint:cyclop // One linear user journey; each step depends on the state the previous one left.
 func TestEndToEnd(t *testing.T) {
 	if !inFreshProcess(t) {
 		return
@@ -32,18 +31,17 @@ func TestEndToEnd(t *testing.T) {
 	var accounts []api.AdminUser
 	proc.webJSON(t, http.MethodGet, "/api/admin/users", "", http.StatusOK, &accounts)
 
-	if len(accounts) != 1 || accounts[0].Id != me.Id || accounts[0].Role != api.Role("admin") {
-		t.Fatalf("admin user list = %+v, want the bootstrap administrator", accounts)
-	}
+	require.Len(t, accounts, 1, "admin user list: want the bootstrap administrator")
+	require.Equal(t, me.Id, accounts[0].Id, "admin user list: want the bootstrap administrator")
+	require.Equal(t, api.Role("admin"), accounts[0].Role, "admin user list: want the bootstrap administrator")
 
 	// A token, shown once; the list shows its prefix and never the secret.
 	issued := proc.issueToken(t, "laptop")
 	secret := issued.Secret
 
 	_, list := proc.webCall(t, http.MethodGet, "/api/me/tokens", "")
-	if strings.Contains(string(list), secret) || !strings.Contains(string(list), issued.Token.Prefix) {
-		t.Fatalf("token list %s: want the prefix %q and never the secret", list, issued.Token.Prefix)
-	}
+	require.NotContains(t, string(list), secret, "the token list shows the secret")
+	require.Contains(t, string(list), issued.Token.Prefix, "the token list lacks the prefix")
 
 	// Both vendors registered: with a policy granting both, both are listed.
 	proc.setPolicy(t, proc.adminEmail, proc.a.policyName+":*", proc.b.policyName+":*")
@@ -58,9 +56,9 @@ func TestEndToEnd(t *testing.T) {
 	var preview api.PolicyPreview
 	proc.webJSON(t, http.MethodPost, "/api/admin/policy/preview", `{"rules":["`+proc.a.policyName+`:*"]}`, http.StatusOK, &preview)
 
-	if len(preview.Covered) != 1 || preview.Covered[0].Provider != proc.a.policyName || preview.Covered[0].Model != proc.a.alias {
-		t.Fatalf("preview = %+v, want only %s's %s", preview, proc.a.policyName, proc.a.alias)
-	}
+	require.Len(t, preview.Covered, 1, "preview: want only %s's %s", proc.a.policyName, proc.a.alias)
+	require.Equal(t, proc.a.policyName, preview.Covered[0].Provider, "preview provider")
+	require.Equal(t, proc.a.alias, preview.Covered[0].Model, "preview model")
 
 	var vendorAccounts []api.ProviderAccount
 	proc.webJSON(t, http.MethodGet, "/api/admin/providers", "", http.StatusOK, &vendorAccounts)
@@ -68,31 +66,22 @@ func TestEndToEnd(t *testing.T) {
 	// Narrowed to vendor A: A is served and listed, B is refused and hidden.
 	proc.setPolicy(t, proc.adminEmail, proc.a.policyName+":*")
 
-	if code := proc.chat(t, secret, proc.a.alias); code != http.StatusOK {
-		t.Fatalf("allowed model: status %d, want 200", code)
-	}
+	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "allowed model")
+	require.Equal(t, http.StatusForbidden, proc.chat(t, secret, proc.b.alias), "model of a vendor the policy does not grant")
 
-	if code := proc.chat(t, secret, proc.b.alias); code != http.StatusForbidden {
-		t.Fatalf("model of a vendor the policy does not grant: status %d, want 403", code)
-	}
-
-	if m := proc.models(t, secret); !m[proc.a.alias] || m[proc.b.alias] {
-		t.Fatalf("/v1/models = %v, want %s listed and %s hidden", m, proc.a.alias, proc.b.alias)
-	}
+	listed := proc.models(t, secret)
+	require.True(t, listed[proc.a.alias], "/v1/models = %v, want %s listed", listed, proc.a.alias)
+	require.False(t, listed[proc.b.alias], "/v1/models = %v, want %s hidden", listed, proc.b.alias)
 
 	// Widening the policy applies to the same token at once.
 	proc.setPolicy(t, proc.adminEmail, proc.a.policyName+":*", proc.b.policyName+":*")
 
-	if code := proc.chat(t, secret, proc.b.alias); code != http.StatusOK {
-		t.Fatalf("after widening: status %d, want 200 with the same token", code)
-	}
+	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.b.alias), "after widening, with the same token")
 
 	// Revocation from the cabinet is immediate.
 	proc.webJSON(t, http.MethodDelete, "/api/me/tokens/"+issued.Token.Id.String(), "", http.StatusNoContent, nil)
 
-	if code := proc.chat(t, secret, proc.a.alias); code != http.StatusUnauthorized {
-		t.Fatalf("after revocation: status %d, want 401", code)
-	}
+	require.Equal(t, http.StatusUnauthorized, proc.chat(t, secret, proc.a.alias), "after revocation")
 
 	// Two requests were served: the usage sink writes them to the ledger the
 	// cabinet reads.
@@ -104,9 +93,8 @@ func TestEndToEnd(t *testing.T) {
 		return usage.Totals.Requests >= 2
 	})
 
-	if usage.Totals.Requests != 2 || usage.Totals.TokensTotal != 14 {
-		t.Fatalf("usage totals = %+v, want the 2 served requests and their 14 tokens", usage.Totals)
-	}
+	require.Equal(t, 2, usage.Totals.Requests, "usage totals: want the 2 served requests")
+	require.Equal(t, 14, usage.Totals.TokensTotal, "usage totals: want the served requests' 14 tokens")
 
 	// Signing out ends the session on the server, not only in this browser: the old
 	// cookie, presented again as a thief holding a copy would, no longer authenticates.
@@ -114,34 +102,25 @@ func TestEndToEnd(t *testing.T) {
 	proc.webJSON(t, http.MethodPost, "/api/auth/logout", "", http.StatusNoContent, nil)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, proc.webURL+"/api/me", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	req.AddCookie(old)
 
 	resp, err := http.DefaultClient.Do(req) // no jar: exactly the cookie given
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
 	var gone api.Error
-	if err := json.NewDecoder(resp.Body).Decode(&gone); err != nil ||
-		resp.StatusCode != http.StatusUnauthorized || gone.Code != "unauthenticated" {
-		t.Fatalf("the signed-out session's cookie: status %d, code %q (%v); want 401 unauthenticated",
-			resp.StatusCode, gone.Code, err)
-	}
+
+	decodeErr := json.NewDecoder(resp.Body).Decode(&gone)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "the signed-out session's cookie")
+	require.NoError(t, decodeErr, "the signed-out session's cookie: decode")
+	require.Equal(t, "unauthenticated", gone.Code, "the signed-out session's cookie")
 
 	// The bootstrap password was shown once, in its banner, and the token secret
 	// never reached the process's output.
 	out := proc.out.String()
-	if n := strings.Count(out, proc.adminPassword); n != 1 {
-		t.Fatalf("the bootstrap password appears %d times in the process output, want once", n)
-	}
-
-	if strings.Contains(out, secret) {
-		t.Fatal("the token secret reached the process output")
-	}
+	require.Equal(t, 1, strings.Count(out, proc.adminPassword), "times the bootstrap password appears in the process output")
+	require.NotContains(t, out, secret, "the token secret reached the process output")
 }

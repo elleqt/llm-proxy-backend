@@ -18,6 +18,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // seenRequest is what a handler behind the gate was given.
@@ -45,11 +47,9 @@ func TestEncodedBodyIsDecodedOnceForTheHandler(t *testing.T) {
 		ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
 
 		read, err := handlers.ReadRequestBody(ginCtx)
-		if err != nil {
-			t.Errorf("upstream's ReadRequestBody on what the gate passed on: %v", err)
-		}
-
 		seen = seenRequest{ginCtx.GetHeader("Content-Encoding"), ginCtx.Request.ContentLength, ginCtx.GetHeader("Content-Length"), string(raw), string(read)}
+
+		assert.NoError(t, err, "upstream's ReadRequestBody on what the gate passed on")
 	})
 
 	for _, tc := range []struct{ what, body string }{
@@ -65,9 +65,9 @@ func TestEncodedBodyIsDecodedOnceForTheHandler(t *testing.T) {
 		engine.ServeHTTP(rec, req)
 
 		want := seenRequest{"", int64(len(payload)), strconv.Itoa(len(payload)), payload, payload}
-		if rec.Code != http.StatusOK || seen != want {
-			t.Errorf("%s = %d, the handler saw %+v; want 200 and %+v", tc.what, rec.Code, seen, want)
-		}
+
+		assert.Equal(t, http.StatusOK, rec.Code, tc.what)
+		assert.Equal(t, want, seen, "what the handler saw of %s", tc.what)
 	}
 }
 
@@ -109,13 +109,10 @@ func TestEncodedBodiesAreRefusedWhereNotDecoded(t *testing.T) {
 		engine.ServeHTTP(rec, req)
 		runtime.ReadMemStats(&after)
 
-		if rec.Code != http.StatusUnsupportedMediaType || rec.Body.String() != refused || *reached {
-			t.Errorf("%s %s (%s) with a zstd body = %d %s (reached %t), want 415 %s", tc.method, tc.path, tc.contentType, rec.Code, rec.Body, *reached, refused)
-		}
-
-		if n := after.TotalAlloc - before.TotalAlloc; n > 16<<20 {
-			t.Errorf("%s %s with a zstd body allocated %d MiB", tc.method, tc.path, n>>20)
-		}
+		assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code, "%s %s (%s) with a zstd body", tc.method, tc.path, tc.contentType)
+		assert.JSONEq(t, refused, rec.Body.String(), "%s %s (%s) with a zstd body", tc.method, tc.path, tc.contentType)
+		assert.False(t, *reached, "%s %s (%s) with a zstd body reached the handler", tc.method, tc.path, tc.contentType)
+		assert.LessOrEqual(t, after.TotalAlloc-before.TotalAlloc, uint64(16<<20), "%s %s with a zstd body allocated too much", tc.method, tc.path)
 	}
 }
 
@@ -141,9 +138,7 @@ func TestPublicAndListingRoutesGetNoBody(t *testing.T) {
 		engine.ServeHTTP(httptest.NewRecorder(), req)
 	}
 
-	if strings.Join(got, "|") != "HEAD |GET " {
-		t.Fatalf("handlers read %q, want no body on either route", got)
-	}
+	require.Equal(t, "HEAD |GET ", strings.Join(got, "|"), "handlers read %q, want no body on either route", got)
 }
 
 // allocatedBy sends req and returns the status and the bytes the
@@ -157,9 +152,7 @@ func allocatedBy(t *testing.T, req *http.Request) (int, uint64) {
 	runtime.ReadMemStats(&before)
 
 	resp, err := noRedirects.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", req.Method, req.URL.Path, err)
-	}
+	require.NoError(t, err, "%s %s", req.Method, req.URL.Path)
 
 	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
@@ -186,9 +179,7 @@ func TestEncodedBodiesNeverReachUpstreamsDecoders(t *testing.T) {
 		{http.MethodPost, "/v1beta/models/decoders-gemini:generateContent", wireSecret},
 	} {
 		req, err := http.NewRequestWithContext(t.Context(), tc.method, srv.baseURL+tc.path, bytes.NewReader(bomb))
-		if err != nil {
-			t.Fatalf("build request: %v", err)
-		}
+		require.NoError(t, err, "build request")
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Content-Encoding", "zstd")
@@ -198,13 +189,9 @@ func TestEncodedBodiesNeverReachUpstreamsDecoders(t *testing.T) {
 		}
 
 		code, allocated := allocatedBy(t, req)
-		if code != http.StatusUnsupportedMediaType {
-			t.Errorf("%s %s with a %d-byte zstd body = %d, want 415", tc.method, tc.path, len(bomb), code)
-		}
-
-		if allocated > 64<<20 {
-			t.Errorf("%s %s with a %d-byte zstd body allocated %d MiB, want far below its 512 MiB decoded size", tc.method, tc.path, len(bomb), allocated>>20)
-		}
+		assert.Equal(t, http.StatusUnsupportedMediaType, code, "%s %s with a %d-byte zstd body", tc.method, tc.path, len(bomb))
+		assert.LessOrEqual(t, allocated, uint64(64<<20),
+			"%s %s with a %d-byte zstd body allocated too much, want far below its 512 MiB decoded size", tc.method, tc.path, len(bomb))
 	}
 }
 
@@ -236,20 +223,20 @@ func TestDecodingWaitsForItsShareOfTheBudget(t *testing.T) {
 
 	// Room for the frame as sent, not for decoding it.
 	const taken = maxJSONBody + 1
-	if err := budget.Acquire(context.Background(), taken); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, budget.Acquire(context.Background(), taken))
 
 	const busy = `{"error":{"message":"too many request bodies in flight; retry","type":"server_error"}}`
-	if rec := zstdChat(engine, frame); rec.Code != http.StatusServiceUnavailable || rec.Body.String() != busy || *reached {
-		t.Fatalf("without room to decode = %d %s (reached %t), want 503 %s", rec.Code, rec.Body, *reached, busy)
-	}
+
+	rec := zstdChat(engine, frame)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "without room to decode")
+	require.JSONEq(t, busy, rec.Body.String(), "without room to decode")
+	require.False(t, *reached, "without room to decode, reached the handler")
 
 	budget.Release(taken)
 
-	if rec := zstdChat(engine, frame); rec.Code != http.StatusOK || !*reached {
-		t.Fatalf("with the decode budget free = %d %s, want 200", rec.Code, rec.Body)
-	}
+	rec = zstdChat(engine, frame)
+	require.Equal(t, http.StatusOK, rec.Code, "with the decode budget free: %s", rec.Body)
+	require.True(t, *reached, "with the decode budget free, did not reach the handler")
 }
 
 // TestParallelBombsStayWithinTheDecodeBudget: sixteen requests of sixteen
@@ -310,9 +297,7 @@ func TestParallelBombsStayWithinTheDecodeBudget(t *testing.T) {
 	<-sampled
 
 	for i, code := range codes {
-		if code != http.StatusRequestEntityTooLarge {
-			t.Errorf("bomb %d = %d, want 413", i, code)
-		}
+		assert.Equal(t, http.StatusRequestEntityTooLarge, code, "bomb %d", i)
 	}
 
 	const bound = 1 << 30
@@ -320,9 +305,7 @@ func TestParallelBombsStayWithinTheDecodeBudget(t *testing.T) {
 	grew := peak.Load() - min(peak.Load(), base.HeapInuse)
 	t.Logf("%d parallel bombs grew the heap by %d MiB at peak", parallel, grew>>20)
 
-	if grew > bound {
-		t.Fatalf("%d parallel bombs grew the heap by %d MiB at peak, want at most %d MiB", parallel, grew>>20, bound>>20)
-	}
+	require.LessOrEqual(t, grew, uint64(bound), "%d parallel bombs grew the heap by %d MiB at peak, want at most %d MiB", parallel, grew>>20, bound>>20)
 }
 
 // TestDecodedBodiesHoldTheBudgetUntilServed: a decoded body keeps its length
@@ -356,9 +339,8 @@ func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := range held {
 		wg.Go(func() {
-			if rec := zstdChatAs(engine, userKey(strconv.Itoa(i), 1), frame); rec.Code != http.StatusOK {
-				t.Errorf("held request = %d %s, want 200", rec.Code, rec.Body)
-			}
+			rec := zstdChatAs(engine, userKey(strconv.Itoa(i), 1), frame)
+			assert.Equal(t, http.StatusOK, rec.Code, "held request: %s", rec.Body)
 		})
 
 		<-entered
@@ -369,9 +351,8 @@ func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 	var holding runtime.MemStats
 	runtime.ReadMemStats(&holding)
 
-	if grew := holding.HeapInuse - min(holding.HeapInuse, base.HeapInuse); grew > uint64(budget) {
-		t.Errorf("%d held bodies grew the heap by %d MiB, want at most the %d MiB budget", held, grew>>20, budget>>20)
-	}
+	grew := holding.HeapInuse - min(holding.HeapInuse, base.HeapInuse)
+	assert.LessOrEqual(t, grew, uint64(budget), "%d held bodies grew the heap by %d MiB, want at most the %d MiB budget", held, grew>>20, budget>>20)
 
 	const busy = `{"error":{"message":"too many request bodies in flight; retry","type":"server_error"}}`
 
@@ -383,19 +364,16 @@ func TestDecodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 		close(proceed)
 		wg.Wait()
 		<-next
-		t.Fatalf("with %d bodies held another encoded request reached its handler, want 503", held)
+		require.Failf(t, "another encoded request reached its handler", "with %d bodies held, want 503", held)
 	case rec := <-next:
-		if rec.Code != http.StatusServiceUnavailable || rec.Body.String() != busy {
-			t.Fatalf("with %d bodies held = %d %s, want 503 %s", held, rec.Code, rec.Body, busy)
-		}
+		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "with %d bodies held", held)
+		require.JSONEq(t, busy, rec.Body.String(), "with %d bodies held", held)
 	}
 
 	close(proceed)
 	wg.Wait()
 
-	if !bodyBudget.TryAcquire(budget) {
-		t.Fatal("after the held requests finished the budget is not whole again")
-	}
+	require.True(t, bodyBudget.TryAcquire(budget), "after the held requests finished the budget is not whole again")
 
 	bodyBudget.Release(budget)
 }

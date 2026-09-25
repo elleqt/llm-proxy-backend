@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/require"
 )
 
 // usageWireChild marks the fresh test process TestProxiedRequestWritesOneLedgerRow
@@ -52,18 +52,12 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Role: identity.RoleUser, Status: identity.StatusActive, Policy: mustPolicy("fakevendor:*"),
 		PolicySource: identity.PolicyLocal, CreatedAt: time.Now().UTC(),
 	}
-	if err := users.Create(ctx, alice); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
+	require.NoError(t, users.Create(ctx, alice), "create user")
 
 	tok, secret, err := credentials.Generate(alice.ID, "laptop")
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
+	require.NoError(t, err, "generate token")
 
-	if err := tokens.Create(ctx, tok); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
+	require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 	meter := metrics.New(prometheus.NewRegistry())
 	sink := NewUsageSink(postgres.NewUsageRepo(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
@@ -77,9 +71,8 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Resolver:    app.NewTokenResolver(users, tokens),
 	})
 
-	if status, _, body := wire.postMessages(t, secret, false); status != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
-	}
+	status, _, body := wire.postMessages(t, secret, false)
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
 
 	// Upstream publishes usage records asynchronously, through one queue
 	// delivered in order (usage/manager.go). So once a later request's row is
@@ -90,28 +83,19 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		Role: identity.RoleUser, Status: identity.StatusActive, Policy: mustPolicy("fakevendor:*"),
 		PolicySource: identity.PolicyLocal, CreatedAt: time.Now().UTC(),
 	}
-	if err := users.Create(ctx, later); err != nil {
-		t.Fatalf("create user: %v", err)
-	}
+	require.NoError(t, users.Create(ctx, later), "create user")
 
 	laterTok, laterSecret, err := credentials.Generate(later.ID, "desktop")
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
+	require.NoError(t, err, "generate token")
 
-	if err := tokens.Create(ctx, laterTok); err != nil {
-		t.Fatalf("create token: %v", err)
-	}
+	require.NoError(t, tokens.Create(ctx, laterTok), "create token")
 
-	if status, _, body := wire.postMessages(t, laterSecret, false); status != http.StatusOK {
-		t.Fatalf("later POST /v1/messages = %d (%s), want 200", status, body)
-	}
+	status, _, body = wire.postMessages(t, laterSecret, false)
+	require.Equal(t, http.StatusOK, status, "later POST /v1/messages (%s)", body)
 
 	awaitLedgerRow(t, pool, sink, later.ID, laterTok.ID)
 
-	if n := ledgerRows(t, pool, sink, alice.ID, tok.ID); n != 1 {
-		t.Fatalf("ledger holds %d rows for the request, want exactly 1", n)
-	}
+	require.Equal(t, 1, ledgerRows(t, pool, sink, alice.ID, tok.ID), "ledger rows for the request")
 
 	var (
 		userID, tokenID        *uuid.UUID
@@ -119,34 +103,28 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 		total                  int64
 		failed                 bool
 	)
-	if err := pool.QueryRow(ctx, `SELECT user_id, token_id, provider, model, alias, tokens_total, failed
-		FROM usage_events WHERE user_id = $1`, alice.ID).Scan(&userID, &tokenID, &provider, &model, &alias, &total, &failed); err != nil {
-		t.Fatalf("read row: %v", err)
-	}
 
-	if userID == nil || *userID != alice.ID || tokenID == nil || *tokenID != tok.ID {
-		t.Fatalf("row attributed to user %v token %v, want %s / %s", userID, tokenID, alice.ID, tok.ID)
-	}
+	err = pool.QueryRow(ctx, `SELECT user_id, token_id, provider, model, alias, tokens_total, failed
+		FROM usage_events WHERE user_id = $1`, alice.ID).Scan(&userID, &tokenID, &provider, &model, &alias, &total, &failed)
+	require.NoError(t, err, "read row")
+
+	require.NotNil(t, userID, "row's user")
+	require.Equal(t, alice.ID, *userID, "row's user")
+	require.NotNil(t, tokenID, "row's token")
+	require.Equal(t, tok.ID, *tokenID, "row's token")
 	// The vendor is the openai-compatibility entry "fakevendor": upstream keys it
 	// openai-compatible-fakevendor, policies name it fakevendor.
-	if provider != "fakevendor" || model != wire.model || alias != wire.alias || total != 7 || failed {
-		t.Fatalf("row provider=%q model=%q alias=%q tokens_total=%d failed=%t; want fakevendor, %q, %q, the vendor's 7 tokens and success",
-			provider, model, alias, total, failed, wire.model, wire.alias)
-	}
+	require.Equal(t, "fakevendor", provider, "row provider")
+	require.Equal(t, wire.model, model, "row model")
+	require.Equal(t, wire.alias, alias, "row alias")
+	require.Equal(t, int64(7), total, "row tokens_total, want the vendor's 7 tokens")
+	require.False(t, failed, "row failed")
 
 	stamped, err := tokens.ByID(ctx, tok.ID)
-	if err != nil {
-		t.Fatalf("token: %v", err)
-	}
+	require.NoError(t, err, "token")
+	require.NotNil(t, stamped.LastUsedAt, "the token's last use was not stamped")
 
-	if stamped.LastUsedAt == nil {
-		t.Fatal("the token's last use was not stamped")
-	}
-
-	body := scrape(t, meter)
-	if !strings.Contains(body, `user="alice@example.com"} 1`) {
-		t.Fatalf("no requests_total series for alice:\n%s", body)
-	}
+	require.Contains(t, scrape(t, meter), `user="alice@example.com"} 1`, "no requests_total series for alice")
 }
 
 // rerunInFreshProcess runs the calling test alone in a fresh test process,
@@ -159,9 +137,8 @@ func rerunInFreshProcess(t *testing.T) {
 	cmd.Env = append(os.Environ(), usageWireChild+"=1")
 
 	out, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "--- PASS: "+t.Name()) {
-		t.Fatalf("in a fresh process: %v\n%s", err, out)
-	}
+	require.NoError(t, err, "in a fresh process:\n%s", out)
+	require.Contains(t, string(out), "--- PASS: "+t.Name(), "in a fresh process")
 }
 
 // ledgerRows waits until sink has processed every record handed to it, then
@@ -171,10 +148,10 @@ func ledgerRows(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, token
 	flushed(t, sink)
 
 	var count int
-	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM usage_events WHERE user_id = $1 OR token_id = $2`,
-		userID, tokenID).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
+
+	err := pool.QueryRow(t.Context(), `SELECT count(*) FROM usage_events WHERE user_id = $1 OR token_id = $2`,
+		userID, tokenID).Scan(&count)
+	require.NoError(t, err, "count")
 
 	return count
 }
@@ -186,7 +163,7 @@ func awaitLedgerRow(t *testing.T, pool *pgxpool.Pool, sink *UsageSink, userID, t
 
 	for deadline := time.Now().Add(10 * time.Second); ledgerRows(t, pool, sink, userID, tokenID) == 0; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("no ledger row for the later request")
+			require.Fail(t, "no ledger row for the later request")
 		}
 	}
 }

@@ -2,10 +2,10 @@ package postgres_test
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNewPoolDoesNotLeakPasswordFromMalformedDSN is the NewPool half of the same
@@ -24,10 +24,8 @@ func TestNewPoolDoesNotLeakPasswordFromMalformedDSN(t *testing.T) {
 	pool, err := postgres.NewPool(context.Background(), dsn)
 	if err == nil {
 		pool.Close()
-		t.Fatal("NewPool with a malformed DSN returned nil error")
 	}
 
-	if strings.Contains(err.Error(), leftover) {
-		t.Fatalf("error leaks part of the password: %v", err)
-	}
+	require.Error(t, err, "NewPool with a malformed DSN returned nil error")
+	require.NotContains(t, err.Error(), leftover, "error leaks part of the password")
 }

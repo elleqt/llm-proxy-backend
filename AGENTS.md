@@ -132,7 +132,8 @@ The full variable reference is in `internal/config/config.go` and the README.
 
 ## Testing & QA
 
-- **Mocks:** stdlib `testing` plus strict mockery testify mocks: `users := mocks.NewUserRepo(t); users.EXPECT().ByID(mock.Anything, id).Return(u, nil)`. An unexpected call fails the test, so a test of a refused path sets no expectations. Tests use table-driven `t.Run` for pure logic.
+- **Assertions:** testify only. `require` where the test cannot go on (the old `t.Fatal`), `assert` where it should report and continue (the old `t.Error`); inside goroutines, HTTP handlers and mock callbacks always `assert`. Expected value first (`require.Equal(t, want, got)`), and the specific assertion over `True` (`NoError`, `ErrorIs`, `Len`, `Contains`, …). An identity check on a sentinel, where a wrapped error must fail, is `require.Same`. Lint rejects `t.Fatal*`, `t.Error*`, `t.Fail*` (`forbidigo`) and checks testify usage (`testifylint`).
+- **Mocks:** strict mockery testify mocks: `users := mocks.NewUserRepo(t); users.EXPECT().ByID(mock.Anything, id).Return(u, nil)`. An unexpected call fails the test, so a test of a refused path sets no expectations. Tests use table-driven `t.Run` for pure logic.
 - **Test packages:**
   - `internal/app` tests use `package app_test`, because the mocks import `app`; shared doubles live in `helpers_test.go`.
   - Postgres tests are black-box (`postgres_test`), with `export_test.go` exposing test-only hooks.

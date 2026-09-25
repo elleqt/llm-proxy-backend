@@ -13,7 +13,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 var settingsNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
@@ -47,9 +49,7 @@ func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 	boot.EXPECT().UpstreamDocument(mock.Anything).Return(runningDoc, nil).Once()
 
 	running, err := app.LoadBootConfig(context.Background(), boot, ownedDefaults())
-	if err != nil {
-		t.Fatalf("LoadBootConfig: %v", err)
-	}
+	require.NoError(t, err, "LoadBootConfig")
 
 	fixture := &settingsFixture{
 		repo:    mocks.NewSettingsRepo(t),
@@ -70,13 +70,10 @@ func wantSettingError(t *testing.T, err, kind error, field string) {
 	t.Helper()
 
 	var se *app.SettingError
-	if !errors.Is(err, kind) || !errors.As(err, &se) {
-		t.Fatalf("err = %v, want a *SettingError wrapping %v", err, kind)
-	}
 
-	if se.Field != field {
-		t.Fatalf("field = %q, want %q (err %v)", se.Field, field, err)
-	}
+	require.ErrorIs(t, err, kind)
+	require.ErrorAs(t, err, &se, "want a *SettingError")
+	require.Equal(t, field, se.Field, "field of %v", err)
 }
 
 func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
@@ -158,9 +155,7 @@ func TestSettingsRefusesUnknownAndMalformedDocuments(t *testing.T) {
 			f := newSettingsFixture(t, "")
 
 			_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc, true))
-			if !errors.Is(err, app.ErrInvalidSettings) {
-				t.Fatalf("err = %v, want ErrInvalidSettings", err)
-			}
+			require.ErrorIs(t, err, app.ErrInvalidSettings)
 		})
 	}
 
@@ -188,25 +183,12 @@ func TestSettingsDryRunAppliesAndPersistsNothing(t *testing.T) {
 	// No PushConfig, SetUpstreamDocument or Record expectation: a call fails the test.
 
 	res, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-retry: 3\n", true))
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	if res.Applied {
-		t.Fatal("dry run reported applied")
-	}
-
-	if !strings.Contains(res.Diff, "-request-retry: 1\n") || !strings.Contains(res.Diff, "+request-retry: 3\n") {
-		t.Fatalf("diff does not show the change:\n%s", res.Diff)
-	}
-
-	if res.Settings.Fields.RequestRetry != 3 {
-		t.Fatalf("proposed requestRetry = %d, want 3", res.Settings.Fields.RequestRetry)
-	}
-
-	if fixture.running.RequestRetry != 1 {
-		t.Fatalf("running configuration was modified: request-retry = %d", fixture.running.RequestRetry)
-	}
+	require.NoError(t, err, "Update")
+	require.False(t, res.Applied, "dry run reported applied")
+	require.Contains(t, res.Diff, "-request-retry: 1\n", "diff does not show the change")
+	require.Contains(t, res.Diff, "+request-retry: 3\n", "diff does not show the change")
+	require.Equal(t, 3, res.Settings.Fields.RequestRetry, "proposed requestRetry")
+	require.Equal(t, 1, fixture.running.RequestRetry, "running configuration was modified")
 }
 
 func TestSettingsApplyPushesThenPersists(t *testing.T) {
@@ -239,35 +221,21 @@ func TestSettingsApplyPushesThenPersists(t *testing.T) {
 	})).Return(nil).Once()
 
 	res, err := fixture.svc.Update(context.Background(), admin, yamlUpdate(doc, false))
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
-
-	if !res.Applied {
-		t.Fatal("not reported applied")
-	}
-
-	if strings.Join(steps, ",") != "push,persist" {
-		t.Fatalf("steps = %v, want push then persist", steps)
-	}
-
-	if pushed == fixture.running {
-		t.Fatal("pushed the running configuration object itself; want a new one")
-	}
-
-	if pushed.RequestRetry != 3 || pushed.MaxRetryInterval != 30 {
-		t.Fatalf("pushed request-retry/max-retry-interval = %d/%d, want 3/30", pushed.RequestRetry, pushed.MaxRetryInterval)
-	}
+	require.NoError(t, err, "Update")
+	require.True(t, res.Applied, "not reported applied")
+	require.Equal(t, []string{"push", "persist"}, steps, "want push then persist")
+	require.NotNil(t, pushed, "nothing pushed")
+	require.NotSame(t, fixture.running, pushed, "pushed the running configuration object itself; want a new one")
+	require.Equal(t, 3, pushed.RequestRetry, "pushed request-retry")
+	require.Equal(t, 30, pushed.MaxRetryInterval, "pushed max-retry-interval")
 	// Gateway-owned fields come from the running configuration, untouched.
-	if pushed.Host != "127.0.0.1" || pushed.Port != 8317 || pushed.AuthDir != fixture.running.AuthDir ||
-		len(pushed.OpenAICompatibility) != 1 || pushed.OpenAICompatibility[0].Name != "vendor-a" {
-		t.Fatalf("gateway-owned fields not carried over: host=%q port=%d auth-dir=%q compat=%v",
-			pushed.Host, pushed.Port, pushed.AuthDir, pushed.OpenAICompatibility)
-	}
-
-	if strings.Contains(res.Diff, "auth-dir") || strings.Contains(res.Diff, "openai-compatibility") {
-		t.Fatalf("diff shows gateway-owned fields:\n%s", res.Diff)
-	}
+	require.Equal(t, "127.0.0.1", pushed.Host, "gateway-owned host not carried over")
+	require.Equal(t, 8317, pushed.Port, "gateway-owned port not carried over")
+	require.Equal(t, fixture.running.AuthDir, pushed.AuthDir, "gateway-owned auth-dir not carried over")
+	require.Len(t, pushed.OpenAICompatibility, 1, "gateway-owned openai-compatibility not carried over")
+	require.Equal(t, "vendor-a", pushed.OpenAICompatibility[0].Name, "gateway-owned openai-compatibility not carried over")
+	require.NotContains(t, res.Diff, "auth-dir", "diff shows gateway-owned fields")
+	require.NotContains(t, res.Diff, "openai-compatibility", "diff shows gateway-owned fields")
 }
 
 func TestSettingsPushFailurePersistsNothing(t *testing.T) {
@@ -279,9 +247,7 @@ func TestSettingsPushFailurePersistsNothing(t *testing.T) {
 	// No SetUpstreamDocument and no Record expectation.
 
 	_, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-retry: 3\n", false))
-	if !errors.Is(err, refused) {
-		t.Fatalf("err = %v, want the push error", err)
-	}
+	require.ErrorIs(t, err, refused, "want the push error")
 }
 
 func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
@@ -299,13 +265,9 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(dbDown).Once()
 
 	_, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-retry: 3\n", false))
-	if !errors.Is(err, dbDown) {
-		t.Fatalf("err = %v, want the persistence error", err)
-	}
-
-	if len(pushes) != 2 || pushes[1] != fixture.running {
-		t.Fatalf("pushes = %d, want the new configuration then the previous one back", len(pushes))
-	}
+	require.ErrorIs(t, err, dbDown, "want the persistence error")
+	require.Len(t, pushes, 2, "want the new configuration then the previous one back")
+	require.Same(t, fixture.running, pushes[1], "want the previous configuration pushed back")
 }
 
 func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
@@ -329,28 +291,26 @@ func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
 		"      - urls: [turn:turn.test:3478]\n        username: turnuser\n        credential: TURNs3cret\n"
 
 	res, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc, false))
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
+	require.NoError(t, err, "Update")
 
-	if !strings.Contains(res.Diff, "-proxy-url: http://redacted@proxy.old.test:3128\n") ||
-		!strings.Contains(res.Diff, "+proxy-url: socks5://redacted@proxy.new.test:1080\n") ||
-		!strings.Contains(res.Diff, "+          - turn:turn.test:3478") ||
-		!strings.Contains(res.Diff, "+        username: REDACTED") ||
-		!strings.Contains(res.Diff, "+        credential: REDACTED") {
-		t.Fatalf("diff does not show the redacted change:\n%s", res.Diff)
+	for _, want := range []string{
+		"-proxy-url: http://redacted@proxy.old.test:3128\n",
+		"+proxy-url: socks5://redacted@proxy.new.test:1080\n",
+		"+          - turn:turn.test:3478",
+		"+        username: REDACTED",
+		"+        credential: REDACTED",
+	} {
+		require.Contains(t, res.Diff, want, "diff does not show the redacted change")
 	}
 
 	audited, _ := detail["diff"].(string)
+
 	for _, secret := range []string{"olduser", "oldpass", "OLDQUERY", "alice", "s3cret", "p4thsecret", "QS3CRET", "turnuser", "TURNs3cret"} {
-		if strings.Contains(res.Diff, secret) || strings.Contains(audited, secret) {
-			t.Fatalf("credential %q leaked:\ndiff:\n%s\naudit:\n%s", secret, res.Diff, audited)
-		}
+		require.NotContains(t, res.Diff, secret, "credential leaked into the diff")
+		require.NotContains(t, audited, secret, "credential leaked into the audit record")
 	}
 	// The administrator's own view keeps the value, or a round-trip would erase it.
-	if res.Settings.Fields.ProxyURL != "socks5://alice:s3cret@proxy.new.test:1080/p4thsecret?token=QS3CRET" {
-		t.Fatalf("settings proxyURL = %q", res.Settings.Fields.ProxyURL)
-	}
+	require.Equal(t, "socks5://alice:s3cret@proxy.new.test:1080/p4thsecret?token=QS3CRET", res.Settings.Fields.ProxyURL, "settings proxyURL")
 }
 
 func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
@@ -375,23 +335,14 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 	res, err := fixture.svc.Update(context.Background(), admin, app.SettingsUpdate{
 		Fields: &app.SettingsPatch{RequestRetry: &retry, MaxRetryInterval: &interval},
 	})
-	if err != nil {
-		t.Fatalf("Update: %v", err)
-	}
+	require.NoError(t, err, "Update")
 
 	for _, want := range []string{"# operator notes", "request-log: true # keep", "proxy-url: http://proxy.test:3128", "request-retry: 5", "max-retry-interval: 20"} {
-		if !strings.Contains(persisted, want) {
-			t.Errorf("persisted document lacks %q:\n%s", want, persisted)
-		}
+		assert.Contains(t, persisted, want, "persisted document")
 	}
 
-	if got := res.Settings.Fields; got != (app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}) {
-		t.Fatalf("fields = %+v", got)
-	}
-
-	if strings.Contains(res.Diff, "request-log") {
-		t.Fatalf("diff shows an untouched key:\n%s", res.Diff)
-	}
+	require.Equal(t, app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
+	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
 }
 
 func TestSettingsFieldPatchValidation(t *testing.T) {
@@ -415,17 +366,12 @@ func TestSettingsGet(t *testing.T) {
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
 
 	got, err := fixture.svc.Get(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
+	require.NoError(t, err, "Get")
+	require.Equal(t, stored, got.YAML, "Get YAML")
+	require.Equal(t, app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4}, got.Fields, "Get fields")
 
-	if got.YAML != stored || got.Fields != (app.SettingsFields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4}) {
-		t.Fatalf("Get = %+v", got)
-	}
-
-	if _, err := fixture.svc.Get(context.Background(), identity.User{}); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Get by nobody: err = %v, want ErrForbidden", err)
-	}
+	_, err = fixture.svc.Get(context.Background(), identity.User{})
+	require.ErrorIs(t, err, app.ErrForbidden, "Get by nobody")
 }
 
 func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
@@ -433,23 +379,20 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
 
 	cfg, err := app.LoadBootConfig(context.Background(), repo, ownedDefaults())
-	if err != nil {
-		t.Fatalf("LoadBootConfig: %v", err)
-	}
-
-	if cfg.Port != 8317 || len(cfg.OpenAICompatibility) != 1 || cfg.RequestRetry != 0 {
-		t.Fatalf("boot config = port %d, compat %d, request-retry %d", cfg.Port, len(cfg.OpenAICompatibility), cfg.RequestRetry)
-	}
+	require.NoError(t, err, "LoadBootConfig")
+	require.Equal(t, 8317, cfg.Port, "boot config port")
+	require.Len(t, cfg.OpenAICompatibility, 1, "boot config openai-compatibility")
+	require.Zero(t, cfg.RequestRetry, "boot config request-retry")
 
 	aliases := cfg.OAuthModelAlias["claude"]
-	if len(aliases) != 3 || aliases[1].Name != "claude-sonnet-4-5-20250929" ||
-		aliases[1].Alias != "claude-sonnet-4-5" || !aliases[1].Fork {
-		t.Fatalf("default aliases = %#v", aliases)
-	}
+	require.Len(t, aliases, 3, "default aliases")
+	require.Equal(t, "claude-sonnet-4-5-20250929", aliases[1].Name, "default alias name")
+	require.Equal(t, "claude-sonnet-4-5", aliases[1].Alias, "default alias")
+	require.True(t, aliases[1].Fork, "default alias fork")
 
-	if excluded := cfg.OAuthExcludedModels["claude"]; len(excluded) != 5 || excluded[3] != "claude-3-7-sonnet-20250219" {
-		t.Fatalf("default exclusions = %#v", excluded)
-	}
+	excluded := cfg.OAuthExcludedModels["claude"]
+	require.Len(t, excluded, 5, "default exclusions")
+	require.Equal(t, "claude-3-7-sonnet-20250219", excluded[3], "default exclusion")
 }
 
 func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {
@@ -457,11 +400,7 @@ func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {
 	f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
 
 	view, err := f.svc.Get(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-
-	if !strings.Contains(view.YAML, "oauth-model-alias:") || !strings.Contains(view.YAML, "claude-opus-4-5") {
-		t.Fatalf("Get YAML = %q, want the default document", view.YAML)
-	}
+	require.NoError(t, err, "Get")
+	require.Contains(t, view.YAML, "oauth-model-alias:", "want the default document")
+	require.Contains(t, view.YAML, "claude-opus-4-5", "want the default document")
 }

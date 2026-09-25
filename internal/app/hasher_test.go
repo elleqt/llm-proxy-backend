@@ -2,11 +2,11 @@ package app_test
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/stretchr/testify/require"
 )
 
 // The bound is the defence against a spray of sign-ins across distinct addresses,
@@ -83,23 +83,21 @@ func TestPasswordHasherBoundsConcurrentDerivations(t *testing.T) {
 	// waiting for a slot or, with no bound, has already derived and returned.
 	cancel()
 
-	if err := <-results; !errors.Is(err, context.Canceled) {
-		mu.Lock()
-		defer mu.Unlock()
+	beyond := <-results
 
-		t.Fatalf("the caller beyond capacity %d returned %v with %d derivations at the peak, "+
-			"want context.Canceled without deriving", capacity, err, peak)
-	}
+	mu.Lock()
+	peakAtCancel := peak
+	mu.Unlock()
+
+	require.ErrorIs(t, beyond, context.Canceled,
+		"the caller beyond capacity %d must give up without deriving (%d derivations at the peak)",
+		capacity, peakAtCancel)
 
 	close(release)
 
 	for range capacity {
-		if err := <-results; err != nil {
-			t.Fatalf("a caller holding a slot failed: %v", err)
-		}
+		require.NoError(t, <-results, "a caller holding a slot failed")
 	}
 
-	if peak > capacity {
-		t.Fatalf("%d derivations ran at once, want at most %d", peak, capacity)
-	}
+	require.LessOrEqual(t, peak, capacity, "derivations running at once")
 }

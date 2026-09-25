@@ -15,6 +15,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // recoveryEnv is Recovery over a real database, beside the sign-in it must let
@@ -50,13 +51,11 @@ func (e *recoveryEnv) account(t *testing.T, email string, role identity.Role, pa
 	user := humanUser(email)
 
 	user.Role = role
-	if err := e.users.Create(ctx, user); err != nil {
-		t.Fatalf("create %s: %v", email, err)
-	}
+	err := e.users.Create(ctx, user)
+	require.NoError(t, err, "create %s", email)
 
-	if err := e.passwords.Set(ctx, user.ID, mustHash(t, password), nil); err != nil {
-		t.Fatalf("password of %s: %v", email, err)
-	}
+	err = e.passwords.Set(ctx, user.ID, mustHash(t, password), nil)
+	require.NoError(t, err, "password of %s", email)
 
 	return user
 }
@@ -65,18 +64,15 @@ func (e *recoveryEnv) block(t *testing.T, id uuid.UUID) {
 	t.Helper()
 
 	blocked := identity.StatusBlocked
-	if err := e.users.UpdateAdminState(context.Background(), id, app.AdminChange{Status: &blocked}); err != nil {
-		t.Fatalf("block: %v", err)
-	}
+	err := e.users.UpdateAdminState(context.Background(), id, app.AdminChange{Status: &blocked})
+	require.NoError(t, err, "block")
 }
 
 func (e *recoveryEnv) storedHash(t *testing.T, id uuid.UUID) string {
 	t.Helper()
 
 	hash, _, err := e.passwords.Get(context.Background(), id)
-	if err != nil {
-		t.Fatalf("password: %v", err)
-	}
+	require.NoError(t, err, "password")
 
 	return hash
 }
@@ -87,9 +83,7 @@ func (e *recoveryEnv) cliAudit(t *testing.T, id uuid.UUID) map[string]map[string
 	t.Helper()
 
 	events, err := e.activity.RecentAudit(context.Background(), id, 50)
-	if err != nil {
-		t.Fatalf("audit: %v", err)
-	}
+	require.NoError(t, err, "audit")
 
 	out := map[string]map[string]any{}
 
@@ -116,77 +110,61 @@ func TestRecoveryIssuesAWorkingTemporaryPassword(t *testing.T) {
 	user := env.account(t, "Person@Example.com", identity.RoleUser, old)
 
 	held, _, err := env.auth.SignIn(ctx, user.Email, old, app.SessionMeta{})
-	if err != nil {
-		t.Fatalf("SignIn: %v", err)
-	}
+	require.NoError(t, err, "SignIn")
 
 	key, _, err := credentials.Generate(user.ID, "ops")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if err := env.tokens.Create(ctx, key); err != nil {
-		t.Fatal(err)
-	}
+	err = env.tokens.Create(ctx, key)
+	require.NoError(t, err)
 
 	for range testMaxFailures {
-		if _, _, err := env.auth.SignIn(ctx, user.Email, "a wrong guess", app.SessionMeta{}); !errors.Is(err, app.ErrInvalidCredentials) {
-			t.Fatalf("wrong password: err = %v", err)
-		}
+		_, _, err := env.auth.SignIn(ctx, user.Email, "a wrong guess", app.SessionMeta{})
+		require.ErrorIs(t, err, app.ErrInvalidCredentials, "wrong password")
 	}
 
-	if _, _, err := env.auth.SignIn(ctx, user.Email, old, app.SessionMeta{}); !errors.Is(err, app.ErrLockedOut) {
-		t.Fatalf("after %d failures: err = %v, want locked out", testMaxFailures, err)
-	}
+	_, _, err = env.auth.SignIn(ctx, user.Email, old, app.SessionMeta{})
+	require.ErrorIs(t, err, app.ErrLockedOut, "after %d failures: want locked out", testMaxFailures)
 
 	before := time.Now()
 
 	got, err := env.recovery.ResetPassword(ctx, "  person@EXAMPLE.com ", false)
-	if err != nil {
-		t.Fatalf("ResetPassword: %v", err)
-	}
-
-	if got.User.ID != user.ID || got.Unblocked {
-		t.Fatalf("recovered %+v, want %s, not unblocked", got.User, user.ID)
-	}
+	require.NoError(t, err, "ResetPassword")
+	require.Equal(t, user.ID, got.User.ID, "recovered user")
+	require.False(t, got.Unblocked, "recovered %+v, want not unblocked", got.User)
 
 	_, expiry, err := env.passwords.Get(ctx, user.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	lo, hi := before.Add(app.TemporaryPasswordTTL), time.Now().Add(app.TemporaryPasswordTTL)
+
+	require.NotNil(t, expiry, "stored expiry")
 	// Postgres keeps microseconds.
-	if expiry == nil || expiry.Sub(got.Password.ExpiresAt).Abs() >= time.Microsecond ||
-		got.Password.ExpiresAt.Before(lo) || got.Password.ExpiresAt.After(hi) {
-		t.Fatalf("expiry stored %v, shown %v, want %s from now", expiry, got.Password.ExpiresAt, app.TemporaryPasswordTTL)
-	}
+	require.Less(t, expiry.Sub(got.Password.ExpiresAt).Abs(), time.Microsecond,
+		"expiry stored %v, shown %v", *expiry, got.Password.ExpiresAt)
+	require.WithinRange(t, got.Password.ExpiresAt, lo, hi, "shown expiry, want %s from now", app.TemporaryPasswordTTL)
 
-	if _, _, err := env.auth.ResolveSession(ctx, held.ID); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("the session open before the reset: err = %v, want it ended", err)
-	}
+	_, _, err = env.auth.ResolveSession(ctx, held.ID)
+	require.ErrorIs(t, err, app.ErrNotFound, "the session open before the reset: want it ended")
 
-	if _, _, err := env.auth.SignIn(ctx, user.Email, old, app.SessionMeta{}); !errors.Is(err, app.ErrInvalidCredentials) {
-		t.Fatalf("the old password: err = %v, want refused", err)
-	}
+	_, _, err = env.auth.SignIn(ctx, user.Email, old, app.SessionMeta{})
+	require.ErrorIs(t, err, app.ErrInvalidCredentials, "the old password: want refused")
 
 	sess, _, err := env.auth.SignIn(ctx, user.Email, got.Password.Password, app.SessionMeta{})
-	if err != nil {
-		t.Fatalf("SignIn with the temporary password: %v", err)
-	}
+	require.NoError(t, err, "SignIn with the temporary password")
 
-	if resolved, _, err := env.auth.ResolveSession(ctx, sess.ID); err != nil || !resolved.Restricted {
-		t.Fatalf("session = %+v, %v; want a restricted one", resolved, err)
-	}
+	resolved, _, err := env.auth.ResolveSession(ctx, sess.ID)
+	require.NoError(t, err, "ResolveSession")
+	require.True(t, resolved.Restricted, "session = %+v; want a restricted one", resolved)
 
-	if kept, err := env.tokens.ByID(ctx, key.ID); err != nil || kept.RevokedAt != nil {
-		t.Fatalf("API key after the reset = %+v, %v; want it live", kept, err)
-	}
+	kept, err := env.tokens.ByID(ctx, key.ID)
+	require.NoError(t, err, "API key after the reset")
+	require.Nil(t, kept.RevokedAt, "API key after the reset: want it live")
 
 	audit := env.cliAudit(t, user.ID)
-	if d, ok := audit["user.password_reset"]; !ok || d["via"] != "cli" {
-		t.Fatalf("actorless audit events %v, want user.password_reset via cli", audit)
-	}
+	d, ok := audit["user.password_reset"]
+	require.True(t, ok, "actorless audit events %v, want user.password_reset", audit)
+	require.Equal(t, "cli", d["via"], "user.password_reset via")
 
 	assertNoSecret(t, []app.AuditEvent{{Detail: audit["user.password_reset"]}}, got.Password.Password)
 }
@@ -196,9 +174,8 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 	ctx := context.Background()
 	env := newRecoveryEnv(t)
 
-	if _, err := env.recovery.ResetPassword(ctx, "nobody@example.com", false); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("unknown address: err = %v, want ErrNotFound", err)
-	}
+	_, err := env.recovery.ResetPassword(ctx, "nobody@example.com", false)
+	require.ErrorIs(t, err, app.ErrNotFound, "unknown address")
 
 	// A blocked person is an administrator's decision, whatever the flag says.
 	person := env.account(t, "person@example.com", identity.RoleUser, "their password")
@@ -207,14 +184,13 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 
 	for _, unblock := range []bool{false, true} {
 		var blocked *app.BlockedError
-		if _, err := env.recovery.ResetPassword(ctx, person.Email, unblock); !errors.As(err, &blocked) || blocked.CanUnblock {
-			t.Fatalf("blocked person, unblock=%v: err = %v, want blocked and not unblockable", unblock, err)
-		}
+
+		_, err := env.recovery.ResetPassword(ctx, person.Email, unblock)
+		require.ErrorAs(t, err, &blocked, "blocked person, unblock=%v", unblock)
+		require.False(t, blocked.CanUnblock, "blocked person, unblock=%v: want not unblockable", unblock)
 	}
 
-	if env.storedHash(t, person.ID) != hash {
-		t.Fatal("a refused recovery replaced the password")
-	}
+	require.Equal(t, hash, env.storedHash(t, person.ID), "a refused recovery replaced the password")
 
 	// A blocked administrator while another one is active: that one unblocks.
 	admin := env.account(t, "admin@example.com", identity.RoleAdmin, "admin password")
@@ -222,9 +198,10 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 	env.block(t, admin.ID)
 
 	var blocked *app.BlockedError
-	if _, err := env.recovery.ResetPassword(ctx, admin.Email, true); !errors.As(err, &blocked) || blocked.CanUnblock {
-		t.Fatalf("blocked admin beside an active one: err = %v, want blocked and not unblockable", err)
-	}
+
+	_, err = env.recovery.ResetPassword(ctx, admin.Email, true)
+	require.ErrorAs(t, err, &blocked, "blocked admin beside an active one")
+	require.False(t, blocked.CanUnblock, "blocked admin beside an active one: want not unblockable")
 
 	// No other active administrator — an active ordinary account does not count:
 	// unblocking is offered, and done only when asked.
@@ -232,30 +209,21 @@ func TestRecoveryRefusesWhatItCannotSafelyRecover(t *testing.T) {
 	env.block(t, other.ID)
 
 	hash = env.storedHash(t, admin.ID)
-	if _, err := env.recovery.ResetPassword(ctx, admin.Email, false); !errors.As(err, &blocked) || !blocked.CanUnblock {
-		t.Fatalf("sole blocked admin without --unblock: err = %v, want blocked and unblockable", err)
-	}
-
-	if env.storedHash(t, admin.ID) != hash {
-		t.Fatal("a refused recovery replaced the password")
-	}
+	_, err = env.recovery.ResetPassword(ctx, admin.Email, false)
+	require.ErrorAs(t, err, &blocked, "sole blocked admin without --unblock")
+	require.True(t, blocked.CanUnblock, "sole blocked admin without --unblock: want unblockable")
+	require.Equal(t, hash, env.storedHash(t, admin.ID), "a refused recovery replaced the password")
 
 	got, err := env.recovery.ResetPassword(ctx, admin.Email, true)
-	if err != nil {
-		t.Fatalf("sole blocked admin with --unblock: %v", err)
-	}
+	require.NoError(t, err, "sole blocked admin with --unblock")
+	require.True(t, got.Unblocked, "the recovery does not report the unblock")
 
-	if !got.Unblocked {
-		t.Fatal("the recovery does not report the unblock")
-	}
+	_, _, err = env.auth.SignIn(ctx, admin.Email, got.Password.Password, app.SessionMeta{})
+	require.NoError(t, err, "the unblocked administrator signs in")
 
-	if _, _, err := env.auth.SignIn(ctx, admin.Email, got.Password.Password, app.SessionMeta{}); err != nil {
-		t.Fatalf("the unblocked administrator signs in: %v", err)
-	}
-
-	if d := env.cliAudit(t, admin.ID)["user.update"]; d["via"] != "cli" || d["status"] != string(identity.StatusActive) {
-		t.Fatalf("unblock audit detail = %v, want status active via cli", d)
-	}
+	d := env.cliAudit(t, admin.ID)["user.update"]
+	require.Equal(t, "cli", d["via"], "unblock audit via")
+	require.Equal(t, string(identity.StatusActive), d["status"], "unblock audit status")
 }
 
 // The unblock is audited before anything else is tried: a reset that then fails
@@ -282,14 +250,14 @@ func TestRecoveryRecordsTheUnblockEvenWhenTheResetFails(t *testing.T) {
 	r := app.NewRecovery(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
 		testHasher(), mocks.NewAuditSink(t), systemClock{})
 
-	if _, err := r.ResetPassword(context.Background(), admin.Email, true); !errors.Is(err, failure) {
-		t.Fatalf("err = %v, want the reset's failure", err)
-	}
+	_, err := r.ResetPassword(context.Background(), admin.Email, true)
+	require.ErrorIs(t, err, failure, "want the reset's failure")
 
-	if len(unblocked) != 1 || unblocked[0].Action != "user.update" || unblocked[0].ActorID != uuid.Nil ||
-		unblocked[0].Detail["via"] != "cli" || unblocked[0].Detail["status"] != string(identity.StatusActive) {
-		t.Fatalf("unblock records = %+v, want one actorless user.update to active via cli", unblocked)
-	}
+	require.Len(t, unblocked, 1, "unblock records: want one actorless user.update")
+	require.Equal(t, "user.update", unblocked[0].Action, "unblock action")
+	require.Equal(t, uuid.Nil, unblocked[0].ActorID, "unblock actor: want none")
+	require.Equal(t, "cli", unblocked[0].Detail["via"], "unblock via")
+	require.Equal(t, string(identity.StatusActive), unblocked[0].Detail["status"], "unblock status")
 }
 
 // A service account has no password to reset. It has no address either, so only a
@@ -301,7 +269,6 @@ func TestRecoveryOfAServiceAccountIsNotLocal(t *testing.T) {
 	r := app.NewRecovery(users, mocks.NewPasswordRepo(t), mocks.NewSessionRepo(t), mocks.NewLoginAttemptRepo(t),
 		testHasher(), mocks.NewAuditSink(t), systemClock{})
 
-	if _, err := r.ResetPassword(context.Background(), "panel@example.com", false); !errors.Is(err, app.ErrNotLocal) {
-		t.Fatalf("err = %v, want ErrNotLocal", err)
-	}
+	_, err := r.ResetPassword(context.Background(), "panel@example.com", false)
+	require.ErrorIs(t, err, app.ErrNotLocal)
 }

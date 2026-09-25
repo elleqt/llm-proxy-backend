@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +12,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 type providersFixture struct {
@@ -83,9 +84,7 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 
 			calls["Remove"] = fixture.svc.Remove(ctx, actor, codexAccount.ID)
 			for method, err := range calls {
-				if !errors.Is(err, app.ErrForbidden) {
-					t.Errorf("%s = %v, want ErrForbidden", method, err)
-				}
+				assert.ErrorIs(t, err, app.ErrForbidden, method)
 			}
 		})
 	}
@@ -104,21 +103,13 @@ func TestProvidersListCarriesEachAccountsQuota(t *testing.T) {
 	fixture.quota.EXPECT().QuotaSignals().Return([]app.QuotaSignal{fiveHours, week})
 
 	got, err := fixture.svc.List(context.Background(), providerAdmin())
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-
-	if len(got) != 2 {
-		t.Fatalf("List = %+v, want both accounts", got)
-	}
-
-	if got[0].Provider != "chatgpt" || len(got[0].Quota) != 2 || got[0].Quota[0] != fiveHours || got[0].Quota[1] != week {
-		t.Fatalf("codex account = %+v, want provider chatgpt with its 5h and 7d windows", got[0])
-	}
-
-	if len(got[1].Quota) != 0 {
-		t.Fatalf("claude account = %+v, want no quota: none was reported for it", got[1])
-	}
+	require.NoError(t, err, "List")
+	require.Len(t, got, 2, "List: want both accounts")
+	require.Equal(t, "chatgpt", got[0].Provider, "codex account provider")
+	require.Len(t, got[0].Quota, 2, "codex account: want its 5h and 7d windows")
+	require.Equal(t, fiveHours, got[0].Quota[0], "codex 5h window")
+	require.Equal(t, week, got[0].Quota[1], "codex 7d window")
+	require.Empty(t, got[1].Quota, "claude account: want no quota: none was reported for it")
 }
 
 // TestProvidersSetDisabledGoesThroughTheGateway: the change is the gateway's,
@@ -138,25 +129,18 @@ func TestProvidersSetDisabledGoesThroughTheGateway(t *testing.T) {
 	actor := providerAdmin()
 
 	got, err := fixture.svc.SetDisabled(context.Background(), actor, codexAccount.ID, true)
-	if err != nil {
-		t.Fatalf("SetDisabled: %v", err)
-	}
-
-	if !got.Disabled {
-		t.Fatalf("SetDisabled returned %+v, want the account as it now is: disabled", got)
-	}
-
-	if len(fixture.events) != 1 {
-		t.Fatalf("audit = %+v, want one provider.account_disable by the actor naming chatgpt", fixture.events)
-	}
+	require.NoError(t, err, "SetDisabled")
+	require.True(t, got.Disabled, "SetDisabled returned %+v, want the account as it now is: disabled", got)
+	require.Len(t, fixture.events, 1, "audit: want one provider.account_disable")
 
 	event := fixture.events[0]
+	require.Equal(t, "provider.account_disable", event.Action, "audit action")
+	require.Equal(t, actor.ID, event.ActorID, "audit actor")
 
 	auditedDisabled, isBool := event.Detail["disabled"].(bool)
-	if event.Action != "provider.account_disable" || event.ActorID != actor.ID ||
-		!isBool || !auditedDisabled || event.Detail["provider"] != "chatgpt" {
-		t.Fatalf("audit = %+v, want one provider.account_disable by the actor naming chatgpt", fixture.events)
-	}
+	require.True(t, isBool, "audit detail disabled = %v, want a bool", event.Detail["disabled"])
+	require.True(t, auditedDisabled, "audit detail disabled")
+	require.Equal(t, "chatgpt", event.Detail["provider"], "audit detail provider")
 }
 
 // TestProvidersRemoveForgetsTheAccount: removal goes through the gateway, then
@@ -170,13 +154,11 @@ func TestProvidersRemoveForgetsTheAccount(t *testing.T) {
 	fixture.metrics.EXPECT().ForgetAccount(codexAccount.ID, "chatgpt").Once()
 	fixture.recordAudits()
 
-	if err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-
-	if len(fixture.events) != 1 || fixture.events[0].Action != "provider.account_remove" || fixture.events[0].Target != "provider_account/"+codexAccount.ID {
-		t.Fatalf("audit = %+v, want one provider.account_remove of the account", fixture.events)
-	}
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID)
+	require.NoError(t, err, "Remove")
+	require.Len(t, fixture.events, 1, "audit: want one provider.account_remove")
+	require.Equal(t, "provider.account_remove", fixture.events[0].Action, "audit action")
+	require.Equal(t, "provider_account/"+codexAccount.ID, fixture.events[0].Target, "audit target")
 }
 
 // TestProvidersRemoveThatFailsForgetsNothing: an account the gateway could not
@@ -188,9 +170,8 @@ func TestProvidersRemoveThatFailsForgetsNothing(t *testing.T) {
 	failure := errors.New("credential not deleted")
 	fixture.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(failure)
 
-	if err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID); !errors.Is(err, failure) {
-		t.Fatalf("Remove = %v, want the gateway's error", err)
-	}
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), codexAccount.ID)
+	require.ErrorIs(t, err, failure, "Remove: want the gateway's error")
 }
 
 // TestProvidersUnknownAccountIsNotFound: an id the gateway does not hold is
@@ -199,13 +180,11 @@ func TestProvidersUnknownAccountIsNotFound(t *testing.T) {
 	fixture := newProvidersFixture(t)
 	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
 
-	if err := fixture.svc.Remove(context.Background(), providerAdmin(), "no-such.json"); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("Remove(unknown) = %v, want ErrNotFound", err)
-	}
+	err := fixture.svc.Remove(context.Background(), providerAdmin(), "no-such.json")
+	require.ErrorIs(t, err, app.ErrNotFound, "Remove(unknown)")
 
-	if _, err := fixture.svc.SetDisabled(context.Background(), providerAdmin(), "no-such.json", true); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("SetDisabled(unknown) = %v, want ErrNotFound", err)
-	}
+	_, err = fixture.svc.SetDisabled(context.Background(), providerAdmin(), "no-such.json", true)
+	require.ErrorIs(t, err, app.ErrNotFound, "SetDisabled(unknown)")
 }
 
 // TestProvidersLoginAuditCarriesNoSecret: the wizard's audit records name the
@@ -231,30 +210,22 @@ func TestProvidersLoginAuditCarriesNoSecret(t *testing.T) {
 	actor := providerAdmin()
 
 	login, err := fixture.svc.StartLogin(context.Background(), actor, "chatgpt")
-	if err != nil {
-		t.Fatalf("StartLogin: %v", err)
-	}
+	require.NoError(t, err, "StartLogin")
 
 	account, err := fixture.svc.CompleteLogin(context.Background(), actor, login.SessionID, callback)
-	if err != nil {
-		t.Fatalf("CompleteLogin: %v", err)
-	}
+	require.NoError(t, err, "CompleteLogin")
+	require.Equal(t, codexAccount.ID, account.ID, "CompleteLogin: want the added account")
 
-	if account.ID != codexAccount.ID {
-		t.Fatalf("CompleteLogin returned %+v, want the added account", account)
-	}
-
-	if len(fixture.events) != 2 || fixture.events[0].Action != "provider.login_start" || fixture.events[1].Action != "provider.account_add" ||
-		fixture.events[1].Detail["account_id"] != codexAccount.ID || fixture.events[1].Detail["provider"] != "chatgpt" {
-		t.Fatalf("audit = %+v, want login_start then account_add naming the chatgpt account", fixture.events)
-	}
+	require.Len(t, fixture.events, 2, "audit: want login_start then account_add")
+	require.Equal(t, "provider.login_start", fixture.events[0].Action, "first audit action")
+	require.Equal(t, "provider.account_add", fixture.events[1].Action, "second audit action")
+	require.Equal(t, codexAccount.ID, fixture.events[1].Detail["account_id"], "account_add detail account_id")
+	require.Equal(t, "chatgpt", fixture.events[1].Detail["provider"], "account_add detail provider")
 
 	for _, e := range fixture.events {
 		rendered := fmt.Sprintf("%s %s %v %s %s", e.Action, e.Target, e.Detail, e.IP, e.UserAgent)
 		for _, secret := range []string{callback, code, state, sessionID} {
-			if strings.Contains(rendered, secret) {
-				t.Fatalf("audit event %q carries %q", rendered, secret)
-			}
+			require.NotContains(t, rendered, secret, "audit event carries a secret")
 		}
 	}
 }
@@ -265,9 +236,8 @@ func TestProvidersFailedLoginIsNotAudited(t *testing.T) {
 	f := newProvidersFixture(t)
 	f.logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(app.VendorAccount{}, app.ErrLoginExpired)
 
-	if _, err := f.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, app.ErrLoginExpired) {
-		t.Fatalf("CompleteLogin = %v, want ErrLoginExpired", err)
-	}
+	_, err := f.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, app.ErrLoginExpired, "CompleteLogin")
 }
 
 // TestProvidersWithdrawsAnAccountWhoseAuditFails: a vendor account must not
@@ -281,9 +251,8 @@ func TestProvidersWithdrawsAnAccountWhoseAuditFails(t *testing.T) {
 	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(auditDown)
 	fixture.accounts.EXPECT().RemoveAccount(mock.Anything, codexAccount.ID).Return(nil).Once()
 
-	if _, err := fixture.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, auditDown) {
-		t.Fatalf("CompleteLogin with a failing audit = %v, want the audit error", err)
-	}
+	_, err := fixture.svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, auditDown, "CompleteLogin with a failing audit: want the audit error")
 }
 
 // TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw: when the removal
@@ -304,11 +273,7 @@ func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	logger.EXPECT().Warn(mock.Anything, mock.Anything).
 		Run(func(msg string, attrs ...slog.Attr) { warned = fmt.Sprint(msg, attrs) })
 
-	if _, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb"); !errors.Is(err, auditDown) {
-		t.Fatalf("CompleteLogin = %v, want the audit error", err)
-	}
-
-	if !strings.Contains(warned, codexAccount.ID) {
-		t.Fatalf("warning %q does not name the stranded account", warned)
-	}
+	_, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
+	require.ErrorIs(t, err, auditDown, "CompleteLogin: want the audit error")
+	require.Contains(t, warned, codexAccount.ID, "warning does not name the stranded account")
 }

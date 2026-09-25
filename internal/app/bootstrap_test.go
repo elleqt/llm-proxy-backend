@@ -3,7 +3,6 @@ package app_test // external test package: internal/infra/postgres imports inter
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // minBootstrapPasswordLen is 128 bits at the six bits a URL-safe character carries.
@@ -25,66 +25,37 @@ func TestBootstrap(t *testing.T) {
 	users, passwords := postgres.NewUserRepo(pool), postgres.NewPasswordRepo(pool)
 
 	secret, err := app.Bootstrap(ctx, users, passwords, testHasher(), "admin@example.com")
-	if err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-
-	if len(secret) < minBootstrapPasswordLen {
-		t.Fatalf("bootstrap password has %d characters, want at least %d", len(secret), minBootstrapPasswordLen)
-	}
+	require.NoError(t, err, "Bootstrap")
+	require.GreaterOrEqual(t, len(secret), minBootstrapPasswordLen, "bootstrap password length")
 
 	admin, err := users.ByEmail(ctx, "admin@example.com")
-	if err != nil {
-		t.Fatalf("ByEmail: %v", err)
-	}
-
-	if admin.Role != identity.RoleAdmin || !admin.CanSignIn() {
-		t.Fatalf("bootstrap user = %+v, want an administrator who can sign in", admin)
-	}
-
-	if !admin.MustChangePassword {
-		t.Fatal("bootstrap admin must be forced to change the password")
-	}
+	require.NoError(t, err, "ByEmail")
+	require.Equal(t, identity.RoleAdmin, admin.Role, "bootstrap user role")
+	require.True(t, admin.CanSignIn(), "the bootstrap administrator must be able to sign in")
+	require.True(t, admin.MustChangePassword, "bootstrap admin must be forced to change the password")
 
 	hash, expiresAt, err := passwords.Get(ctx, admin.ID)
-	if err != nil {
-		t.Fatalf("password: %v", err)
-	}
+	require.NoError(t, err, "password")
 	// The password the operator is shown is the one that opens the account.
-	if !identity.VerifyPassword(hash, secret) {
-		t.Fatal("the returned password does not match the stored hash")
-	}
+	require.True(t, identity.VerifyPassword(hash, secret), "the returned password does not match the stored hash")
 	// An expiry would strand an operator slower than the window: the administrator
 	// now exists, so no later start issues another.
-	if expiresAt != nil {
-		t.Fatalf("bootstrap password expires at %v, want no expiry", expiresAt)
-	}
+	require.Nil(t, expiresAt, "bootstrap password must not expire")
 
 	// Every later start: an administrator exists, so nothing is issued and nothing
 	// is created — not even for a different address.
 	for _, email := range []string{"admin@example.com", "someone-else@example.com"} {
 		again, err := app.Bootstrap(ctx, users, passwords, testHasher(), email)
-		if err != nil {
-			t.Fatalf("Bootstrap(%s) again: %v", email, err)
-		}
-
-		if again != "" {
-			t.Fatalf("Bootstrap(%s) again issued a password", email)
-		}
+		require.NoError(t, err, "Bootstrap(%s) again", email)
+		require.Empty(t, again, "Bootstrap(%s) again issued a password", email)
 	}
 
-	if _, err := users.ByEmail(ctx, "someone-else@example.com"); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("a second administrator was created: err = %v", err)
-	}
+	_, err = users.ByEmail(ctx, "someone-else@example.com")
+	require.ErrorIs(t, err, app.ErrNotFound, "a second administrator was created")
 
 	after, _, err := passwords.Get(ctx, admin.ID)
-	if err != nil {
-		t.Fatalf("password after restart: %v", err)
-	}
-
-	if after != hash {
-		t.Fatal("a restart replaced the bootstrap administrator's password")
-	}
+	require.NoError(t, err, "password after restart")
+	require.Equal(t, hash, after, "a restart replaced the bootstrap administrator's password")
 }
 
 // Two installations must not share a first password: it is generated, not a default.
@@ -106,21 +77,14 @@ func TestBootstrapPasswordIsFreshEachTime(t *testing.T) {
 			})
 
 		secret, err := app.Bootstrap(context.Background(), users, passwords, testHasher(), "admin@example.com")
-		if err != nil {
-			t.Fatalf("Bootstrap: %v", err)
-		}
-
-		if !identity.VerifyPassword(stored, secret) {
-			t.Fatal("the returned password does not match the stored hash")
-		}
+		require.NoError(t, err, "Bootstrap")
+		require.True(t, identity.VerifyPassword(stored, secret), "the returned password does not match the stored hash")
 
 		return secret
 	}
 
 	first, second := issue(), issue()
-	if first == second {
-		t.Fatal("two bootstraps issued the same password")
-	}
+	require.NotEqual(t, first, second, "two bootstraps issued the same password")
 }
 
 // The user row and its password are two writes. A start that died between them left
@@ -147,13 +111,9 @@ func TestBootstrapFinishesAnAdministratorWhosePasswordNeverLanded(t *testing.T) 
 		})
 
 	secret, err := app.Bootstrap(context.Background(), users, passwords, testHasher(), "admin@example.com")
-	if err != nil {
-		t.Fatalf("Bootstrap: %v", err)
-	}
-
-	if secret == "" || !identity.VerifyPassword(stored, secret) {
-		t.Fatal("the stranded administrator was not given a working password")
-	}
+	require.NoError(t, err, "Bootstrap")
+	require.NotEmpty(t, secret, "the stranded administrator was not given a password")
+	require.True(t, identity.VerifyPassword(stored, secret), "the stranded administrator was not given a working password")
 }
 
 // Finishing a stranded bootstrap is the only reason Bootstrap ever issues a password
@@ -186,9 +146,8 @@ func TestBootstrapNeverIssuesToAnAccountItDidNotStrand(t *testing.T) {
 			passwords.EXPECT().Get(mock.Anything, user.ID).Return("", nil, app.ErrNotFound).Maybe()
 
 			secret, err := app.Bootstrap(context.Background(), users, passwords, testHasher(), "admin@example.com")
-			if err != nil || secret != "" {
-				t.Fatalf("Bootstrap = %q, %v; want \"\", nil", secret, err)
-			}
+			require.NoError(t, err, "Bootstrap")
+			require.Empty(t, secret, "Bootstrap issued a password")
 		})
 	}
 }
@@ -202,13 +161,8 @@ func TestBootstrapDoesNotPromoteAnExistingAccount(t *testing.T) {
 
 	// No password store expectations: issuing one here would fail the test.
 	secret, err := app.Bootstrap(context.Background(), users, mocks.NewPasswordRepo(t), testHasher(), "taken@example.com")
-	if !errors.Is(err, app.ErrConflict) {
-		t.Fatalf("err = %v, want app.ErrConflict", err)
-	}
-
-	if secret != "" {
-		t.Fatal("a password was issued for an account that was not created")
-	}
+	require.ErrorIs(t, err, app.ErrConflict)
+	require.Empty(t, secret, "a password was issued for an account that was not created")
 }
 
 // LLMPROXY_BOOTSTRAP_ADMIN_EMAIL is optional; unset means no bootstrap, not an
@@ -216,7 +170,6 @@ func TestBootstrapDoesNotPromoteAnExistingAccount(t *testing.T) {
 func TestBootstrapWithoutAnAddressDoesNothing(t *testing.T) {
 	// Mocks with no expectations: any repository call fails the test.
 	secret, err := app.Bootstrap(context.Background(), mocks.NewUserRepo(t), mocks.NewPasswordRepo(t), testHasher(), "")
-	if err != nil || secret != "" {
-		t.Fatalf("Bootstrap(\"\") = %q, %v; want \"\", nil", secret, err)
-	}
+	require.NoError(t, err, "Bootstrap(\"\")")
+	require.Empty(t, secret, "Bootstrap(\"\") issued a password")
 }

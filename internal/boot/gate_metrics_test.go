@@ -3,12 +3,12 @@ package boot
 import (
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/require"
 )
 
 // Each refusal the gate reports lands under its own reason, a refusal before
@@ -38,8 +38,6 @@ func TestGateRefusalsReachTheMetricsUnderTheirReasons(t *testing.T) {
 		`llmproxy_policy_denied_total{model="unknown",reason="route_not_allowed",user="unknown"} 1`,
 		`llmproxy_policy_denied_total{model="served-model",reason="other",user="alice@example.com"} 1`,
 	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("scrape lacks %s:\n%s", want, body)
-		}
+		require.Contains(t, body, want, "scrape lacks %s", want)
 	}
 }

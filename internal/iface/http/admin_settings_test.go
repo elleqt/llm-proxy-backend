@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,15 +13,14 @@ import (
 	"github.com/google/uuid"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func runningConfig(t *testing.T, doc string) *sdkconfig.Config {
 	t.Helper()
 
 	cfg, err := sdkconfig.ParseConfigBytes([]byte(doc))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "ParseConfigBytes")
 
 	return cfg
 }
@@ -38,15 +36,15 @@ func TestSettingsAreTheStoredDocumentUnredacted(t *testing.T) {
 	var got api.Settings
 	decodeBody(t, env.do(http.MethodGet, "/api/admin/settings", "", withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if got.Yaml != doc {
-		t.Fatalf("yaml = %q, want the stored document %q", got.Yaml, doc)
-	}
+	require.Equal(t, doc, got.Yaml, "yaml is not the stored document")
 
-	f := got.Fields
-	if f.ProxyURL == nil || *f.ProxyURL != "http://user:hunter2@proxy.example.com:8080" ||
-		f.RequestRetry == nil || *f.RequestRetry != 3 || f.MaxRetryInterval == nil || *f.MaxRetryInterval != 0 {
-		t.Fatalf("fields = %+v", f)
-	}
+	fields := got.Fields
+	require.NotNil(t, fields.ProxyURL, "proxyURL")
+	require.Equal(t, "http://user:hunter2@proxy.example.com:8080", *fields.ProxyURL, "proxyURL")
+	require.NotNil(t, fields.RequestRetry, "requestRetry")
+	require.Equal(t, 3, *fields.RequestRetry, "requestRetry")
+	require.NotNil(t, fields.MaxRetryInterval, "maxRetryInterval")
+	require.Equal(t, 0, *fields.MaxRetryInterval, "maxRetryInterval")
 }
 
 // A dry run answers the diff and the proposed settings and touches nothing: no push,
@@ -59,10 +57,12 @@ func TestADrySettingsRunAppliesNothing(t *testing.T) {
 	decodeBody(t, e.do(http.MethodPut, "/api/admin/settings", `{"yaml":"request-retry: 5\n","dryRun":true}`,
 		withCookie(e.signedIn(admin()))), http.StatusOK, &got)
 
-	if got.Applied || !strings.Contains(got.Diff, "+request-retry: 5") || !strings.Contains(got.Diff, "-request-retry: 1") ||
-		got.Settings.Yaml != "request-retry: 5\n" || *got.Settings.Fields.RequestRetry != 5 {
-		t.Fatalf("result = %+v", got)
-	}
+	require.False(t, got.Applied, "a dry run was applied")
+	require.Contains(t, got.Diff, "+request-retry: 5", "diff")
+	require.Contains(t, got.Diff, "-request-retry: 1", "diff")
+	require.Equal(t, "request-retry: 5\n", got.Settings.Yaml, "proposed yaml")
+	require.NotNil(t, got.Settings.Fields.RequestRetry, "proposed requestRetry")
+	require.Equal(t, 5, *got.Settings.Fields.RequestRetry, "proposed requestRetry")
 }
 
 func TestApplyingATypedPatchPushesAndStoresIt(t *testing.T) {
@@ -93,9 +93,12 @@ func TestApplyingATypedPatchPushesAndStoresIt(t *testing.T) {
 	decodeBody(t, env.do(http.MethodPut, "/api/admin/settings", `{"fields":{"requestRetry":4}}`, withCookie(env.signedIn(self))),
 		http.StatusOK, &got)
 
-	if !got.Applied || pushed == nil || pushed.RequestRetry != 4 || stored != got.Settings.Yaml || *got.Settings.Fields.RequestRetry != 4 {
-		t.Fatalf("result = %+v, pushed retry %v, stored %q", got, pushed, stored)
-	}
+	require.True(t, got.Applied, "the patch was not applied")
+	require.NotNil(t, pushed, "nothing was pushed")
+	require.Equal(t, 4, pushed.RequestRetry, "pushed retry")
+	require.Equal(t, got.Settings.Yaml, stored, "stored document")
+	require.NotNil(t, got.Settings.Fields.RequestRetry, "answered requestRetry")
+	require.Equal(t, 4, *got.Settings.Fields.RequestRetry, "answered requestRetry")
 }
 
 func TestSettingsRefusalsNameTheField(t *testing.T) {
@@ -138,16 +141,16 @@ func TestPricesAreReplacedAtFullPrecision(t *testing.T) {
 	decodeBody(t, rec, http.StatusOK, &got)
 
 	want := app.ModelPrice{Provider: "claude", Model: "m", Input: 0.15, Output: 1.2, CacheRead: 0.015, CacheWrite: 0.1875}
-	if len(stored) != 1 || stored[0] != want {
-		t.Fatalf("stored %+v, want %+v", stored, want)
-	}
 
-	if len(got.Prices) != 1 || got.Prices[0] != (api.PriceEntry{
+	require.Len(t, stored, 1, "stored")
+
+	require.Equal(t, want, stored[0], "stored")
+
+	require.Len(t, got.Prices, 1, "answered")
+	require.Equal(t, api.PriceEntry{
 		Provider: "claude", Model: "m", Input: 0.15, Output: 1.2,
 		CacheRead: 0.015, CacheWrite: 0.1875, Source: api.PriceEntrySourceManual,
-	}) {
-		t.Fatalf("answered %+v, want the list as sent", got.Prices)
-	}
+	}, got.Prices[0], "answered the list not as sent")
 }
 
 // GET answers the contract's PriceList: a manual row over a catalog row carries
@@ -166,34 +169,34 @@ func TestGetPrices(t *testing.T) {
 	env.priceMet.EXPECT().SetPriceCatalog(2, checked).Return()
 	env.priceSet.EXPECT().SetPrices(mock.Anything).Return()
 
-	if err := env.deps.Prices.Load(context.Background()); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, env.deps.Prices.Load(context.Background()), "Load")
 
 	rec := env.do(http.MethodGet, "/api/admin/prices", "", withCookie(env.signedIn(admin())))
 
 	var got api.PriceList
 	decodeBody(t, rec, http.StatusOK, &got)
 
-	if len(got.Prices) != 2 {
-		t.Fatalf("prices = %+v", got.Prices)
-	}
+	require.Len(t, got.Prices, 2, "prices")
 
 	gpt, sonnet := got.Prices[0], got.Prices[1]
-	if gpt.Model != "gpt-6" || gpt.Source != api.PriceEntrySourceCatalog || gpt.CatalogRates != nil || !gpt.UpdatedAt.Equal(checked) {
-		t.Fatalf("gpt-6 = %+v, want the catalog row first", gpt)
-	}
+	require.Equal(t, "gpt-6", gpt.Model, "the catalog row comes first")
+	require.Equal(t, api.PriceEntrySourceCatalog, gpt.Source, "gpt-6 source")
+	require.Nil(t, gpt.CatalogRates, "gpt-6 catalog rates")
+	require.True(t, gpt.UpdatedAt.Equal(checked), "gpt-6 updated at = %v, want %v", gpt.UpdatedAt, checked)
 
-	if sonnet.Source != api.PriceEntrySourceManual || sonnet.Input != 2 ||
-		sonnet.CatalogRates == nil || *sonnet.CatalogRates != (api.PriceRates{Input: 3, Output: 15}) {
-		t.Fatalf("sonnet = %+v, want the override with the catalog's rates", sonnet)
-	}
+	require.Equal(t, api.PriceEntrySourceManual, sonnet.Source, "sonnet source")
+	require.Equal(t, 2.0, sonnet.Input, "sonnet input")
+	require.NotNil(t, sonnet.CatalogRates, "sonnet catalog rates")
+	require.Equal(t, api.PriceRates{Input: 3, Output: 15}, *sonnet.CatalogRates, "sonnet catalog rates")
 
-	c := got.Catalog
-	if !c.Enabled || c.Models != 2 || c.CheckedAt == nil || !c.CheckedAt.Equal(checked) || c.ChangedAt != nil ||
-		c.LastError == nil || *c.LastError != "the catalog answered 503" {
-		t.Fatalf("catalog = %+v", c)
-	}
+	catalog := got.Catalog
+	require.True(t, catalog.Enabled, "catalog enabled")
+	require.Equal(t, 2, catalog.Models, "catalog models")
+	require.NotNil(t, catalog.CheckedAt, "catalog checked at")
+	require.True(t, catalog.CheckedAt.Equal(checked), "catalog checked at = %v, want %v", catalog.CheckedAt, checked)
+	require.Nil(t, catalog.ChangedAt, "catalog changed at")
+	require.NotNil(t, catalog.LastError, "catalog last error")
+	require.Equal(t, "the catalog answered 503", *catalog.LastError, "catalog last error")
 }
 
 // Without a catalog source a refresh is a conflict, not a failed check.
@@ -214,9 +217,9 @@ func TestRefreshReportsAFailedCheckInTheStatus(t *testing.T) {
 	var got api.PriceList
 	decodeBody(t, env.do(http.MethodPost, "/api/admin/prices/refresh", "", withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if !got.Catalog.Enabled || got.Catalog.LastError == nil || *got.Catalog.LastError != "the catalog answered 502" {
-		t.Fatalf("catalog = %+v, want the failure", got.Catalog)
-	}
+	require.True(t, got.Catalog.Enabled, "catalog enabled")
+	require.NotNil(t, got.Catalog.LastError, "catalog last error")
+	require.Equal(t, "the catalog answered 502", *got.Catalog.LastError, "catalog last error")
 }
 
 // A refused list replaces nothing (the store mock has no expectation).
@@ -261,20 +264,15 @@ func TestRefreshOutlastsTheWriteTimeout(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/admin/prices/refresh", http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewRequest")
 
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(env.signedIn(admin()))
 
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("no answer after %s with a %s write timeout: %v", slow, srv.Config.WriteTimeout, err)
-	}
+	require.NoError(t, err, "no answer after %s with a %s write timeout", slow, srv.Config.WriteTimeout)
+
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "status")
 }

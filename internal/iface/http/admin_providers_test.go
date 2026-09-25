@@ -12,6 +12,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestListProviderAccountsWithTheirQuota(t *testing.T) {
@@ -29,21 +30,30 @@ func TestListProviderAccountsWithTheirQuota(t *testing.T) {
 	var got []api.ProviderAccount
 	decodeBody(t, env.do(http.MethodGet, "/api/admin/providers", "", withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if len(got) != 2 {
-		t.Fatalf("accounts = %+v", got)
-	}
+	require.Len(t, got, 2, "accounts")
 
 	claude, chatgpt := got[0], got[1]
-	if claude.Id != "claude-a.json" || claude.Label == nil || *claude.Label != "team" || claude.Email == nil || claude.LastError != nil ||
-		claude.LastRefreshedAt == nil || !claude.LastRefreshedAt.Equal(refreshed) || len(claude.Quota) != 1 ||
-		claude.Quota[0].Window != "5h" || claude.Quota[0].UsedRatio != 0.25 || claude.Quota[0].ResetAt == nil || !claude.Quota[0].ResetAt.Equal(reset) {
-		t.Fatalf("claude account = %+v", claude)
-	}
+	require.Equal(t, "claude-a.json", claude.Id, "claude id")
+	require.NotNil(t, claude.Label, "claude label")
+	require.Equal(t, "team", *claude.Label, "claude label")
+	require.NotNil(t, claude.Email, "claude email")
+	require.Nil(t, claude.LastError, "claude last error")
+	require.NotNil(t, claude.LastRefreshedAt, "claude last refreshed")
+	require.True(t, claude.LastRefreshedAt.Equal(refreshed), "claude last refreshed = %v, want %v", claude.LastRefreshedAt, refreshed)
+	require.Len(t, claude.Quota, 1, "claude quota")
+	require.Equal(t, "5h", claude.Quota[0].Window, "claude quota window")
+	require.Equal(t, float32(0.25), claude.Quota[0].UsedRatio, "claude quota used ratio")
+	require.NotNil(t, claude.Quota[0].ResetAt, "claude quota reset")
+	require.True(t, claude.Quota[0].ResetAt.Equal(reset), "claude quota reset = %v, want %v", claude.Quota[0].ResetAt, reset)
 
-	if !chatgpt.Disabled || chatgpt.LastError == nil || *chatgpt.LastError != "refresh failed" || chatgpt.Label != nil || chatgpt.Email != nil ||
-		chatgpt.LastRefreshedAt != nil || chatgpt.Quota == nil || len(chatgpt.Quota) != 0 {
-		t.Fatalf("chatgpt account = %+v, want absent optionals and an empty (not null) quota", chatgpt)
-	}
+	require.True(t, chatgpt.Disabled, "chatgpt disabled")
+	require.NotNil(t, chatgpt.LastError, "chatgpt last error")
+	require.Equal(t, "refresh failed", *chatgpt.LastError, "chatgpt last error")
+	require.Nil(t, chatgpt.Label, "chatgpt label")
+	require.Nil(t, chatgpt.Email, "chatgpt email")
+	require.Nil(t, chatgpt.LastRefreshedAt, "chatgpt last refreshed")
+	require.NotNil(t, chatgpt.Quota, "chatgpt quota must be empty, not null")
+	require.Empty(t, chatgpt.Quota, "chatgpt quota")
 }
 
 func TestStartingAProviderLogin(t *testing.T) {
@@ -57,9 +67,9 @@ func TestStartingAProviderLogin(t *testing.T) {
 		decodeBody(t, env.do(http.MethodPost, "/api/admin/providers/login/start", `{"provider":"claude"}`, withCookie(env.signedIn(admin()))),
 			http.StatusCreated, &got)
 
-		if got.SessionId != "s1" || got.AuthURL != "https://vendor.example.com/auth?state=x" || !got.ExpiresAt.Equal(expires) {
-			t.Fatalf("session = %+v", got)
-		}
+		require.Equal(t, "s1", got.SessionId, "session id")
+		require.Equal(t, "https://vendor.example.com/auth?state=x", got.AuthURL, "auth URL")
+		require.True(t, got.ExpiresAt.Equal(expires), "expires = %v, want %v", got.ExpiresAt, expires)
 	})
 
 	for name, tc := range map[string]struct {
@@ -97,9 +107,9 @@ func TestCompletingAProviderLoginNeverEchoesTheCallback(t *testing.T) {
 		var got api.ProviderAccount
 		decodeBody(t, rec, http.StatusCreated, &got)
 
-		if got.Id != "claude-new.json" || got.Provider != "claude" || strings.Contains(rec.Body.String(), code) {
-			t.Fatalf("answer %s: want the added account and not the code", rec.Body)
-		}
+		require.Equal(t, "claude-new.json", got.Id, "added account id")
+		require.Equal(t, "claude", got.Provider, "added account provider")
+		require.NotContains(t, rec.Body.String(), code, "the answer echoes the code")
 	})
 
 	for name, tc := range map[string]struct {
@@ -116,9 +126,7 @@ func TestCompletingAProviderLoginNeverEchoesTheCallback(t *testing.T) {
 			rec := e.do(http.MethodPost, "/api/admin/providers/login/complete", body, withCookie(e.signedIn(admin())))
 			apiError(t, rec, tc.status, tc.code)
 
-			if strings.Contains(rec.Body.String(), code) {
-				t.Fatalf("the refusal echoes the code: %s", rec.Body)
-			}
+			require.NotContains(t, rec.Body.String(), code, "the refusal echoes the code")
 		})
 	}
 }
@@ -144,23 +152,18 @@ func TestCompletingAProviderLoginOutlastsTheWriteTimeout(t *testing.T) {
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.URL+"/api/admin/providers/login/complete",
 		strings.NewReader(`{"sessionId":"s1","callbackURL":"https://console.example.com/cb?code=c&state=x"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "NewRequest")
 
 	req.Header.Set("Content-Type", "application/json")
 	req.AddCookie(env.signedIn(admin()))
 
 	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("no answer after %s with a %s write timeout: %v", slow, srv.Config.WriteTimeout, err)
-	}
+	require.NoError(t, err, "no answer after %s with a %s write timeout", slow, srv.Config.WriteTimeout)
+
 	defer resp.Body.Close()
 
 	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("status = %d, body %s; want 201", resp.StatusCode, b)
-	}
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "status; body %s", b)
 }
 
 func TestDisablingAProviderAccount(t *testing.T) {
@@ -178,9 +181,8 @@ func TestDisablingAProviderAccount(t *testing.T) {
 		var got api.ProviderAccount
 		decodeBody(t, env.do(http.MethodPatch, path, `{"disabled":true}`, withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-		if got.Id != id || !got.Disabled {
-			t.Fatalf("account = %+v", got)
-		}
+		require.Equal(t, id, got.Id, "account id")
+		require.True(t, got.Disabled, "account disabled")
 	})
 	// Without `disabled` the request says nothing; it must not re-enable the account
 	// (the gateway mock expects no call).
@@ -210,9 +212,8 @@ func TestRemovingAProviderAccount(t *testing.T) {
 		env.acctMet.EXPECT().ForgetAccount(id, "claude").Return()
 
 		rec := env.do(http.MethodDelete, "/api/admin/providers/"+id, "", withCookie(env.signedIn(admin())))
-		if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
-			t.Fatalf("status = %d, body %s; want 204", rec.Code, rec.Body)
-		}
+		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
+		require.Zero(t, rec.Body.Len(), "body %s", rec.Body)
 	})
 	t.Run("unknown account", func(t *testing.T) {
 		e := newEnv(t)

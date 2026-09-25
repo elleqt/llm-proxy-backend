@@ -18,6 +18,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // These tests pin upstream behaviour the account methods depend on, measured
@@ -86,15 +88,14 @@ func startBooted(t *testing.T, params Params) *running {
 	t.Helper()
 
 	boot := claudeGrantNamed(t, "boot-"+strconv.FormatInt(wireSeq.Add(1), 10))
-	if _, err := params.Store.Save(context.Background(), boot); err != nil {
-		t.Fatalf("save the boot credential: %v", err)
-	}
+	_, err := params.Store.Save(context.Background(), boot)
+	require.NoError(t, err, "save the boot credential")
 
 	srv := startWith(t, params)
 
 	for deadline := time.Now().Add(10 * time.Second); registeredModels(boot.ID) == 0; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("boot never registered the models of the account it loaded")
+			require.Fail(t, "boot never registered the models of the account it loaded")
 		}
 	}
 
@@ -109,17 +110,12 @@ func TestBareRegisterLeavesAnAccountUnroutable(t *testing.T) {
 	_, manager := startProduction(t)
 	grant := claudeGrant(t)
 
-	if _, err := manager.Register(context.Background(), grant); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	_, err := manager.Register(context.Background(), grant)
+	require.NoError(t, err, "Register")
 
-	if _, ok := manager.GetByID(grant.ID); !ok {
-		t.Fatal("manager does not hold the registered account")
-	}
-
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("a bare Register registered %d models: upstream now reconciles on its own", n)
-	}
+	_, ok := manager.GetByID(grant.ID)
+	require.True(t, ok, "manager does not hold the registered account")
+	require.Zero(t, registeredModels(grant.ID), "a bare Register registered models: upstream now reconciles on its own")
 }
 
 func TestAddAccountRegistersTheAccountsModels(t *testing.T) {
@@ -127,80 +123,46 @@ func TestAddAccountRegistersTheAccountsModels(t *testing.T) {
 	grant := claudeGrant(t)
 
 	stored, err := r.gateway.AddAccount(context.Background(), grant)
-	if err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	require.NoError(t, err, "AddAccount")
+	require.NotNil(t, stored, "AddAccount returned no stored account")
+	require.Equal(t, grant.ID, stored.ID, "AddAccount returned another account")
 
-	if stored == nil || stored.ID != grant.ID {
-		t.Fatalf("AddAccount returned %+v, want the stored account %q", stored, grant.ID)
-	}
-
-	if _, ok := manager.GetByID(grant.ID); !ok {
-		t.Fatal("manager does not hold the added account")
-	}
-
-	if n := registeredModels(grant.ID); n == 0 {
-		t.Fatal("the added Claude account has no registered models: it is not routable")
-	}
+	_, ok := manager.GetByID(grant.ID)
+	require.True(t, ok, "manager does not hold the added account")
+	require.NotZero(t, registeredModels(grant.ID), "the added Claude account has no registered models: it is not routable")
 }
 
 func TestSetAccountDisabledUnregistersAndRestoresModels(t *testing.T) {
 	srv, manager := startProduction(t)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
 
 	enabled := registeredModels(grant.ID)
-	if enabled == 0 {
-		t.Fatal("the added Claude account has no registered models")
-	}
+	require.NotZero(t, enabled, "the added Claude account has no registered models")
+	require.NoError(t, srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true), "SetAccountDisabled(true)")
+	require.Zero(t, registeredModels(grant.ID), "a disabled account still has registered models")
 
-	if err := srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true); err != nil {
-		t.Fatalf("SetAccountDisabled(true): %v", err)
-	}
-
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("a disabled account still has %d registered models", n)
-	}
-
-	if got, _ := manager.GetByID(grant.ID); got == nil || !got.Disabled {
-		t.Fatalf("manager holds %+v, want the account disabled", got)
-	}
-
-	if err := srv.gateway.SetAccountDisabled(context.Background(), grant.ID, false); err != nil {
-		t.Fatalf("SetAccountDisabled(false): %v", err)
-	}
-
-	if n := registeredModels(grant.ID); n != enabled {
-		t.Fatalf("a re-enabled account has %d registered models, want the %d it had", n, enabled)
-	}
+	got, _ := manager.GetByID(grant.ID)
+	require.NotNil(t, got, "manager does not hold the account")
+	require.True(t, got.Disabled, "manager holds %+v, want the account disabled", got)
+	require.NoError(t, srv.gateway.SetAccountDisabled(context.Background(), grant.ID, false), "SetAccountDisabled(false)")
+	require.Equal(t, enabled, registeredModels(grant.ID), "a re-enabled account must have the registered models it had")
 }
 
 func TestRemoveAccountUnregistersModels(t *testing.T) {
 	srv, manager := startProduction(t)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
+	require.NotZero(t, registeredModels(grant.ID), "the added Claude account has no registered models")
+	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), grant.ID), "RemoveAccount")
 
-	if registeredModels(grant.ID) == 0 {
-		t.Fatal("the added Claude account has no registered models")
-	}
-
-	if err := srv.gateway.RemoveAccount(context.Background(), grant.ID); err != nil {
-		t.Fatalf("RemoveAccount: %v", err)
-	}
-
-	if _, ok := manager.GetByID(grant.ID); ok {
-		t.Fatal("manager still holds the removed account")
-	}
-
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("the removed account still has %d registered models: they would be listed with no credential behind them", n)
-	}
+	_, ok := manager.GetByID(grant.ID)
+	require.False(t, ok, "manager still holds the removed account")
+	require.Zero(t, registeredModels(grant.ID), "the removed account still has registered models: they would be listed with no credential behind them")
 }
 
 // TestRemoveAccountDeletesTheCredentialAcrossARestart: a removed account must
@@ -219,42 +181,28 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 	removed.FileName = "file-of-" + removed.ID
 	for _, grant := range []*coreauth.Auth{kept, removed} {
 		stored, err := srv.gateway.AddAccount(context.Background(), grant)
-		if err != nil {
-			t.Fatalf("AddAccount(%s): %v", grant.ID, err)
-		}
+		require.NoError(t, err, "AddAccount(%s)", grant.ID)
+		require.Equal(t, grant.FileName, stored.ID, "AddAccount(%s) must hold the id a restart gives it, its file name", grant.ID)
 
-		if stored.ID != grant.FileName {
-			t.Fatalf("AddAccount(%s) holds %q, want the id a restart gives it, its file name %q", grant.ID, stored.ID, grant.FileName)
-		}
-
-		if _, err := os.Stat(filepath.Join(authDir, grant.FileName)); err != nil {
-			t.Fatalf("the added account's credential was not persisted: %v", err)
-		}
+		_, err = os.Stat(filepath.Join(authDir, grant.FileName))
+		require.NoError(t, err, "the added account's credential was not persisted")
 	}
 
-	if err := srv.gateway.RemoveAccount(context.Background(), removed.FileName); err != nil {
-		t.Fatalf("RemoveAccount: %v", err)
-	}
+	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), removed.FileName), "RemoveAccount")
 
-	if _, err := os.Stat(filepath.Join(authDir, removed.FileName)); !os.IsNotExist(err) {
-		t.Fatalf("the removed account's credential is still in the auth directory (stat: %v)", err)
-	}
-
-	if err := srv.stop(); !errors.Is(err, context.Canceled) {
-		t.Fatalf("stop: Run returned %v, want context.Canceled", err)
-	}
+	_, err := os.Stat(filepath.Join(authDir, removed.FileName))
+	require.True(t, os.IsNotExist(err), "the removed account's credential is still in the auth directory (stat: %v)", err)
+	require.ErrorIs(t, srv.stop(), context.Canceled, "stop: Run must return context.Canceled")
 
 	fresh := productionParamsIn(authDir)
 	startWith(t, fresh)
 
-	if _, ok := fresh.CoreAuth.GetByID(kept.ID); !ok {
-		t.Fatal("a fresh gateway did not load the kept account: the restart proves nothing")
-	}
+	_, ok := fresh.CoreAuth.GetByID(kept.ID)
+	require.True(t, ok, "a fresh gateway did not load the kept account: the restart proves nothing")
 	// A credential loaded from the directory takes its file name as its id.
 	for _, id := range []string{removed.ID, removed.FileName} {
-		if got, ok := fresh.CoreAuth.GetByID(id); ok {
-			t.Fatalf("a fresh gateway resurrected the removed account as %q (disabled=%t)", id, got.Disabled)
-		}
+		_, ok := fresh.CoreAuth.GetByID(id)
+		require.False(t, ok, "a fresh gateway resurrected the removed account as %q", id)
 	}
 }
 
@@ -273,36 +221,25 @@ func TestRemoveAccountDeletesACredentialInASubdirectory(t *testing.T) {
 	grant.FileName = "team/sub/../" + grant.ID
 
 	stored, err := srv.gateway.AddAccount(context.Background(), grant)
-	if err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	require.NoError(t, err, "AddAccount")
 
 	inTeam := filepath.Join("team", grant.ID)
 
 	onDisk := filepath.Join(authDir, inTeam)
-	if _, err := os.Stat(onDisk); err != nil {
-		t.Fatalf("the added account's credential was not persisted under the auth directory: %v", err)
-	}
+	_, err = os.Stat(onDisk)
+	require.NoError(t, err, "the added account's credential was not persisted under the auth directory")
+	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), stored.ID), "RemoveAccount")
 
-	if err := srv.gateway.RemoveAccount(context.Background(), stored.ID); err != nil {
-		t.Fatalf("RemoveAccount: %v", err)
-	}
-
-	if _, err := os.Stat(onDisk); !os.IsNotExist(err) {
-		t.Fatalf("the removed account's credential is still at %s (stat: %v)", onDisk, err)
-	}
-
-	if err := srv.stop(); !errors.Is(err, context.Canceled) {
-		t.Fatalf("stop: Run returned %v, want context.Canceled", err)
-	}
+	_, err = os.Stat(onDisk)
+	require.True(t, os.IsNotExist(err), "the removed account's credential is still at %s (stat: %v)", onDisk, err)
+	require.ErrorIs(t, srv.stop(), context.Canceled, "stop: Run must return context.Canceled")
 
 	fresh := productionParamsIn(authDir)
 	startWith(t, fresh)
 
 	for _, id := range []string{grant.ID, inTeam} {
-		if got, ok := fresh.CoreAuth.GetByID(id); ok {
-			t.Fatalf("a fresh gateway resurrected the removed account as %q (disabled=%t)", id, got.Disabled)
-		}
+		_, ok := fresh.CoreAuth.GetByID(id)
+		require.False(t, ok, "a fresh gateway resurrected the removed account as %q", id)
 	}
 }
 
@@ -318,27 +255,22 @@ func TestRemoveAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
 	grant := claudeGrant(t)
 
 	grant.FileName = filepath.Join("..", grant.ID)
-	if _, err := params.CoreAuth.Register(context.Background(), grant); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	_, err := params.CoreAuth.Register(context.Background(), grant)
+	require.NoError(t, err, "Register")
 
 	outside := filepath.Join(parent, grant.ID)
-	if _, err := os.Stat(outside); err != nil {
-		t.Fatalf("upstream did not write the escaping credential where the test expects it: %v", err)
-	}
+	_, err = os.Stat(outside)
+	require.NoError(t, err, "upstream did not write the escaping credential where the test expects it")
 
-	err := srv.gateway.RemoveAccount(context.Background(), grant.ID)
-	if !errors.Is(err, ErrCredentialPath) {
-		t.Fatalf("RemoveAccount of a credential outside the auth directory = %v, want ErrCredentialPath", err)
-	}
+	err = srv.gateway.RemoveAccount(context.Background(), grant.ID)
+	require.ErrorIs(t, err, ErrCredentialPath, "RemoveAccount of a credential outside the auth directory")
 
-	if _, err := os.Stat(outside); err != nil {
-		t.Fatalf("the refused removal touched the file outside the auth directory: %v", err)
-	}
+	_, err = os.Stat(outside)
+	require.NoError(t, err, "the refused removal touched the file outside the auth directory")
 
-	if got, ok := params.CoreAuth.GetByID(grant.ID); !ok || got.Disabled {
-		t.Fatalf("a refused removal changed the account: held=%t %+v", ok, got)
-	}
+	got, ok := params.CoreAuth.GetByID(grant.ID)
+	require.True(t, ok, "a refused removal dropped the account")
+	require.False(t, got.Disabled, "a refused removal disabled the account")
 }
 
 // TestAddAccountRefusesACredentialOutsideTheAuthDirectory: Save writes to the
@@ -370,29 +302,18 @@ func TestAddAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
 			tc.escape(grant, parent)
 
 			_, err := r.gateway.AddAccount(context.Background(), grant)
-			if !errors.Is(err, ErrCredentialPath) {
-				t.Errorf("AddAccount of a credential outside the auth directory = %v, want ErrCredentialPath", err)
-			}
 
-			if n := len(params.CoreAuth.List()); n != 0 {
-				t.Errorf("manager holds %d accounts after a refused AddAccount, want 0", n)
-			}
-
-			if n := registeredModels(grant.ID); n != 0 {
-				t.Errorf("a refused account has %d registered models", n)
-			}
+			assert.Empty(t, params.CoreAuth.List(), "manager holds accounts after a refused AddAccount")
+			assert.Zero(t, registeredModels(grant.ID), "a refused account has registered models")
 
 			_ = filepath.WalkDir(parent, func(path string, d os.DirEntry, err error) error {
-				if err != nil {
-					t.Fatalf("walk %s: %v", path, err)
-				}
-
-				if !d.IsDir() {
-					t.Errorf("a refused AddAccount left %s on disk", path)
-				}
+				require.NoError(t, err, "walk %s", path)
+				assert.True(t, d.IsDir(), "a refused AddAccount left %s on disk", path)
 
 				return nil
 			})
+
+			require.ErrorIs(t, err, ErrCredentialPath, "AddAccount of a credential outside the auth directory")
 		})
 	}
 }
@@ -440,35 +361,22 @@ func TestSetAccountDisabledReportsAnUnsavedFlag(t *testing.T) {
 	srv := startBooted(t, params)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
 
 	store.refuseSave.Store(true)
 
-	err := srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true)
-	if !errors.Is(err, errSaveRefused) {
-		t.Fatalf("SetAccountDisabled with a failing save = %v, want the store's error", err)
-	}
+	err = srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true)
+	require.ErrorIs(t, err, errSaveRefused, "SetAccountDisabled with a failing save must report the store's error")
 
 	got, ok := params.CoreAuth.GetByID(grant.ID)
-	if !ok {
-		t.Fatal("the manager dropped the account after a failed save")
-	}
-
-	if !got.Disabled {
-		t.Fatal("after a failed save the account is enabled in memory, want it kept disabled as requested")
-	}
-
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("the account disabled in memory still has %d registered models", n)
-	}
+	require.True(t, ok, "the manager dropped the account after a failed save")
+	require.True(t, got.Disabled, "after a failed save the account is enabled in memory, want it kept disabled as requested")
+	require.Zero(t, registeredModels(grant.ID), "the account disabled in memory still has registered models")
 
 	store.refuseSave.Store(false)
 
-	if err := srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true); err != nil {
-		t.Fatalf("retried SetAccountDisabled: %v", err)
-	}
+	require.NoError(t, srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true), "retried SetAccountDisabled")
 }
 
 // TestRemoveAccountReportsAnUndeletedCredential pins the failure mode
@@ -482,47 +390,29 @@ func TestRemoveAccountReportsAnUndeletedCredential(t *testing.T) {
 	srv := startBooted(t, params)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
 
 	store.refuseDelete.Store(true)
 
-	err := srv.gateway.RemoveAccount(context.Background(), grant.ID)
-	if !errors.Is(err, errDeleteRefused) {
-		t.Fatalf("RemoveAccount with a failing store = %v, want the store's error", err)
-	}
-
-	if !strings.Contains(err.Error(), "disabled but still held") {
-		t.Fatalf("RemoveAccount error %q does not name the partial state", err)
-	}
+	err = srv.gateway.RemoveAccount(context.Background(), grant.ID)
+	require.ErrorIs(t, err, errDeleteRefused, "RemoveAccount with a failing store must report the store's error")
+	require.ErrorContains(t, err, "disabled but still held", "RemoveAccount error does not name the partial state")
 
 	got, ok := params.CoreAuth.GetByID(grant.ID)
-	if !ok {
-		t.Fatal("the account is gone from the manager although its credential was not deleted: a retry cannot reach it")
-	}
-
-	if !got.Disabled {
-		t.Fatal("the account whose credential could not be deleted is still enabled")
-	}
-
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("the half-removed account still has %d registered models", n)
-	}
+	require.True(t, ok, "the account is gone from the manager although its credential was not deleted: a retry cannot reach it")
+	require.True(t, got.Disabled, "the account whose credential could not be deleted is still enabled")
+	require.Zero(t, registeredModels(grant.ID), "the half-removed account still has registered models")
 
 	store.refuseDelete.Store(false)
 
-	if err := srv.gateway.RemoveAccount(context.Background(), grant.ID); err != nil {
-		t.Fatalf("retried RemoveAccount: %v", err)
-	}
+	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), grant.ID), "retried RemoveAccount")
 
-	if _, ok := params.CoreAuth.GetByID(grant.ID); ok {
-		t.Fatal("manager still holds the account after the retry")
-	}
+	_, ok = params.CoreAuth.GetByID(grant.ID)
+	require.False(t, ok, "manager still holds the account after the retry")
 
-	if _, err := os.Stat(filepath.Join(params.Config.AuthDir, grant.ID)); !os.IsNotExist(err) {
-		t.Fatalf("the credential survived the retry (stat: %v)", err)
-	}
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.ID))
+	require.True(t, os.IsNotExist(err), "the credential survived the retry (stat: %v)", err)
 }
 
 // TestRemoveAccountReportsAnUnsavedDisable: when the delete fails, the
@@ -535,38 +425,27 @@ func TestRemoveAccountReportsAnUnsavedDisable(t *testing.T) {
 	srv := startBooted(t, params)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
 
 	store.refuseDelete.Store(true)
 	store.refuseSave.Store(true)
 
-	err := srv.gateway.RemoveAccount(context.Background(), grant.ID)
-	if !errors.Is(err, errDeleteRefused) || !errors.Is(err, errSaveRefused) {
-		t.Fatalf("RemoveAccount with delete and save failing = %v, want both errors", err)
-	}
+	err = srv.gateway.RemoveAccount(context.Background(), grant.ID)
+	require.ErrorIs(t, err, errDeleteRefused, "RemoveAccount with delete and save failing must report the delete error")
+	require.ErrorIs(t, err, errSaveRefused, "RemoveAccount with delete and save failing must report the save error")
 
-	if _, ok := params.CoreAuth.GetByID(grant.ID); !ok {
-		t.Fatal("the account is gone from the manager although its credential was not deleted")
-	}
+	_, ok := params.CoreAuth.GetByID(grant.ID)
+	require.True(t, ok, "the account is gone from the manager although its credential was not deleted")
 }
 
 func TestAccountChangesRefuseAnUnknownAccount(t *testing.T) {
 	p := productionParams(t)
 	srv, manager := startWith(t, p), p.CoreAuth
 
-	if err := srv.gateway.SetAccountDisabled(context.Background(), "no-such-account", true); !errors.Is(err, ErrUnknownAccount) {
-		t.Fatalf("SetAccountDisabled(unknown) = %v, want ErrUnknownAccount", err)
-	}
-
-	if err := srv.gateway.RemoveAccount(context.Background(), "no-such-account"); !errors.Is(err, ErrUnknownAccount) {
-		t.Fatalf("RemoveAccount(unknown) = %v, want ErrUnknownAccount", err)
-	}
-
-	if n := len(manager.List()); n != 0 {
-		t.Fatalf("manager holds %d accounts after refused changes, want 0", n)
-	}
+	require.ErrorIs(t, srv.gateway.SetAccountDisabled(context.Background(), "no-such-account", true), ErrUnknownAccount, "SetAccountDisabled(unknown)")
+	require.ErrorIs(t, srv.gateway.RemoveAccount(context.Background(), "no-such-account"), ErrUnknownAccount, "RemoveAccount(unknown)")
+	require.Empty(t, manager.List(), "manager holds accounts after refused changes")
 }
 
 func TestAccountChangesWithoutCoreAuthReportIt(t *testing.T) {
@@ -577,22 +456,13 @@ func TestAccountChangesWithoutCoreAuthReportIt(t *testing.T) {
 		ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 		Resolver:   wireResolver,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 
 	ctx := context.Background()
-	if _, err := gw.AddAccount(ctx, claudeGrant(t)); !errors.Is(err, ErrNoCoreAuth) {
-		t.Fatalf("AddAccount = %v, want ErrNoCoreAuth", err)
-	}
-
-	if err := gw.SetAccountDisabled(ctx, "any", true); !errors.Is(err, ErrNoCoreAuth) {
-		t.Fatalf("SetAccountDisabled = %v, want ErrNoCoreAuth", err)
-	}
-
-	if err := gw.RemoveAccount(ctx, "any"); !errors.Is(err, ErrNoCoreAuth) {
-		t.Fatalf("RemoveAccount = %v, want ErrNoCoreAuth", err)
-	}
+	_, err = gw.AddAccount(ctx, claudeGrant(t))
+	require.ErrorIs(t, err, ErrNoCoreAuth, "AddAccount")
+	require.ErrorIs(t, gw.SetAccountDisabled(ctx, "any", true), ErrNoCoreAuth, "SetAccountDisabled")
+	require.ErrorIs(t, gw.RemoveAccount(ctx, "any"), ErrNoCoreAuth, "RemoveAccount")
 }
 
 // TestAccountChangesWithoutAStoreRefuse: without Params.Store a change cannot
@@ -605,29 +475,20 @@ func TestAccountChangesWithoutAStoreRefuse(t *testing.T) {
 	srv := startWith(t, params)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); !errors.Is(err, ErrNoTokenStore) {
-		t.Fatalf("AddAccount without a store = %v, want ErrNoTokenStore", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.ErrorIs(t, err, ErrNoTokenStore, "AddAccount without a store")
 
-	if _, ok := params.CoreAuth.GetByID(grant.ID); ok {
-		t.Fatal("a refused AddAccount left the account held")
-	}
+	_, ok := params.CoreAuth.GetByID(grant.ID)
+	require.False(t, ok, "a refused AddAccount left the account held")
 
-	if _, err := params.CoreAuth.Register(context.Background(), grant); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	_, err = params.CoreAuth.Register(context.Background(), grant)
+	require.NoError(t, err, "Register")
+	require.ErrorIs(t, srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true), ErrNoTokenStore, "SetAccountDisabled without a store")
+	require.ErrorIs(t, srv.gateway.RemoveAccount(context.Background(), grant.ID), ErrNoTokenStore, "RemoveAccount without a store")
 
-	if err := srv.gateway.SetAccountDisabled(context.Background(), grant.ID, true); !errors.Is(err, ErrNoTokenStore) {
-		t.Fatalf("SetAccountDisabled without a store = %v, want ErrNoTokenStore", err)
-	}
-
-	if err := srv.gateway.RemoveAccount(context.Background(), grant.ID); !errors.Is(err, ErrNoTokenStore) {
-		t.Fatalf("RemoveAccount without a store = %v, want ErrNoTokenStore", err)
-	}
-
-	if got, ok := params.CoreAuth.GetByID(grant.ID); !ok || got.Disabled {
-		t.Fatalf("a refused change altered the account: held=%t %+v", ok, got)
-	}
+	got, ok := params.CoreAuth.GetByID(grant.ID)
+	require.True(t, ok, "a refused change dropped the account")
+	require.False(t, got.Disabled, "a refused change disabled the account")
 }
 
 // TestAddAccountWithdrawsAnUnsavedCredential: Register discards its save
@@ -645,27 +506,20 @@ func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 	store.refuseSave.Store(true)
 
 	grant := claudeGrant(t)
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); !errors.Is(err, errSaveRefused) {
-		t.Fatalf("AddAccount with a failing save = %v, want the store's error", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.ErrorIs(t, err, errSaveRefused, "AddAccount with a failing save must report the store's error")
 
-	if got, ok := params.CoreAuth.GetByID(grant.ID); ok {
-		t.Fatalf("the unsaved account is still held (disabled=%t)", got.Disabled)
-	}
+	_, ok := params.CoreAuth.GetByID(grant.ID)
+	require.False(t, ok, "the unsaved account is still held")
+	require.Zero(t, registeredModels(grant.ID), "the unsaved account still has registered models")
 
-	if n := registeredModels(grant.ID); n != 0 {
-		t.Fatalf("the unsaved account still has %d registered models", n)
-	}
-
-	if _, err := os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName)); !os.IsNotExist(err) {
-		t.Fatalf("the unsaved account's credential is in the auth directory (stat: %v)", err)
-	}
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
+	require.True(t, os.IsNotExist(err), "the unsaved account's credential is in the auth directory (stat: %v)", err)
 
 	store.refuseSave.Store(false)
 
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("retried AddAccount: %v", err)
-	}
+	_, err = srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "retried AddAccount")
 }
 
 // TestAddAccountKeepsADisabledAccountAcrossARestart: upstream's file store
@@ -680,25 +534,16 @@ func TestAddAccountKeepsADisabledAccountAcrossARestart(t *testing.T) {
 	grant.Disabled = true
 
 	grant.Status = coreauth.StatusDisabled
-	if _, err := srv.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount(disabled): %v", err)
-	}
-
-	if err := srv.stop(); !errors.Is(err, context.Canceled) {
-		t.Fatalf("stop: Run returned %v, want context.Canceled", err)
-	}
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount(disabled)")
+	require.ErrorIs(t, srv.stop(), context.Canceled, "stop: Run must return context.Canceled")
 
 	fresh := productionParamsIn(authDir)
 	startWith(t, fresh)
 
 	got, ok := fresh.CoreAuth.GetByID(grant.ID)
-	if !ok {
-		t.Fatal("a fresh gateway does not hold the account added disabled: it was never written")
-	}
-
-	if !got.Disabled {
-		t.Fatal("the account added disabled came back enabled after a restart")
-	}
+	require.True(t, ok, "a fresh gateway does not hold the account added disabled: it was never written")
+	require.True(t, got.Disabled, "the account added disabled came back enabled after a restart")
 }
 
 // TestAccountsListsUnderPolicyNames: the admin list names providers as
@@ -718,31 +563,21 @@ func TestAccountsListsUnderPolicyNames(t *testing.T) {
 	}
 	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(codex.ID) })
 
-	if _, err := manager.Register(context.Background(), codex); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	_, err := manager.Register(context.Background(), codex)
+	require.NoError(t, err, "Register")
 
 	grant := claudeGrant(t)
-	if _, err := manager.Register(context.Background(), grant); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
+	_, err = manager.Register(context.Background(), grant)
+	require.NoError(t, err, "Register")
 
 	got := srv.gateway.Accounts()
-	if len(got) != 2 {
-		t.Fatalf("Accounts() = %+v, want 2 accounts", got)
-	}
-
-	if got[0].ID != codex.ID || got[0].Provider != "chatgpt" || got[0].Email != "ops@example.com" {
-		t.Fatalf("codex account listed as %+v, want provider chatgpt with its email", got[0])
-	}
-
-	if got[1].ID != grant.ID || got[1].Provider != "claude" {
-		t.Fatalf("claude account listed as %+v", got[1])
-	}
-
-	if strings.Contains(fmt.Sprintf("%+v", got), "fake-codex-access-token") {
-		t.Fatal("the account list carries a token")
-	}
+	require.Len(t, got, 2, "Accounts()")
+	require.Equal(t, codex.ID, got[0].ID, "codex account listed as %+v", got[0])
+	require.Equal(t, "chatgpt", got[0].Provider, "codex account listed as %+v", got[0])
+	require.Equal(t, "ops@example.com", got[0].Email, "codex account listed as %+v", got[0])
+	require.Equal(t, grant.ID, got[1].ID, "claude account listed as %+v", got[1])
+	require.Equal(t, "claude", got[1].Provider, "claude account listed as %+v", got[1])
+	require.NotContains(t, fmt.Sprintf("%+v", got), "fake-codex-access-token", "the account list carries a token")
 }
 
 // TestNewRefusesAManagementEnvironment: MANAGEMENT_PASSWORD enables every
@@ -759,13 +594,8 @@ func TestNewRefusesAManagementEnvironment(t *testing.T) {
 				Config:     &cliproxyconfig.Config{AuthDir: t.TempDir()},
 				ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 			})
-			if !errors.Is(err, ErrManagementEnv) {
-				t.Fatalf("New with %s set = %v, want ErrManagementEnv", name, err)
-			}
-
-			if !strings.Contains(err.Error(), name) {
-				t.Fatalf("New error %q does not name %s", err, name)
-			}
+			require.ErrorIs(t, err, ErrManagementEnv, "New with %s set", name)
+			require.ErrorContains(t, err, name, "New error does not name %s", name)
 		})
 	}
 }
@@ -780,22 +610,15 @@ func TestRunRefusesAManagementEnvironment(t *testing.T) {
 		ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 		Resolver:   wireResolver,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 
 	t.Setenv("MANAGEMENT_PASSWORD", "operator-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := gw.Run(ctx); !errors.Is(err, ErrManagementEnv) {
-		t.Fatalf("Run with MANAGEMENT_PASSWORD set = %v, want ErrManagementEnv", err)
-	}
-
-	if err := gw.WaitReload(ctx); !errors.Is(err, ErrManagementEnv) {
-		t.Fatalf("WaitReload after the refused Run = %v, want ErrManagementEnv", err)
-	}
+	require.ErrorIs(t, gw.Run(ctx), ErrManagementEnv, "Run with MANAGEMENT_PASSWORD set")
+	require.ErrorIs(t, gw.WaitReload(ctx), ErrManagementEnv, "WaitReload after the refused Run")
 }
 
 // claudeBaselineUserAgent is the Claude CLI identity upstream v7.3.15 presents
@@ -830,56 +653,39 @@ func TestClaudeRequestCarriesTheCLIBaseline(t *testing.T) {
 	grant.Metadata["account_uuid"] = "5f0c6a2e-1b7d-4e3a-9c84-0d2b3a4c5e6f"
 
 	grant.Attributes = map[string]string{"base_url": srv.URL, coreauth.AttributeRuntimeOnly: "true"}
-	if _, err := gw.gateway.AddAccount(context.Background(), grant); err != nil {
-		t.Fatalf("AddAccount: %v", err)
-	}
+	_, err := gw.gateway.AddAccount(context.Background(), grant)
+	require.NoError(t, err, "AddAccount")
 	// Nothing else may serve the request: startBooted's account has no base_url.
 	for _, a := range params.CoreAuth.List() {
 		if a.ID != grant.ID {
-			if err := gw.gateway.SetAccountDisabled(context.Background(), a.ID, true); err != nil {
-				t.Fatalf("disable %s: %v", a.ID, err)
-			}
+			require.NoError(t, gw.gateway.SetAccountDisabled(context.Background(), a.ID, true), "disable %s", a.ID)
 		}
 	}
 
 	models := cliproxy.GlobalModelRegistry().GetModelsForClient(grant.ID)
-	if len(models) == 0 {
-		t.Fatal("the Claude account registered no models")
-	}
+	require.NotEmpty(t, models, "the Claude account registered no models")
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, gw.baseURL+"/v1/messages", strings.NewReader(
 		`{"model":"`+models[0].ID+`","max_tokens":64,"messages":[{"role":"user","content":"say hello"}]}`))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+wireSecret)
 	req.Header.Set("User-Agent", "some-client/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /v1/messages: %v", err)
-	}
+	require.NoError(t, err, "POST /v1/messages")
 
 	body, _ := io.ReadAll(resp.Body)
 
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "hello from claude") {
-		t.Fatalf("POST /v1/messages = %d (%s), want the vendor's answer", resp.StatusCode, body)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "POST /v1/messages (%s)", body)
+	require.Contains(t, string(body), "hello from claude", "want the vendor's answer")
 
 	reqs := vendor.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("vendor received %d requests, want 1", len(reqs))
-	}
+	require.Len(t, reqs, 1, "vendor requests")
 	// The account's token, so the request went through upstream's Claude
 	// executor for this account and not some other route to the vendor.
-	if auth := reqs[0].Header.Get("Authorization"); auth != "Bearer "+oauthToken {
-		t.Fatalf("vendor Authorization = %q, want the Claude account's token", auth)
-	}
-
-	if ua := reqs[0].Header.Get("User-Agent"); ua != claudeBaselineUserAgent {
-		t.Fatalf("vendor User-Agent = %q, want upstream's baseline %q", ua, claudeBaselineUserAgent)
-	}
+	require.Equal(t, "Bearer "+oauthToken, reqs[0].Header.Get("Authorization"), "vendor Authorization must be the Claude account's token")
+	require.Equal(t, claudeBaselineUserAgent, reqs[0].Header.Get("User-Agent"), "vendor User-Agent must be upstream's baseline")
 }

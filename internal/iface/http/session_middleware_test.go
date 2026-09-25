@@ -12,6 +12,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func okHandler() http.Handler {
@@ -28,9 +29,7 @@ func TestRestrictedSessionIsRejectedByFullSessionGuard(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403", rec.Code)
-	}
+	require.Equal(t, http.StatusForbidden, rec.Code, "status")
 }
 
 func TestFullSessionPasses(t *testing.T) {
@@ -41,9 +40,7 @@ func TestFullSessionPasses(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	require.Equal(t, http.StatusOK, rec.Code, "status")
 }
 
 // The other half of the restriction: the endpoint that changes the password has to
@@ -56,9 +53,7 @@ func TestRequireSessionAdmitsARestrictedSession(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	require.Equal(t, http.StatusOK, rec.Code, "status")
 }
 
 // 401 and not 403: there is no session at all, so signing in is the remedy.
@@ -71,9 +66,7 @@ func TestBothGuardsRefuseARequestWithNoSession(t *testing.T) {
 			rec := httptest.NewRecorder()
 			guard(okHandler()).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/me", http.NoBody))
 
-			if rec.Code != http.StatusUnauthorized {
-				t.Fatalf("status = %d, want 401", rec.Code)
-			}
+			require.Equal(t, http.StatusUnauthorized, rec.Code, "status")
 		})
 	}
 }
@@ -85,17 +78,14 @@ type otherKey struct{}
 
 func TestASessionCanOnlyComeFromThisPackage(t *testing.T) {
 	ctx := context.WithValue(context.Background(), otherKey{}, caller{})
-	if _, ok := callerFrom(ctx); ok {
-		t.Fatal("a session planted under a foreign key was accepted as validated")
-	}
+	_, ok := callerFrom(ctx)
+	require.False(t, ok, "a session planted under a foreign key was accepted as validated")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/me/tokens", http.NoBody)
 	requireFullSession(okHandler()).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "status")
 }
 
 // A live user who owns the session, for the cases where the user is not what is
@@ -129,9 +119,7 @@ func TestAnExpiredSessionDoesNotAuthenticate(t *testing.T) {
 
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401", rec.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "status")
 }
 
 // The cookie carries the plaintext id; the lookup key is its hash. A middleware that
@@ -163,17 +151,10 @@ func TestLoadSessionResolvesTheCookieByItsHash(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	if !ok {
-		t.Fatal("the handler saw no session")
-	}
-
-	if got.session.UserID != owner || got.user.ID != owner {
-		t.Fatalf("caller = %+v, want the owner %v", got, owner)
-	}
-
-	if got.session.ID != "" {
-		t.Fatalf("the loaded session carries the plaintext id %q", got.session.ID)
-	}
+	require.True(t, ok, "the handler saw no session")
+	require.Equal(t, owner, got.session.UserID, "caller session owner; caller %+v", got)
+	require.Equal(t, owner, got.user.ID, "caller user; caller %+v", got)
+	require.Empty(t, got.session.ID, "the loaded session carries the plaintext id")
 }
 
 // The restriction is read off the user at every request, not off the session row.
@@ -201,10 +182,8 @@ func TestARestrictionIssuedAfterSignInBindsTheLiveSession(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireFullSession(okHandler())).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403: the live session was not restricted by a "+
-			"temporary password issued after it was opened", rec.Code)
-	}
+	require.Equal(t, http.StatusForbidden, rec.Code, "the live session was not restricted by a "+
+		"temporary password issued after it was opened")
 }
 
 // Blocking a user ends their session now, not when its window closes twelve hours
@@ -230,9 +209,7 @@ func TestBlockingAUserEndsTheirLiveSession(t *testing.T) {
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: id})
 	loadSession(resolverOver(users, sessions), &testLog{t: t}, requireSession(okHandler())).ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want 401: a blocked user kept their session", rec.Code)
-	}
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "a blocked user kept their session")
 }
 
 // A lookup that failed is not a verdict. Treating a database outage as "not signed
@@ -291,13 +268,8 @@ func TestLoadSessionPassesAnAnonymousRequestThrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/health", http.NoBody))
 
-	if seen {
-		t.Fatal("a request with no cookie arrived with a session")
-	}
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
-	}
+	require.False(t, seen, "a request with no cookie arrived with a session")
+	require.Equal(t, http.StatusOK, rec.Code, "status")
 }
 
 // resolverOver is an AuthService that can resolve sessions and nothing else.

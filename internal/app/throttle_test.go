@@ -12,7 +12,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // Against the real repository: the lock window is computed by the database from the
@@ -31,22 +33,16 @@ func TestThrottle(t *testing.T) {
 		t.Helper()
 
 		for range times {
-			if err := th.Charge(ctx, email); err != nil {
-				t.Fatalf("Charge: %v", err)
-			}
+			require.NoError(t, th.Charge(ctx, email), "Charge")
 		}
 	}
 	wantLockedUntil := func(t *testing.T, err error, until time.Time) {
 		t.Helper()
 
 		var locked *app.LockedOutError
-		if !errors.As(err, &locked) || !errors.Is(err, app.ErrLockedOut) {
-			t.Fatalf("err = %v, want a *app.LockedOutError", err)
-		}
-
-		if !locked.Until.Equal(until) {
-			t.Fatalf("locked until %v, want %v", locked.Until, until)
-		}
+		require.ErrorAs(t, err, &locked, "want a *app.LockedOutError")
+		require.ErrorIs(t, err, app.ErrLockedOut)
+		require.True(t, locked.Until.Equal(until), "locked until %v, want %v", locked.Until, until)
 	}
 
 	t.Run("LocksAtTheLimitUntilTheWindowCloses", func(t *testing.T) {
@@ -57,9 +53,7 @@ func TestThrottle(t *testing.T) {
 
 		charge(t, th, email, limit-1)
 
-		if err := th.Check(ctx, email); err != nil {
-			t.Fatalf("Check under the limit = %v, want nil", err)
-		}
+		require.NoError(t, th.Check(ctx, email), "Check under the limit")
 		// The limit-th attempt is admitted — it may be the right password — and locks
 		// the address behind it.
 		charge(t, th, email, 1)
@@ -76,16 +70,12 @@ func TestThrottle(t *testing.T) {
 		reopened := start.Add(window)
 		clock.now = reopened
 
-		if err := th.Check(ctx, email); err != nil {
-			t.Fatalf("Check once the window closed = %v, want nil", err)
-		}
+		require.NoError(t, th.Check(ctx, email), "Check once the window closed")
 
 		charge(t, th, email, limit-1)
 
-		if err := th.Check(ctx, email); err != nil {
-			t.Fatalf("Check after %d failures in the new window = %v, want nil: "+
-				"the limit is per window, not a lifetime total", limit-1, err)
-		}
+		require.NoError(t, th.Check(ctx, email), "Check after %d failures in the new window: "+
+			"the limit is per window, not a lifetime total", limit-1)
 
 		charge(t, th, email, 1)
 		wantLockedUntil(t, th.Check(ctx, email), reopened.Add(window))
@@ -106,9 +96,7 @@ func TestThrottle(t *testing.T) {
 
 		charge(t, th, email, limit-1)
 
-		if err := th.Check(ctx, email); err != nil {
-			t.Fatalf("Check = %v, want nil: failures a window old still counted", err)
-		}
+		require.NoError(t, th.Check(ctx, email), "Check: failures a window old still counted")
 
 		charge(t, th, email, 1)
 		wantLockedUntil(t, th.Check(ctx, email), start.Add(2*window))
@@ -121,9 +109,7 @@ func TestThrottle(t *testing.T) {
 
 		charge(t, th, email, limit-1)
 
-		if err := th.Reset(ctx, email); err != nil {
-			t.Fatalf("Reset: %v", err)
-		}
+		require.NoError(t, th.Reset(ctx, email), "Reset")
 
 		charge(t, th, email, limit)
 	})
@@ -135,13 +121,9 @@ func TestThrottle(t *testing.T) {
 
 		charge(t, th, email, limit)
 
-		if err := th.Reset(ctx, email); err != nil {
-			t.Fatalf("Reset: %v", err)
-		}
+		require.NoError(t, th.Reset(ctx, email), "Reset")
 
-		if err := th.Check(ctx, email); err != nil {
-			t.Fatalf("Check after Reset = %v, want nil", err)
-		}
+		require.NoError(t, th.Check(ctx, email), "Check after Reset")
 	})
 }
 
@@ -200,7 +182,7 @@ func TestSignInBurstGetsExactlyTheLimitOfDerivations(t *testing.T) {
 		case isExactly(err, app.ErrInvalidCredentials):
 			outcomes["invalid"]++
 		default:
-			t.Errorf("unexpected error %v", err)
+			assert.Failf(t, "unexpected SignIn outcome", "err = %v", err)
 		}
 	}
 	for range burst - limit {
@@ -216,8 +198,7 @@ func TestSignInBurstGetsExactlyTheLimitOfDerivations(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if verified != limit || outcomes["locked"] != burst-limit || outcomes["invalid"] != limit {
-		t.Fatalf("%d derivations and outcomes %v, want %d derivations, %d invalid and %d locked",
-			verified, outcomes, limit, limit, burst-limit)
-	}
+	require.Equal(t, limit, verified, "derivations (outcomes %v)", outcomes)
+	require.Equal(t, burst-limit, outcomes["locked"], "locked outcomes (all %v)", outcomes)
+	require.Equal(t, limit, outcomes["invalid"], "invalid outcomes (all %v)", outcomes)
 }

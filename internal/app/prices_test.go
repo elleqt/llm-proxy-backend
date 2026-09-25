@@ -12,7 +12,9 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // pricesFixture is a Prices whose stores are mocks backed by the fields below, so a
@@ -147,9 +149,8 @@ func (f *pricesFixture) load(t *testing.T, manual ...app.ModelPrice) {
 	t.Helper()
 	f.repo.EXPECT().List(mock.Anything).Return(manual, nil).Once()
 
-	if err := f.svc.Load(context.Background()); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	err := f.svc.Load(context.Background())
+	require.NoError(t, err, "Load")
 }
 
 // priced is the sink's latest list as provider/model -> input rate.
@@ -158,9 +159,7 @@ func (f *pricesFixture) priced(t *testing.T) map[string]float64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if len(f.sunk) == 0 {
-		t.Fatal("the sink was never given a list")
-	}
+	require.NotEmpty(t, f.sunk, "the sink was never given a list")
 
 	out := map[string]float64{}
 	for _, p := range f.sunk[len(f.sunk)-1] {
@@ -174,9 +173,7 @@ func (f *pricesFixture) get(t *testing.T) app.PriceList {
 	t.Helper()
 
 	list, err := f.svc.Get(context.Background(), newAdmin())
-	if err != nil {
-		t.Errorf("Get: %v", err)
-	}
+	assert.NoError(t, err, "Get")
 
 	return list
 }
@@ -216,9 +213,8 @@ func TestPricesReplaceRefusesInvalidLists(t *testing.T) {
 			_, err := f.svc.Replace(context.Background(), newAdmin(), tc.list)
 
 			var ie *app.InvalidInputError
-			if !errors.As(err, &ie) || ie.Field != tc.field {
-				t.Fatalf("err = %v, want InvalidInputError{%q}", err, tc.field)
-			}
+			require.ErrorAs(t, err, &ie)
+			require.Equal(t, tc.field, ie.Field, "InvalidInputError field")
 		})
 	}
 }
@@ -239,9 +235,8 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 	custom := app.ModelPrice{Provider: "claude", Model: "claude-private", Input: 7}
 	fixture.load(t, override, custom)
 
-	if got := fixture.priced(t); got["claude/claude-sonnet-5"] != 2 || got["chatgpt/gpt-6"] != 1.25 || got["claude/claude-private"] != 7 || len(got) != 3 {
-		t.Fatalf("sink = %v, want the override for sonnet, the catalog for gpt-6, the private model", got)
-	}
+	require.Equal(t, map[string]float64{"claude/claude-sonnet-5": 2, "chatgpt/gpt-6": 1.25, "claude/claude-private": 7}, fixture.priced(t),
+		"sink: want the override for sonnet, the catalog for gpt-6, the private model")
 
 	assertOverriddenList(t, fixture.get(t))
 
@@ -249,21 +244,17 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 	fixture.repo.EXPECT().List(mock.Anything).Return(nil, nil).Once()
 
 	got, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{})
-	if err != nil {
-		t.Fatalf("Replace: %v", err)
-	}
+	require.NoError(t, err, "Replace")
+	require.Len(t, got.Prices, 2, "after omitting the overrides: want the catalog's two rows")
+	require.Equal(t, app.PriceSourceCatalog, got.Prices[0].Source, "after omitting the overrides")
+	require.Equal(t, app.PriceSourceCatalog, got.Prices[1].Source, "after omitting the overrides")
 
-	if len(got.Prices) != 2 || got.Prices[0].Source != app.PriceSourceCatalog || got.Prices[1].Source != app.PriceSourceCatalog {
-		t.Fatalf("after omitting the overrides = %+v, want the catalog's two rows", got.Prices)
-	}
+	priced := fixture.priced(t)
+	require.Equal(t, 3.0, priced["claude/claude-sonnet-5"], "sink: want sonnet back at the catalog's 3")
+	require.Len(t, priced, 2, "sink: want the private model gone")
 
-	if priced := fixture.priced(t); priced["claude/claude-sonnet-5"] != 3 || len(priced) != 2 {
-		t.Fatalf("sink = %v, want sonnet back at the catalog's 3 and the private model gone", priced)
-	}
-
-	if len(fixture.events) != 1 || fixture.events[0].Action != "prices.replace" {
-		t.Fatalf("audit = %+v, want one prices.replace", fixture.events)
-	}
+	require.Len(t, fixture.events, 1, "audit: want one prices.replace")
+	require.Equal(t, "prices.replace", fixture.events[0].Action, "audit action")
 }
 
 // assertOverriddenList checks the admin view while a manual sonnet price and a
@@ -272,30 +263,30 @@ func TestManualPricesOverrideTheCatalogUntilOmitted(t *testing.T) {
 func assertOverriddenList(t *testing.T, list app.PriceList) {
 	t.Helper()
 
-	if len(list.Prices) != 3 {
-		t.Fatalf("Get = %+v, want 3 entries", list.Prices)
-	}
+	require.Len(t, list.Prices, 3, "Get: want 3 entries")
 
 	byModel := map[string]app.PriceEntry{}
 	for _, e := range list.Prices {
 		byModel[e.Model] = e
 	}
 
-	if e := byModel["claude-sonnet-5"]; e.Source != app.PriceSourceManual || e.Input != 2 || e.Catalog == nil || e.Catalog.Input != 3 {
-		t.Fatalf("sonnet = %+v, want manual at 2 with the catalog's 3 behind it", e)
-	}
+	sonnetEntry := byModel["claude-sonnet-5"]
+	require.Equal(t, app.PriceSourceManual, sonnetEntry.Source, "sonnet source")
+	require.Equal(t, 2.0, sonnetEntry.Input, "sonnet input")
+	require.NotNil(t, sonnetEntry.Catalog, "sonnet: want the catalog's rates behind it")
+	require.Equal(t, 3.0, sonnetEntry.Catalog.Input, "sonnet catalog input")
 
-	if e := byModel["gpt-6"]; e.Source != app.PriceSourceCatalog || e.Catalog != nil || !e.UpdatedAt.Equal(earlier) {
-		t.Fatalf("gpt-6 = %+v, want the catalog's row", e)
-	}
+	gptEntry := byModel["gpt-6"]
+	require.Equal(t, app.PriceSourceCatalog, gptEntry.Source, "gpt-6 source")
+	require.Nil(t, gptEntry.Catalog, "gpt-6: the catalog's own row has no catalog rates behind it")
+	require.True(t, gptEntry.UpdatedAt.Equal(earlier), "gpt-6 updated at %v, want %v", gptEntry.UpdatedAt, earlier)
 
-	if e := byModel["claude-private"]; e.Source != app.PriceSourceManual || e.Catalog != nil {
-		t.Fatalf("private = %+v, want manual with no catalog rates", e)
-	}
+	privateEntry := byModel["claude-private"]
+	require.Equal(t, app.PriceSourceManual, privateEntry.Source, "private source")
+	require.Nil(t, privateEntry.Catalog, "private: want no catalog rates")
 
-	if list.Catalog.Models != 2 || !list.Catalog.Enabled {
-		t.Fatalf("catalog status = %+v, want enabled with 2 models", list.Catalog)
-	}
+	require.Equal(t, 2, list.Catalog.Models, "catalog status models")
+	require.True(t, list.Catalog.Enabled, "catalog status: want enabled")
 }
 
 func TestPricesReplaceStoreFailureLeavesTheSinkAlone(t *testing.T) {
@@ -303,13 +294,12 @@ func TestPricesReplaceStoreFailureLeavesTheSinkAlone(t *testing.T) {
 	fixture.load(t, sonnet())
 	fixture.repo.EXPECT().Replace(mock.Anything, mock.Anything, mock.Anything).Return(errors.New("db down"))
 
-	if _, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{gpt()}); err == nil {
-		t.Fatal("Replace succeeded with the store failing")
-	}
+	_, err := fixture.svc.Replace(context.Background(), newAdmin(), []app.ModelPrice{gpt()})
+	require.Error(t, err, "Replace succeeded with the store failing")
 
-	if got := fixture.priced(t); len(fixture.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v after %d lists, want the stored list alone", got, len(fixture.sunk))
-	}
+	got := fixture.priced(t)
+	require.Len(t, fixture.sunk, 1, "sink: want the stored list alone")
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the stored list alone")
 }
 
 // A check that finds a new catalog stores it with its validators, prices it and
@@ -323,29 +313,29 @@ func TestRefreshAppliesAChangedCatalog(t *testing.T) {
 		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet(), gpt()}, Validators: validators}, nil).Once()
 
 	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	require.NoError(t, err, "Refresh")
 
-	if got := fixture.priced(t); got["claude/claude-sonnet-5"] != 3 || got["chatgpt/gpt-6"] != 1.25 {
-		t.Fatalf("sink = %v, want the catalog's prices", got)
-	}
+	got := fixture.priced(t)
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the catalog's prices")
+	require.Equal(t, 1.25, got["chatgpt/gpt-6"], "sink: want the catalog's prices")
 
-	if fixture.state.Validators != validators || !fixture.state.CheckedAt.Equal(settingsNow) || !fixture.state.ChangedAt.Equal(settingsNow) {
-		t.Fatalf("stored state = %+v, want the validators, checked and changed now", fixture.state)
-	}
+	require.Equal(t, validators, fixture.state.Validators, "stored validators")
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "stored state = %+v, want checked now", fixture.state)
+	require.True(t, fixture.state.ChangedAt.Equal(settingsNow), "stored state = %+v, want changed now", fixture.state)
 
-	if c := list.Catalog; c.Models != 2 || !c.CheckedAt.Equal(settingsNow) || !c.ChangedAt.Equal(settingsNow) || c.LastError != "" {
-		t.Fatalf("status = %+v", c)
-	}
+	status := list.Catalog
+	require.Equal(t, 2, status.Models, "status models")
+	require.True(t, status.CheckedAt.Equal(settingsNow), "status = %+v, want checked now", status)
+	require.True(t, status.ChangedAt.Equal(settingsNow), "status = %+v, want changed now", status)
+	require.Empty(t, status.LastError, "status last error")
 
-	if fixture.models != 2 || !fixture.checkedAt.Equal(settingsNow) {
-		t.Fatalf("metrics = %d models checked at %v", fixture.models, fixture.checkedAt)
-	}
+	require.Equal(t, 2, fixture.models, "metrics models")
+	require.True(t, fixture.checkedAt.Equal(settingsNow), "metrics checked at %v, want now", fixture.checkedAt)
 
-	if len(fixture.events) != 1 || fixture.events[0].Action != "prices.refresh" || fixture.events[0].Detail["outcome"] != "changed" || fixture.events[0].Detail["models"] != 2 {
-		t.Fatalf("audit = %+v, want prices.refresh changed with 2 models", fixture.events)
-	}
+	require.Len(t, fixture.events, 1, "audit: want one prices.refresh")
+	require.Equal(t, "prices.refresh", fixture.events[0].Action, "audit action")
+	require.Equal(t, "changed", fixture.events[0].Detail["outcome"], "audit outcome")
+	require.Equal(t, 2, fixture.events[0].Detail["models"], "audit models")
 }
 
 // A 304 is a successful check: the prices and the validators stay, the check time
@@ -360,25 +350,22 @@ func TestNotModifiedKeepsPricesAndValidatorsAndClearsTheError(t *testing.T) {
 	fixture.source.EXPECT().Fetch(mock.Anything, validators).Return(app.CatalogFetch{Unchanged: true}, nil).Once()
 
 	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	require.NoError(t, err, "Refresh")
 
-	if fixture.state.Validators != validators || !fixture.state.CheckedAt.Equal(settingsNow) || !fixture.state.ChangedAt.Equal(earlier) || fixture.state.LastError != "" {
-		t.Fatalf("stored state = %+v, want the same validators and change time, checked now, no error", fixture.state)
-	}
+	require.Equal(t, validators, fixture.state.Validators, "stored validators")
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "stored state = %+v, want checked now", fixture.state)
+	require.True(t, fixture.state.ChangedAt.Equal(earlier), "stored state = %+v, want the same change time", fixture.state)
+	require.Empty(t, fixture.state.LastError, "stored state: want no error")
 
-	if list.Catalog.LastError != "" || list.Catalog.Models != 1 || len(list.Prices) != 1 || !list.Prices[0].UpdatedAt.Equal(earlier) {
-		t.Fatalf("list = %+v, want the stored price and no error", list)
-	}
+	require.Empty(t, list.Catalog.LastError, "list: want no error")
+	require.Equal(t, 1, list.Catalog.Models, "list catalog models")
+	require.Len(t, list.Prices, 1, "list: want the stored price")
+	require.True(t, list.Prices[0].UpdatedAt.Equal(earlier), "list = %+v, want the stored price", list)
 
-	if got := fixture.priced(t); got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v, want the stored price", got)
-	}
+	require.Equal(t, 3.0, fixture.priced(t)["claude/claude-sonnet-5"], "sink: want the stored price")
 
-	if fixture.events[0].Detail["outcome"] != "unchanged" {
-		t.Fatalf("audit = %+v, want outcome unchanged", fixture.events)
-	}
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "unchanged", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // A failed check, including one whose catalog prices none of our models, keeps
@@ -410,29 +397,26 @@ func TestFailedChecksKeepThePricesInForce(t *testing.T) {
 			fixture.source.EXPECT().Fetch(mock.Anything, validators).Return(answer.fetch, answer.err).Once()
 
 			list, err := fixture.svc.Refresh(context.Background(), newAdmin())
-			if err != nil {
-				t.Fatalf("Refresh: %v, want the failure in the status", err)
-			}
+			require.NoError(t, err, "Refresh: want the failure in the status")
 
-			if list.Catalog.LastError != answer.want || list.Catalog.Models != 1 || !list.Catalog.CheckedAt.Equal(earlier) {
-				t.Fatalf("status = %+v, want lastError %q, the price kept, the last success unchanged", list.Catalog, answer.want)
-			}
+			require.Equal(t, answer.want, list.Catalog.LastError, "status last error")
+			require.Equal(t, 1, list.Catalog.Models, "status: want the price kept")
+			require.True(t, list.Catalog.CheckedAt.Equal(earlier), "status = %+v, want the last success unchanged", list.Catalog)
 
-			if len(fixture.storedCatalog) != 1 || fixture.state.Validators != validators || fixture.state.LastError != answer.want {
-				t.Fatalf("stored %v / %+v, want the catalog and validators kept and the error recorded", fixture.storedCatalog, fixture.state)
-			}
+			require.Len(t, fixture.storedCatalog, 1, "stored: want the catalog kept")
+			require.Equal(t, validators, fixture.state.Validators, "stored: want the validators kept")
+			require.Equal(t, answer.want, fixture.state.LastError, "stored: want the error recorded")
 
-			if got := fixture.priced(t); len(fixture.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-				t.Fatalf("sink = %v after %d lists, want the price in force untouched", got, len(fixture.sunk))
-			}
+			got := fixture.priced(t)
+			require.Len(t, fixture.sunk, 1, "sink: want the price in force untouched")
+			require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the price in force untouched")
 
-			if fixture.failures != 1 {
-				t.Fatalf("failures = %d, want 1", fixture.failures)
-			}
+			require.Equal(t, 1, fixture.failures, "failures")
 
-			if e := fixture.events[0]; e.Detail["outcome"] != "failed" || e.Detail["error"] != answer.want {
-				t.Fatalf("audit = %+v, want outcome failed with the reason", e)
-			}
+			require.NotEmpty(t, fixture.events, "audit")
+			e := fixture.events[0]
+			require.Equal(t, "failed", e.Detail["outcome"], "audit outcome")
+			require.Equal(t, answer.want, e.Detail["error"], "audit reason")
 		})
 	}
 }
@@ -443,18 +427,15 @@ func TestDisabledCatalog(t *testing.T) {
 	fixture := newPricesFixture(t, true, []app.ModelPrice{gpt()}, app.CatalogState{CheckedAt: earlier})
 	fixture.load(t, sonnet())
 
-	if _, err := fixture.svc.Refresh(context.Background(), newAdmin()); !errors.Is(err, app.ErrCatalogDisabled) {
-		t.Fatalf("Refresh = %v, want ErrCatalogDisabled", err)
-	}
+	_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.ErrorIs(t, err, app.ErrCatalogDisabled, "Refresh")
 
 	list := fixture.get(t)
-	if list.Catalog != (app.CatalogStatus{}) || len(list.Prices) != 1 || list.Prices[0].Model != "claude-sonnet-5" {
-		t.Fatalf("list = %+v, want the manual price alone and a disabled catalog", list)
-	}
+	require.Zero(t, list.Catalog, "list: want a disabled catalog")
+	require.Len(t, list.Prices, 1, "list: want the manual price alone")
+	require.Equal(t, "claude-sonnet-5", list.Prices[0].Model, "list: want the manual price alone")
 
-	if got := fixture.priced(t); len(got) != 1 {
-		t.Fatalf("sink = %v, want the manual price alone", got)
-	}
+	require.Len(t, fixture.priced(t), 1, "sink: want the manual price alone")
 }
 
 // Checks run one at a time, and reading the list never waits on one.
@@ -489,9 +470,8 @@ func TestChecksAreSerialisedAndReadsDoNotWait(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {
-			if _, err := fixture.svc.Refresh(context.Background(), newAdmin()); err != nil {
-				t.Errorf("Refresh: %v", err)
-			}
+			_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+			assert.NoError(t, err, "Refresh")
 		})
 	}
 
@@ -504,21 +484,19 @@ func TestChecksAreSerialisedAndReadsDoNotWait(t *testing.T) {
 	select {
 	case <-read:
 	case <-time.After(5 * time.Second):
-		t.Fatal("Get waited on a catalog fetch")
+		require.Fail(t, "Get waited on a catalog fetch")
 	}
 
 	select {
 	case <-entered:
-		t.Fatal("a second fetch started while the first ran")
+		require.Fail(t, "a second fetch started while the first ran")
 	case <-time.After(100 * time.Millisecond):
 	}
 
 	close(release)
 	wg.Wait()
 
-	if most.Load() != 1 {
-		t.Fatalf("%d fetches ran at once, want 1", most.Load())
-	}
+	require.Equal(t, int32(1), most.Load(), "fetches that ran at once")
 }
 
 // The scheduled loop checks at once, not an interval later, and returns when
@@ -544,7 +522,7 @@ func TestRunCatalogChecksAtOnceAndStops(t *testing.T) {
 	select {
 	case <-fetched:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no check at start")
+		require.Fail(t, "no check at start")
 	}
 
 	cancel()
@@ -552,23 +530,20 @@ func TestRunCatalogChecksAtOnceAndStops(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("RunCatalog did not return after its context ended")
+		require.Fail(t, "RunCatalog did not return after its context ended")
 	}
 }
 
 func TestPricesAreAdminOnly(t *testing.T) {
 	fixture := newPricesFixture(t, false, nil, app.CatalogState{})
-	if _, err := fixture.svc.Get(context.Background(), newPerson()); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Get by a user: err = %v, want ErrForbidden", err)
-	}
+	_, err := fixture.svc.Get(context.Background(), newPerson())
+	require.ErrorIs(t, err, app.ErrForbidden, "Get by a user")
 
-	if _, err := fixture.svc.Replace(context.Background(), newPerson(), nil); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Replace by a user: err = %v, want ErrForbidden", err)
-	}
+	_, err = fixture.svc.Replace(context.Background(), newPerson(), nil)
+	require.ErrorIs(t, err, app.ErrForbidden, "Replace by a user")
 
-	if _, err := fixture.svc.Refresh(context.Background(), newPerson()); !errors.Is(err, app.ErrForbidden) {
-		t.Fatalf("Refresh by a user: err = %v, want ErrForbidden", err)
-	}
+	_, err = fixture.svc.Refresh(context.Background(), newPerson())
+	require.ErrorIs(t, err, app.ErrForbidden, "Refresh by a user")
 }
 
 // A catalog whose rates match the stored ones under new validators is not a
@@ -582,17 +557,16 @@ func TestNewValidatorsWithTheSameRatesAreNoChange(t *testing.T) {
 	fixture.source.EXPECT().Fetch(mock.Anything, v1).Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: v2}, nil).Once()
 
 	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	require.NoError(t, err, "Refresh")
 
-	if fixture.replaces != 0 || fixture.state.Validators != v2 || !fixture.state.ChangedAt.Equal(earlier) || !fixture.state.CheckedAt.Equal(settingsNow) {
-		t.Fatalf("%d replaces, state %+v; want none, the new validators, changed at the earlier time", fixture.replaces, fixture.state)
-	}
+	require.Zero(t, fixture.replaces, "replaces")
+	require.Equal(t, v2, fixture.state.Validators, "state: want the new validators")
+	require.True(t, fixture.state.ChangedAt.Equal(earlier), "state = %+v, want changed at the earlier time", fixture.state)
+	require.True(t, fixture.state.CheckedAt.Equal(settingsNow), "state = %+v, want checked now", fixture.state)
 
-	if !list.Catalog.ChangedAt.Equal(earlier) || fixture.events[0].Detail["outcome"] != "unchanged" {
-		t.Fatalf("status %+v, audit %+v; want unchanged", list.Catalog, fixture.events)
-	}
+	require.True(t, list.Catalog.ChangedAt.Equal(earlier), "status = %+v, want unchanged", list.Catalog)
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "unchanged", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // Validators stored under another URL or parser are not sent: the new source
@@ -605,13 +579,11 @@ func TestValidatorsFromAnotherSourceAreNotSent(t *testing.T) {
 	fixture.source.EXPECT().Fetch(mock.Anything, app.CatalogValidators{}).
 		Return(app.CatalogFetch{Prices: []app.ModelPrice{sonnet()}, Validators: validators}, nil).Once()
 
-	if _, err := fixture.svc.Refresh(context.Background(), newAdmin()); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	_, err := fixture.svc.Refresh(context.Background(), newAdmin())
+	require.NoError(t, err, "Refresh")
 
-	if fixture.state.Fingerprint != fingerprint || fixture.state.Validators != validators {
-		t.Fatalf("state = %+v, want this source's fingerprint with the validators", fixture.state)
-	}
+	require.Equal(t, fingerprint, fixture.state.Fingerprint, "state: want this source's fingerprint")
+	require.Equal(t, validators, fixture.state.Validators, "state: want the validators")
 }
 
 // A store that refuses the catalog makes a failed check, reported like any other.
@@ -623,21 +595,18 @@ func TestAStoreFailureIsAFailedCheck(t *testing.T) {
 		Return(app.CatalogFetch{Prices: []app.ModelPrice{gpt()}, Validators: app.CatalogValidators{ETag: `"v1"`}}, nil).Once()
 
 	list, err := fixture.svc.Refresh(context.Background(), newAdmin())
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	require.NoError(t, err, "Refresh")
 
-	if list.Catalog.LastError != "the catalog could not be stored" || !list.Catalog.CheckedAt.Equal(earlier) || fixture.failures != 1 {
-		t.Fatalf("status %+v, %d failures; want a failed check counted", list.Catalog, fixture.failures)
-	}
+	require.Equal(t, "the catalog could not be stored", list.Catalog.LastError, "status last error")
+	require.True(t, list.Catalog.CheckedAt.Equal(earlier), "status = %+v, want the last success unchanged", list.Catalog)
+	require.Equal(t, 1, fixture.failures, "failures: want a failed check counted")
 
-	if got := fixture.priced(t); len(fixture.sunk) != 1 || got["claude/claude-sonnet-5"] != 3 {
-		t.Fatalf("sink = %v after %d lists, want the price in force untouched", got, len(fixture.sunk))
-	}
+	got := fixture.priced(t)
+	require.Len(t, fixture.sunk, 1, "sink: want the price in force untouched")
+	require.Equal(t, 3.0, got["claude/claude-sonnet-5"], "sink: want the price in force untouched")
 
-	if fixture.events[0].Detail["outcome"] != "failed" {
-		t.Fatalf("audit = %+v, want outcome failed", fixture.events)
-	}
+	require.NotEmpty(t, fixture.events, "audit")
+	require.Equal(t, "failed", fixture.events[0].Detail["outcome"], "audit outcome")
 }
 
 // A check cut short by the shutdown is not a failed check: nothing is counted or
@@ -665,9 +634,9 @@ func TestACancelledCheckIsNotAFailure(t *testing.T) {
 	cancel()
 	<-done
 
-	if fixture.failures != 0 || fixture.setStates != 0 || fixture.get(t).Catalog.LastError != "" {
-		t.Fatalf("%d failures, %d state writes, status %+v; want none", fixture.failures, fixture.setStates, fixture.get(t).Catalog)
-	}
+	require.Zero(t, fixture.failures, "failures")
+	require.Zero(t, fixture.setStates, "state writes")
+	require.Empty(t, fixture.get(t).Catalog.LastError, "status last error")
 }
 
 // A check stopped while its catalog is being stored is not a failed check either.
@@ -686,8 +655,8 @@ func TestACheckCancelledWhileStoringIsNotAFailure(t *testing.T) {
 
 	<-done
 
-	if fixture.replaces != 1 || fixture.failures != 0 || fixture.setStates != 0 || fixture.get(t).Catalog.LastError != "" {
-		t.Fatalf("%d replaces, %d failures, %d state writes, status %+v; want one replace and nothing recorded",
-			fixture.replaces, fixture.failures, fixture.setStates, fixture.get(t).Catalog)
-	}
+	require.Equal(t, 1, fixture.replaces, "replaces")
+	require.Zero(t, fixture.failures, "failures")
+	require.Zero(t, fixture.setStates, "state writes")
+	require.Empty(t, fixture.get(t).Catalog.LastError, "status last error")
 }

@@ -7,12 +7,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +21,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/oidc"
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -49,9 +50,7 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	require.NoError(t, err, "generate key")
 
 	fake := &fakeIDP{key: key}
 	mux := http.NewServeMux()
@@ -85,11 +84,19 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 			key = fake.key
 		}
 
+		// The handler runs off the test goroutine: assert, never require.
+		idToken, err := sign(key, mint(fake.srv.URL))
+		if !assert.NoError(t, err, "sign ID token") {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+
+			return
+		}
+
 		writeJSON(writer, map[string]any{
 			"access_token": "access-token-value",
 			"token_type":   "Bearer",
 			"expires_in":   300,
-			"id_token":     sign(t, key, mint(fake.srv.URL)),
+			"id_token":     idToken,
 		})
 	})
 	fake.srv = httptest.NewServer(mux)
@@ -98,23 +105,19 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 	return fake
 }
 
-func sign(t *testing.T, key *rsa.PrivateKey, claims map[string]any) string {
-	t.Helper()
-
+func sign(key *rsa.PrivateKey, claims map[string]any) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: key},
 		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", "k1"))
 	if err != nil {
-		t.Errorf("signer: %v", err)
-
-		return ""
+		return "", fmt.Errorf("signer: %w", err)
 	}
 
 	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
-		t.Errorf("sign: %v", err)
+		return "", fmt.Errorf("sign: %w", err)
 	}
 
-	return raw
+	return raw, nil
 }
 
 func (f *fakeIDP) setMint(m func(issuer string) map[string]any) {
@@ -179,9 +182,7 @@ func newProvider(t *testing.T, idp *fakeIDP) *oidc.Provider {
 		RedirectURL:  redirectURL,
 		GroupsClaim:  groupsClaim,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 
 	return provider
 }
@@ -194,51 +195,41 @@ func TestExchangeAcceptsAValidTokenBoundToTheLogin(t *testing.T) {
 	// The authorization request carries the state, the nonce, and the S256 challenge
 	// of the verifier — never the verifier itself.
 	auth, err := url.Parse(provider.AuthURL(challenge))
-	if err != nil {
-		t.Fatalf("parse AuthURL: %v", err)
-	}
+	require.NoError(t, err, "parse AuthURL")
 
 	query := auth.Query()
 
 	sum := sha256.Sum256([]byte(challenge.Verifier))
-	if query.Get("state") != challenge.State || query.Get("nonce") != challenge.Nonce ||
-		query.Get("code_challenge_method") != "S256" ||
-		query.Get("code_challenge") != base64.RawURLEncoding.EncodeToString(sum[:]) {
-		t.Fatalf("AuthURL query = %v, want state, nonce and the S256 challenge", query)
-	}
-
-	if strings.Contains(auth.String(), challenge.Verifier) {
-		t.Fatal("AuthURL reveals the PKCE verifier")
-	}
+	require.Equal(t, challenge.State, query.Get("state"), "AuthURL state")
+	require.Equal(t, challenge.Nonce, query.Get("nonce"), "AuthURL nonce")
+	require.Equal(t, "S256", query.Get("code_challenge_method"), "AuthURL code_challenge_method")
+	require.Equal(t, base64.RawURLEncoding.EncodeToString(sum[:]), query.Get("code_challenge"), "AuthURL code_challenge")
+	require.NotContains(t, auth.String(), challenge.Verifier, "AuthURL reveals the PKCE verifier")
 
 	got, err := provider.Exchange(context.Background(), "the-code", challenge)
-	if err != nil {
-		t.Fatalf("Exchange: %v", err)
-	}
+	require.NoError(t, err, "Exchange")
 
 	form := idp.lastForm()
-	if form.Get("code") != "the-code" || form.Get("code_verifier") != challenge.Verifier {
-		t.Fatalf("token request = %v, want the code and the PKCE verifier", form)
-	}
+	require.Equal(t, "the-code", form.Get("code"), "token request code")
+	require.Equal(t, challenge.Verifier, form.Get("code_verifier"), "token request PKCE verifier")
 
 	want := app.Claims{
 		Issuer: idp.srv.URL, Subject: "subject-1",
 		Email: "person@example.com", EmailVerified: true,
 		Groups: []string{"/gate", "/team-a"},
 	}
-	if got.Issuer != want.Issuer || got.Subject != want.Subject || got.Email != want.Email ||
-		got.EmailVerified != want.EmailVerified || !slices.Equal(got.Groups, want.Groups) {
-		t.Fatalf("claims = %+v, want %+v", got, want)
-	}
+	require.Equal(t, want.Issuer, got.Issuer, "claims issuer")
+	require.Equal(t, want.Subject, got.Subject, "claims subject")
+	require.Equal(t, want.Email, got.Email, "claims email")
+	require.Equal(t, want.EmailVerified, got.EmailVerified, "claims email_verified")
+	require.Equal(t, want.Groups, got.Groups, "claims groups")
 }
 
 func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 	// An attacker's key, used under the published key id: only signature
 	// verification tells this token from a genuine one.
 	forged, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+	require.NoError(t, err, "generate key")
 
 	cases := []struct {
 		name   string
@@ -267,14 +258,10 @@ func TestExchangeRejectsATokenItCannotTrust(t *testing.T) {
 			p := newProvider(t, idp)
 
 			_, err := p.Exchange(context.Background(), "the-code", challenge)
-			if !errors.Is(err, app.ErrInvalidCredentials) {
-				t.Fatalf("err = %v, want ErrInvalidCredentials", err)
-			}
+			require.ErrorIs(t, err, app.ErrInvalidCredentials)
 
 			for _, secret := range []string{clientSecret, challenge.Verifier, "the-code"} {
-				if strings.Contains(err.Error(), secret) {
-					t.Fatalf("error %q leaks %q", err, secret)
-				}
+				require.NotContains(t, err.Error(), secret, "error leaks a secret")
 			}
 		})
 	}
@@ -308,13 +295,8 @@ func TestExchangeNamesThePerson(t *testing.T) {
 			})
 
 			got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
-			if err != nil {
-				t.Fatalf("Exchange: %v", err)
-			}
-
-			if got.Name != tc.want {
-				t.Fatalf("Name = %q, want %q", got.Name, tc.want)
-			}
+			require.NoError(t, err, "Exchange")
+			require.Equal(t, tc.want, got.Name, "Name")
 		})
 	}
 
@@ -328,7 +310,6 @@ func TestExchangeNamesThePerson(t *testing.T) {
 	})
 
 	got, err := newProvider(t, idp).Exchange(context.Background(), "the-code", challenge)
-	if err != nil || got.Name != "" {
-		t.Fatalf("Name = %q, err %v; want empty", got.Name, err)
-	}
+	require.NoError(t, err, "Exchange")
+	require.Empty(t, got.Name, "Name")
 }

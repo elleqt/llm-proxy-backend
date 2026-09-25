@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +13,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 const inviteIssuer = "https://idp.example.com/realms/demo/"
@@ -105,13 +105,11 @@ func assertNoSecret(t *testing.T, events []app.AuditEvent, secrets ...string) {
 
 	for _, event := range events {
 		raw, err := json.Marshal(event.Detail)
-		if err != nil {
-			t.Fatalf("marshal detail: %v", err)
-		}
+		require.NoError(t, err, "marshal detail")
 
 		for _, s := range secrets {
-			if s != "" && strings.Contains(string(raw)+event.Target, s) {
-				t.Fatalf("audit event %s carries a secret: %s", event.Action, raw)
+			if s != "" {
+				require.NotContains(t, string(raw)+event.Target, s, "audit event %s carries a secret", event.Action)
 			}
 		}
 	}
@@ -195,9 +193,7 @@ func TestAdminUsersRefuseEveryoneButAnActiveAdmin(t *testing.T) {
 		for opName, op := range ops {
 			t.Run(actorName+"/"+opName, func(t *testing.T) {
 				f := newAdminFixture(t, app.AdminUsersConfig{OIDCIssuer: inviteIssuer})
-				if err := op(f.svc, actor); !errors.Is(err, app.ErrForbidden) {
-					t.Fatalf("err = %v, want ErrForbidden", err)
-				}
+				require.ErrorIs(t, op(f.svc, actor), app.ErrForbidden)
 			})
 		}
 	}
@@ -212,47 +208,33 @@ func TestCreateHumanWithPasswordShowsTheTemporaryPasswordOnce(t *testing.T) {
 		Kind: identity.KindHuman, Email: "Person@Example.com", DisplayName: " Person ",
 		Policy: []string{"alpha:*"}, SignIn: app.SignInPassword,
 	})
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	require.NoError(t, err, "CreateUser")
 
 	temp, created := out.TemporaryPassword, acct.User
-	if temp == nil || temp.Password == "" || acct.Password == nil {
-		t.Fatal("no temporary password for a human with a local password")
-	}
-
-	if !identity.VerifyPassword(acct.Password.Hash, temp.Password) {
-		t.Fatal("the stored hash does not verify the returned password")
-	}
+	require.NotNil(t, temp, "no temporary password for a human with a local password")
+	require.NotEmpty(t, temp.Password, "no temporary password for a human with a local password")
+	require.NotNil(t, acct.Password, "no password stored for a human with a local password")
+	require.True(t, identity.VerifyPassword(acct.Password.Hash, temp.Password),
+		"the stored hash does not verify the returned password")
 
 	wantExpiry := frozen.Add(72 * time.Hour)
-	if exp := acct.Password.ExpiresAt; exp == nil || !exp.Equal(wantExpiry) || !temp.ExpiresAt.Equal(wantExpiry) {
-		t.Fatalf("expiry stored %v, returned %v, want %v", exp, temp.ExpiresAt, wantExpiry)
-	}
-
-	if !created.MustChangePassword || !out.User.User.MustChangePassword {
-		t.Fatal("the account does not have to change its temporary password")
-	}
-
-	if acct.Invitation != nil {
-		t.Fatal("a password account was also invited")
-	}
+	exp := acct.Password.ExpiresAt
+	require.NotNil(t, exp, "stored expiry")
+	require.True(t, exp.Equal(wantExpiry), "expiry stored %v, want %v", exp, wantExpiry)
+	require.True(t, temp.ExpiresAt.Equal(wantExpiry), "expiry returned %v, want %v", temp.ExpiresAt, wantExpiry)
+	require.True(t, created.MustChangePassword, "the account does not have to change its temporary password")
+	require.True(t, out.User.User.MustChangePassword, "the returned view does not have to change its temporary password")
+	require.Nil(t, acct.Invitation, "a password account was also invited")
 	// A random id: never derived, never chosen by a caller.
-	if created.ID.Version() != 4 {
-		t.Fatalf("id %s is version %d, want a random v4 id", created.ID, created.ID.Version())
-	}
-
-	if created.DisplayName != "Person" || created.Email != "Person@Example.com" || created.Role != identity.RoleUser {
-		t.Fatalf("created = %+v", created)
-	}
-
-	if !slices.Equal(out.User.SignIn, []app.SignInMethod{app.SignInPassword}) {
-		t.Fatalf("sign-in = %v, want [password]", out.User.SignIn)
-	}
+	require.Equal(t, uuid.Version(4), created.ID.Version(), "id %s, want a random v4 id", created.ID)
+	require.Equal(t, "Person", created.DisplayName, "created display name")
+	require.Equal(t, "Person@Example.com", created.Email, "created email")
+	require.Equal(t, identity.RoleUser, created.Role, "created role")
+	require.Equal(t, []app.SignInMethod{app.SignInPassword}, out.User.SignIn, "sign-in")
 	// The audit record is committed with the account, not written beside it.
-	if a := acct.Audit; a.Action != "user.create" || a.Target != created.ID.String() || a.ActorID != admin.ID {
-		t.Fatalf("audit = %+v, want user.create on the new account by the admin", a)
-	}
+	require.Equal(t, "user.create", acct.Audit.Action, "audit action")
+	require.Equal(t, created.ID.String(), acct.Audit.Target, "audit target, want the new account")
+	require.Equal(t, admin.ID, acct.Audit.ActorID, "audit actor, want the admin")
 
 	assertNoSecret(t, []app.AuditEvent{acct.Audit}, temp.Password, acct.Password.Hash)
 }
@@ -266,13 +248,8 @@ func TestCreateUserWithholdsThePasswordWhenTheWriteFails(t *testing.T) {
 	out, err := f.svc.CreateUser(context.Background(), newAdmin(), app.NewUser{
 		Kind: identity.KindHuman, Email: "person@example.com", DisplayName: "Person", SignIn: app.SignInPassword,
 	})
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v, want the write failure", err)
-	}
-
-	if out.TemporaryPassword != nil {
-		t.Fatal("a temporary password was handed out for an account that was not stored")
-	}
+	require.ErrorIs(t, err, boom, "want the write failure")
+	require.Nil(t, out.TemporaryPassword, "a temporary password was handed out for an account that was not stored")
 }
 
 // The invitation is written for exactly the configured issuer: PendingByEmail
@@ -285,22 +262,19 @@ func TestCreateHumanWithOIDCRecordsAnInvitationForTheExactIssuer(t *testing.T) {
 	out, err := f.svc.CreateUser(context.Background(), newAdmin(), app.NewUser{
 		Kind: identity.KindHuman, Email: "Person@Example.com", DisplayName: "Person", SignIn: app.SignInOIDC,
 	})
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	require.NoError(t, err, "CreateUser")
 
 	want := app.Invitation{Issuer: inviteIssuer, Email: "Person@Example.com", ExpiresAt: frozen.Add(app.InvitationTTL)}
-	if acct.Invitation == nil || *acct.Invitation != want {
-		t.Fatalf("invitation = %+v, want %+v", acct.Invitation, want)
-	}
 
-	if acct.Password != nil || out.TemporaryPassword != nil || acct.User.MustChangePassword {
-		t.Fatal("an invited account got a password")
-	}
-
-	if len(out.User.SignIn) != 0 || out.User.InvitationExpiresAt == nil || !out.User.InvitationExpiresAt.Equal(want.ExpiresAt) {
-		t.Fatalf("view = %+v, want no working sign-in and the invitation's expiry", out.User)
-	}
+	require.NotNil(t, acct.Invitation, "no invitation recorded")
+	require.Equal(t, want, *acct.Invitation, "invitation")
+	require.Nil(t, acct.Password, "an invited account got a password")
+	require.Nil(t, out.TemporaryPassword, "an invited account got a temporary password")
+	require.False(t, acct.User.MustChangePassword, "an invited account must change a password")
+	require.Empty(t, out.User.SignIn, "view: want no working sign-in")
+	require.NotNil(t, out.User.InvitationExpiresAt, "view: want the invitation's expiry")
+	require.True(t, out.User.InvitationExpiresAt.Equal(want.ExpiresAt),
+		"view invitation expiry %v, want %v", out.User.InvitationExpiresAt, want.ExpiresAt)
 }
 
 // Without an issuer there is nobody to redeem the invitation: refused before any write.
@@ -311,9 +285,8 @@ func TestCreateHumanWithOIDCRefusedWhenOIDCIsOff(t *testing.T) {
 	})
 
 	var invalid *app.InvalidInputError
-	if !errors.As(err, &invalid) || invalid.Field != "signIn" {
-		t.Fatalf("err = %v, want an invalid signIn", err)
-	}
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, "signIn", invalid.Field, "invalid field")
 }
 
 func TestCreateServiceAccountGetsNoPasswordAndNoIdentity(t *testing.T) {
@@ -324,17 +297,16 @@ func TestCreateServiceAccountGetsNoPasswordAndNoIdentity(t *testing.T) {
 	out, err := f.svc.CreateUser(context.Background(), newAdmin(), app.NewUser{
 		Kind: identity.KindService, DisplayName: "chat-panel", Policy: []string{"alpha:*"}, SignIn: app.SignInOIDC,
 	})
-	if err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
+	require.NoError(t, err, "CreateUser")
+	require.Nil(t, acct.Password, "service account got a password")
+	require.Nil(t, acct.Invitation, "service account got an invitation")
+	require.Nil(t, out.TemporaryPassword, "service account got a temporary password")
+	require.Empty(t, out.User.SignIn, "service account got a way in")
 
-	if acct.Password != nil || acct.Invitation != nil || out.TemporaryPassword != nil || len(out.User.SignIn) != 0 {
-		t.Fatalf("service account got a way in: %+v / %+v", acct, out)
-	}
-
-	if c := acct.User; c.Kind != identity.KindService || c.Email != "" || c.ID.Version() != 4 {
-		t.Fatalf("created = %+v", c)
-	}
+	created := acct.User
+	require.Equal(t, identity.KindService, created.Kind, "created kind")
+	require.Empty(t, created.Email, "created email")
+	require.Equal(t, uuid.Version(4), created.ID.Version(), "id %s, want a random v4 id", created.ID)
 }
 
 func TestUpdateUserReportsTheFirstInvalidRule(t *testing.T) {
@@ -343,13 +315,8 @@ func TestUpdateUserReportsTheFirstInvalidRule(t *testing.T) {
 	_, err := f.svc.UpdateUser(context.Background(), newAdmin(), uuid.New(), app.UserChanges{Policy: &rules})
 
 	var invalid *app.InvalidRuleError
-	if !errors.As(err, &invalid) {
-		t.Fatalf("err = %v, want *InvalidRuleError", err)
-	}
-
-	if invalid.Rule != "no-colon" {
-		t.Fatalf("rule = %q, want the first bad one, %q", invalid.Rule, "no-colon")
-	}
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, "no-colon", invalid.Rule, "want the first bad rule")
 }
 
 func idpUser() identity.User {
@@ -367,9 +334,7 @@ func TestUpdatePolicyOfAnIdPUserRefusedWhileTheMappingIsConfigured(t *testing.T)
 	rules := []string{"alpha:*"}
 
 	_, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{Policy: &rules})
-	if !errors.Is(err, app.ErrPolicyManagedByIDP) {
-		t.Fatalf("err = %v, want ErrPolicyManagedByIDP", err)
-	}
+	require.ErrorIs(t, err, app.ErrPolicyManagedByIDP)
 }
 
 // With the mapping gone nothing recomputes the policy any more; the edit converts it
@@ -390,21 +355,14 @@ func TestUpdatePolicyOfAnIdPUserConvertsItWhenNoMappingIsConfigured(t *testing.T
 	events := fixture.recordAudit()
 
 	rules := []string{"beta:model-*"}
-	if _, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{Policy: &rules}); err != nil {
-		t.Fatalf("UpdateUser: %v", err)
-	}
-
-	if change.Policy == nil || !change.Policy.Allows("beta", "model-x") || change.Policy.Allows("alpha", "model-x") {
-		t.Fatalf("written policy = %v, want exactly beta:model-*", change.Policy)
-	}
-
-	if change.RefuseIDPPolicy {
-		t.Fatal("the write refuses an idp policy although no mapping owns it")
-	}
-
-	if (*events)[0].Detail["policy_source"] != "local" {
-		t.Fatalf("audit detail = %v, want the conversion recorded", (*events)[0].Detail)
-	}
+	_, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{Policy: &rules})
+	require.NoError(t, err, "UpdateUser")
+	require.NotNil(t, change.Policy, "no policy written")
+	require.True(t, change.Policy.Allows("beta", "model-x"), "written policy %v, want exactly beta:model-*", change.Policy)
+	require.False(t, change.Policy.Allows("alpha", "model-x"), "written policy %v, want exactly beta:model-*", change.Policy)
+	require.False(t, change.RefuseIDPPolicy, "the write refuses an idp policy although no mapping owns it")
+	require.NotEmpty(t, *events, "nothing was audited")
+	require.Equal(t, "local", (*events)[0].Detail["policy_source"], "audit detail, want the conversion recorded")
 }
 
 // A block is a revocation: the sessions go, and only after the block is written, so
@@ -417,8 +375,8 @@ func TestBlockingAUserDeletesTheirSessions(t *testing.T) {
 	var calls []string
 
 	fixture.users.EXPECT().UpdateAdminState(mock.Anything, target.ID, mock.Anything).RunAndReturn(func(_ context.Context, _ uuid.UUID, ch app.AdminChange) error {
-		if ch.Status == nil || *ch.Status != identity.StatusBlocked {
-			t.Errorf("written status %v, want blocked", ch.Status)
+		if assert.NotNil(t, ch.Status, "no status written") {
+			assert.Equal(t, identity.StatusBlocked, *ch.Status, "written status")
 		}
 
 		calls = append(calls, "write")
@@ -434,13 +392,9 @@ func TestBlockingAUserDeletesTheirSessions(t *testing.T) {
 	fixture.recordAudit()
 
 	blocked := identity.StatusBlocked
-	if _, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{Status: &blocked}); err != nil {
-		t.Fatalf("UpdateUser: %v", err)
-	}
-
-	if !slices.Equal(calls, []string{"write", "delete sessions"}) {
-		t.Fatalf("calls = %v, want the block written before the sessions are deleted", calls)
-	}
+	_, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{Status: &blocked})
+	require.NoError(t, err, "UpdateUser")
+	require.Equal(t, []string{"write", "delete sessions"}, calls, "want the block written before the sessions are deleted")
 }
 
 // A rename writes the name and nothing else — a status or policy copied from an
@@ -462,17 +416,13 @@ func TestRenameWritesOnlyTheNameAndKeepsSessions(t *testing.T) {
 	fixture.recordAudit()
 
 	name := " Renamed "
-	if _, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{DisplayName: &name}); err != nil {
-		t.Fatalf("UpdateUser: %v", err)
-	}
-
-	if change.DisplayName == nil || *change.DisplayName != "Renamed" {
-		t.Fatalf("written name = %v, want %q", change.DisplayName, "Renamed")
-	}
-
-	if change.Role != nil || change.Status != nil || change.Policy != nil {
-		t.Fatalf("a rename wrote other fields: %+v", change)
-	}
+	_, err := fixture.svc.UpdateUser(context.Background(), newAdmin(), target.ID, app.UserChanges{DisplayName: &name})
+	require.NoError(t, err, "UpdateUser")
+	require.NotNil(t, change.DisplayName, "no name written")
+	require.Equal(t, "Renamed", *change.DisplayName, "written name")
+	require.Nil(t, change.Role, "a rename wrote the role")
+	require.Nil(t, change.Status, "a rename wrote the status")
+	require.Nil(t, change.Policy, "a rename wrote the policy")
 }
 
 func TestAnAdministratorCannotLockThemselvesOut(t *testing.T) {
@@ -485,9 +435,8 @@ func TestAnAdministratorCannotLockThemselvesOut(t *testing.T) {
 			f := newAdminFixture(t, app.AdminUsersConfig{})
 
 			admin := newAdmin()
-			if _, err := f.svc.UpdateUser(context.Background(), admin, admin.ID, ch); !errors.Is(err, app.ErrSelfLockout) {
-				t.Fatalf("err = %v, want ErrSelfLockout", err)
-			}
+			_, err := f.svc.UpdateUser(context.Background(), admin, admin.ID, ch)
+			require.ErrorIs(t, err, app.ErrSelfLockout)
 		})
 	}
 }
@@ -513,9 +462,7 @@ func TestRenewInvitationRefusesWhatNobodyCouldRedeem(t *testing.T) {
 				fixture.users.EXPECT().ByID(mock.Anything, id).Return(*tc.user, nil)
 			}
 
-			if err := fixture.svc.RenewInvitation(context.Background(), newAdmin(), id); !errors.Is(err, app.ErrNotInvitable) {
-				t.Fatalf("err = %v, want ErrNotInvitable", err)
-			}
+			require.ErrorIs(t, fixture.svc.RenewInvitation(context.Background(), newAdmin(), id), app.ErrNotInvitable)
 		})
 	}
 }
@@ -528,9 +475,7 @@ func TestRenewInvitationOfALinkedAccountIsAlreadyLinked(t *testing.T) {
 	f.users.EXPECT().ByID(mock.Anything, target.ID).Return(target, nil)
 	f.idents.EXPECT().Invite(mock.Anything, target.ID, mock.Anything).Return(app.ErrAlreadyLinked)
 
-	if err := f.svc.RenewInvitation(context.Background(), newAdmin(), target.ID); !errors.Is(err, app.ErrAlreadyLinked) {
-		t.Fatalf("err = %v, want ErrAlreadyLinked", err)
-	}
+	require.ErrorIs(t, f.svc.RenewInvitation(context.Background(), newAdmin(), target.ID), app.ErrAlreadyLinked)
 }
 
 func TestRenewInvitationInvitesTheAccountsAddressForTheExactIssuer(t *testing.T) {
@@ -541,13 +486,10 @@ func TestRenewInvitationInvitesTheAccountsAddressForTheExactIssuer(t *testing.T)
 	fixture.idents.EXPECT().Invite(mock.Anything, target.ID, want).Return(nil)
 	events := fixture.recordAudit()
 
-	if err := fixture.svc.RenewInvitation(context.Background(), newAdmin(), target.ID); err != nil {
-		t.Fatalf("RenewInvitation: %v", err)
-	}
-
-	if e := (*events)[0]; e.Action != "user.invitation.renew" || e.Target != target.ID.String() {
-		t.Fatalf("audit = %+v, want user.invitation.renew on the account", e)
-	}
+	require.NoError(t, fixture.svc.RenewInvitation(context.Background(), newAdmin(), target.ID), "RenewInvitation")
+	require.NotEmpty(t, *events, "nothing was audited")
+	require.Equal(t, "user.invitation.renew", (*events)[0].Action, "audit action")
+	require.Equal(t, target.ID.String(), (*events)[0].Target, "audit target, want the account")
 }
 
 func TestResetPasswordIssuesATemporaryPasswordAndEndsSessions(t *testing.T) {
@@ -577,22 +519,17 @@ func TestResetPasswordIssuesATemporaryPasswordAndEndsSessions(t *testing.T) {
 	events := fixture.recordAudit()
 
 	temp, err := fixture.svc.ResetPassword(context.Background(), newAdmin(), target.ID)
-	if err != nil {
-		t.Fatalf("ResetPassword: %v", err)
-	}
+	require.NoError(t, err, "ResetPassword")
+	require.True(t, identity.VerifyPassword(storedHash, temp.Password), "the stored hash does not verify the returned password")
 
-	if !identity.VerifyPassword(storedHash, temp.Password) {
-		t.Fatal("the stored hash does not verify the returned password")
-	}
+	want := frozen.Add(72 * time.Hour)
 
-	if want := frozen.Add(72 * time.Hour); storedExpiry == nil || !storedExpiry.Equal(want) || !temp.ExpiresAt.Equal(want) {
-		t.Fatalf("expiry stored %v, returned %v, want %v", storedExpiry, temp.ExpiresAt, want)
-	}
+	require.NotNil(t, storedExpiry, "stored expiry")
+	require.True(t, storedExpiry.Equal(want), "expiry stored %v, want %v", storedExpiry, want)
+	require.True(t, temp.ExpiresAt.Equal(want), "expiry returned %v, want %v", temp.ExpiresAt, want)
 	// Restricted first: the other order lets the new password open an unrestricted
 	// session in between.
-	if !slices.Equal(calls, []string{"restrict", "password"}) {
-		t.Fatalf("calls = %v, want the restriction before the password", calls)
-	}
+	require.Equal(t, []string{"restrict", "password"}, calls, "want the restriction before the password")
 
 	assertNoSecret(t, *events, temp.Password, storedHash)
 }
@@ -602,9 +539,8 @@ func TestResetPasswordOfAServiceAccountIsNotLocal(t *testing.T) {
 	svc := identity.NewService(uuid.New(), "chat-panel", access.Policy{})
 	f.users.EXPECT().ByID(mock.Anything, svc.ID).Return(svc, nil)
 
-	if _, err := f.svc.ResetPassword(context.Background(), newAdmin(), svc.ID); !errors.Is(err, app.ErrNotLocal) {
-		t.Fatalf("err = %v, want ErrNotLocal", err)
-	}
+	_, err := f.svc.ResetPassword(context.Background(), newAdmin(), svc.ID)
+	require.ErrorIs(t, err, app.ErrNotLocal)
 }
 
 // Issuance on behalf goes through the label rule: nothing is minted under a label it
@@ -615,13 +551,8 @@ func TestIssueTokenRefusesALabelTheRuleForbids(t *testing.T) {
 	f.users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
 
 	_, secret, err := f.svc.IssueToken(context.Background(), newAdmin(), owner.ID, "panel\nforged log line")
-	if !errors.Is(err, credentials.ErrInvalidLabel) {
-		t.Fatalf("err = %v, want ErrInvalidLabel", err)
-	}
-
-	if secret != "" {
-		t.Fatal("a secret was returned for a refused label")
-	}
+	require.ErrorIs(t, err, credentials.ErrInvalidLabel)
+	require.Empty(t, secret, "a secret was returned for a refused label")
 }
 
 // The path names the owner: a real token of another account is not found there, and
@@ -631,20 +562,15 @@ func TestRevokeTokenOfAnotherAccountIsNotFound(t *testing.T) {
 	owner, other := uuid.New(), uuid.New()
 
 	own, _, err := credentials.Generate(owner, "laptop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
 
 	foreign, _, err := credentials.Generate(other, "desktop")
-	if err != nil {
-		t.Fatalf("Generate: %v", err)
-	}
+	require.NoError(t, err, "Generate")
 
 	fixture.tokens.EXPECT().ListByUser(mock.Anything, owner).Return([]credentials.Token{own}, nil)
 
-	if err := fixture.svc.RevokeToken(context.Background(), newAdmin(), owner, foreign.ID); !errors.Is(err, app.ErrNotFound) {
-		t.Fatalf("err = %v, want ErrNotFound", err)
-	}
+	err = fixture.svc.RevokeToken(context.Background(), newAdmin(), owner, foreign.ID)
+	require.ErrorIs(t, err, app.ErrNotFound)
 }
 
 func TestActivityBoundsThePageSize(t *testing.T) {
@@ -655,9 +581,8 @@ func TestActivityBoundsThePageSize(t *testing.T) {
 		fixture.activity.EXPECT().RecentUsage(mock.Anything, target.ID, want).Return(nil, nil)
 		fixture.activity.EXPECT().RecentAudit(mock.Anything, target.ID, want).Return(nil, nil)
 
-		if _, err := fixture.svc.Activity(context.Background(), newAdmin(), target.ID, asked); err != nil {
-			t.Fatalf("Activity(limit %d): %v", asked, err)
-		}
+		_, err := fixture.svc.Activity(context.Background(), newAdmin(), target.ID, asked)
+		require.NoError(t, err, "Activity(limit %d)", asked)
 	}
 }
 
@@ -676,29 +601,19 @@ func TestPolicyPreviewAgreesWithTheGateOnAModelServedByTwoProviders(t *testing.T
 	admin := newAdmin()
 
 	one, err := fixture.svc.PolicyPreview(admin, []string{"alpha:*", "not a rule"})
-	if err != nil {
-		t.Fatalf("PolicyPreview: %v", err)
-	}
-
-	if want := []app.CoveredModel{{Provider: "alpha", Model: "solo"}}; !slices.Equal(one.Covered, want) {
-		t.Fatalf("covered = %v, want %v: shared-model is also served by beta", one.Covered, want)
-	}
-
-	if !slices.Equal(one.Invalid, []string{"not a rule"}) {
-		t.Fatalf("invalid = %v, want the one rule that does not parse", one.Invalid)
-	}
+	require.NoError(t, err, "PolicyPreview")
+	require.Equal(t, []app.CoveredModel{{Provider: "alpha", Model: "solo"}}, one.Covered,
+		"covered: shared-model is also served by beta")
+	require.Equal(t, []string{"not a rule"}, one.Invalid, "invalid: want the one rule that does not parse")
 
 	both, err := fixture.svc.PolicyPreview(admin, []string{"alpha:*", "beta:*"})
-	if err != nil {
-		t.Fatalf("PolicyPreview: %v", err)
-	}
+	require.NoError(t, err, "PolicyPreview")
 
 	want := []app.CoveredModel{
 		{Provider: "alpha", Model: "shared-model"},
 		{Provider: "alpha", Model: "solo"},
 		{Provider: "beta", Model: "shared-model"},
 	}
-	if !slices.Equal(both.Covered, want) || len(both.Invalid) != 0 {
-		t.Fatalf("preview = %+v, want covered %v and no errors", both, want)
-	}
+	require.Equal(t, want, both.Covered, "covered")
+	require.Empty(t, both.Invalid, "want no errors")
 }

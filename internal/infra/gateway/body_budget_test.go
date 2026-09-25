@@ -20,6 +20,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/semaphore"
 )
 
@@ -113,9 +115,7 @@ func TestOneUserHoldsAtMostItsShare(t *testing.T) {
 	withBodyBudget(t, budget, 50*time.Millisecond)
 
 	chat, err := io.ReadAll(jsonBodyOf(size))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	entered, proceed := make(chan []byte, 4), make(chan struct{})
 	engine := heldEngine(entered, proceed)
@@ -124,43 +124,38 @@ func TestOneUserHoldsAtMostItsShare(t *testing.T) {
 
 	hold := func(key string) {
 		wg.Go(func() {
-			if rec := sendBodyAs(engine, key, "/v1/chat/completions", "application/json", bytes.NewReader(chat)); rec.Code != http.StatusOK {
-				t.Errorf("held request of %s = %d %s, want 200", key, rec.Code, rec.Body)
-			}
+			rec := sendBodyAs(engine, key, "/v1/chat/completions", "application/json", bytes.NewReader(chat))
+			assert.Equal(t, http.StatusOK, rec.Code, "held request of %s: %s", key, rec.Body)
 		})
 
 		<-entered
 	}
 	hold(userKey("a", 1))
 
-	const share = `{"error":{"message":"too many large requests in flight for this account; retry","type":"rate_limit_error"}}`
+	const (
+		share  = `{"error":{"message":"too many large requests in flight for this account; retry","type":"rate_limit_error"}}`
+		second = "a second body of a user holding its share, on another token"
+	)
 
 	rec := sendBodyAs(engine, userKey("a", 2), "/v1/chat/completions", "application/json", bytes.NewReader(chat))
-	if rec.Code != http.StatusTooManyRequests || rec.Body.String() != share || rec.Header().Get("Retry-After") != "1" {
-		t.Errorf("a second body of a user holding its share, on another token = %d %s (Retry-After %q), want 429 %s after 1",
-			rec.Code, rec.Body, rec.Header().Get("Retry-After"), share)
-	}
+	assert.Equal(t, http.StatusTooManyRequests, rec.Code, second)
+	assert.JSONEq(t, share, rec.Body.String(), second)
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"), second)
 
 	hold(userKey("b", 1))
 
 	close(proceed)
 	wg.Wait()
 
-	if rec := sendBodyAs(engine, userKey("a", 2), "/v1/chat/completions", "application/json", bytes.NewReader(chat)); rec.Code != http.StatusOK {
-		t.Errorf("once its requests finished, the user's next body = %d %s, want 200", rec.Code, rec.Body)
-	}
+	rec = sendBodyAs(engine, userKey("a", 2), "/v1/chat/completions", "application/json", bytes.NewReader(chat))
+	assert.Equal(t, http.StatusOK, rec.Code, "once its requests finished, the user's next body: %s", rec.Body)
 
 	bodyShares.mu.Lock()
 	left := len(bodyShares.held)
 	bodyShares.mu.Unlock()
 
-	if left != 0 {
-		t.Errorf("%d users are still on the books with nothing held", left)
-	}
-
-	if !bodyBudget.TryAcquire(budget) {
-		t.Fatal("after every request finished the budget is not whole again")
-	}
+	assert.Zero(t, left, "users still on the books with nothing held")
+	require.True(t, bodyBudget.TryAcquire(budget), "after every request finished the budget is not whole again")
 
 	bodyBudget.Release(budget)
 }
@@ -179,16 +174,12 @@ func TestUnencodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 	withBodyBudget(t, budget, 50*time.Millisecond)
 
 	chat, err := io.ReadAll(jsonBodyOf(size))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	form, formType := imageEditOf(t, "gpt-image-2", size)
 
 	edit, err := io.ReadAll(form)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	entered, proceed := make(chan []byte, 4), make(chan struct{})
 	engine := heldEngine(entered, proceed)
@@ -203,32 +194,28 @@ func TestUnencodedBodiesHoldTheBudgetUntilServed(t *testing.T) {
 		{"/v1/images/edits", formType, edit, []byte("gpt-image-2")},
 	} {
 		wg.Go(func() {
-			if rec := sendBody(engine, sent.path, sent.contentType, bytes.NewReader(sent.body)); rec.Code != http.StatusOK {
-				t.Errorf("held request to %s = %d %s, want 200", sent.path, rec.Code, rec.Body)
-			}
+			rec := sendBody(engine, sent.path, sent.contentType, bytes.NewReader(sent.body))
+			assert.Equal(t, http.StatusOK, rec.Code, "held request to %s: %s", sent.path, rec.Body)
 		})
 
-		if got := <-entered; !bytes.Equal(got, sent.want) {
-			t.Fatalf("the handler of %s was given %d bytes, not what was sent", sent.path, len(got))
-		}
+		got := <-entered
+		require.True(t, bytes.Equal(got, sent.want), "the handler of %s was given %d bytes, not what was sent", sent.path, len(got))
 	}
 
-	if rec := sendBody(engine, "/v1/chat/completions", "application/json", bytes.NewReader(chat)); rec.Code != http.StatusServiceUnavailable || rec.Body.String() != bodiesBusy {
-		t.Errorf("with the budget held = %d %s, want 503 %s", rec.Code, rec.Body, bodiesBusy)
-	}
+	rec := sendBody(engine, "/v1/chat/completions", "application/json", bytes.NewReader(chat))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "with the budget held")
+	assert.JSONEq(t, bodiesBusy, rec.Body.String(), "with the budget held")
 
 	close(proceed)
 	wg.Wait()
 
 	select {
 	case <-entered:
-		t.Fatal("a request reached its handler with the budget held")
+		require.Fail(t, "a request reached its handler with the budget held")
 	default:
 	}
 
-	if !bodyBudget.TryAcquire(budget) {
-		t.Fatal("after the held requests finished the budget is not whole again")
-	}
+	require.True(t, bodyBudget.TryAcquire(budget), "after the held requests finished the budget is not whole again")
 
 	bodyBudget.Release(budget)
 }
@@ -243,9 +230,7 @@ func TestTwoEditsAtTheLimitFitTwiceTheLimit(t *testing.T) {
 	form, formType := imageEditOf(t, "gpt-image-2", size)
 
 	edit, err := io.ReadAll(form)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	entered, proceed := make(chan []byte, 2), make(chan struct{})
 	engine := heldEngine(entered, proceed)
@@ -253,16 +238,13 @@ func TestTwoEditsAtTheLimitFitTwiceTheLimit(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 2 {
 		wg.Go(func() {
-			if rec := sendBody(engine, "/v1/images/edits", formType, bytes.NewReader(edit)); rec.Code != http.StatusOK {
-				t.Errorf("edit = %d %s, want 200", rec.Code, rec.Body)
-			}
+			rec := sendBody(engine, "/v1/images/edits", formType, bytes.NewReader(edit))
+			assert.Equal(t, http.StatusOK, rec.Code, "edit: %s", rec.Body)
 		})
 	}
 
 	for range 2 {
-		if got := string(<-entered); got != "gpt-image-2" {
-			t.Fatalf("the edit's handler was given model %q, want gpt-image-2", got)
-		}
+		require.Equal(t, "gpt-image-2", string(<-entered), "the model the edit's handler was given")
 	}
 
 	close(proceed)
@@ -318,22 +300,17 @@ func TestDeclaredLengthsReserveNoBudget(t *testing.T) {
 	}
 
 	const room = budget - idle*initialBodyBuffer
-	if !bodyBudget.TryAcquire(room) {
-		t.Errorf("%d requests that sent nothing hold more than their initial buffers", idle)
-	} else {
+	if assert.True(t, bodyBudget.TryAcquire(room), "%d requests that sent nothing hold more than their initial buffers", idle) {
 		bodyBudget.Release(room)
 	}
 
-	if rec := sendBody(engine, "/v1/chat/completions", "application/json", jsonBodyOf(32<<20)); rec.Code != http.StatusOK {
-		t.Errorf("beside %d idle senders a 32 MiB request = %d %s, want 200", idle, rec.Code, rec.Body)
-	}
+	rec := sendBody(engine, "/v1/chat/completions", "application/json", jsonBodyOf(32<<20))
+	assert.Equal(t, http.StatusOK, rec.Code, "beside %d idle senders a 32 MiB request: %s", idle, rec.Body)
 
 	close(stop)
 	wg.Wait()
 
-	if !bodyBudget.TryAcquire(budget) {
-		t.Fatal("after the idle requests gave up the budget is not whole again")
-	}
+	require.True(t, bodyBudget.TryAcquire(budget), "after the idle requests gave up the budget is not whole again")
 
 	bodyBudget.Release(budget)
 }
@@ -353,9 +330,7 @@ func rawConn(t *testing.T, addr string) (net.Conn, *bufio.Reader) {
 	t.Helper()
 
 	conn, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	t.Cleanup(func() { _ = conn.Close() })
 	// A deadline that never fires must fail the test, not hang it.
@@ -389,46 +364,38 @@ func TestStalledSenderIsCutByTheReadDeadline(t *testing.T) {
 	chat := `{"model":"` + wire.alias + `","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
 
 	conn, reader := rawConn(t, addr)
-	if _, err := io.WriteString(conn, requestHead("/v1/messages", wireSecret, 1<<20)+chat[:10]); err != nil {
-		t.Fatal(err)
-	}
+	_, err := io.WriteString(conn, requestHead("/v1/messages", wireSecret, 1<<20)+chat[:10])
+	require.NoError(t, err)
 
 	resp, err := http.ReadResponse(reader, nil)
-	if err != nil {
-		t.Fatalf("stalled sender: %v", err)
-	}
+	require.NoError(t, err, "stalled sender")
 
 	body, _ := io.ReadAll(resp.Body)
 	// Closed here, not deferred: resp is reused for the second exchange.
 	_ = resp.Body.Close()
 
 	const timedOut = `{"error":{"message":"request body not received in time","type":"invalid_request_error"}}`
-	if resp.StatusCode != http.StatusRequestTimeout || string(body) != timedOut {
-		t.Fatalf("stalled sender = %d %s, want 408 %s", resp.StatusCode, body, timedOut)
-	}
 
-	if !bodyBudget.TryAcquire(maxBodiesInFlight) {
-		t.Fatal("after the stalled sender was cut its charge is still held")
-	}
+	require.Equal(t, http.StatusRequestTimeout, resp.StatusCode, "stalled sender: %s", body)
+	require.JSONEq(t, timedOut, string(body), "stalled sender")
+	require.True(t, bodyBudget.TryAcquire(maxBodiesInFlight), "after the stalled sender was cut its charge is still held")
 
 	bodyBudget.Release(maxBodiesInFlight)
 
 	conn, reader = rawConn(t, addr)
-	if _, err := io.WriteString(conn, requestHead("/v1/messages", wireSecret, len(chat))+chat); err != nil {
-		t.Fatal(err)
-	}
+	_, err = io.WriteString(conn, requestHead("/v1/messages", wireSecret, len(chat))+chat)
+	require.NoError(t, err)
 
 	resp, err = http.ReadResponse(reader, nil)
-	if err != nil {
-		t.Fatalf("slow vendor: %v", err)
-	}
+	require.NoError(t, err, "slow vendor")
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ = io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "late") {
-		t.Fatalf("a vendor answering after the body's read deadline = %d %s, want 200 with its answer", resp.StatusCode, body)
-	}
+
+	const late = "a vendor answering after the body's read deadline"
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", late, body)
+	require.Contains(t, string(body), "late", late)
 }
 
 // TestBodilessRequestGetsNoReadDeadline: a model request without a body sets
@@ -454,20 +421,15 @@ func TestBodilessRequestGetsNoReadDeadline(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	conn, r := rawConn(t, srv.Listener.Addr().String())
-	if _, err := io.WriteString(conn, requestHead("/v1beta/models/gemini-3-pro:generateContent", gateSecret, 0)); err != nil {
-		t.Fatal(err)
-	}
+	_, err := io.WriteString(conn, requestHead("/v1beta/models/gemini-3-pro:generateContent", gateSecret, 0))
+	require.NoError(t, err)
 
 	resp, err := http.ReadResponse(r, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("a bodiless request outlasting the read deadline = %d, want 200 with its request context live", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "a bodiless request outlasting the read deadline, want its request context live")
 }
 
 // TestBodyIsRefusedWithoutAReadDeadline: a body the gate cannot bound in
@@ -490,9 +452,9 @@ func TestBodyIsRefusedWithoutAReadDeadline(t *testing.T) {
 		engine.POST("/v1/chat/completions", func(*gin.Context) { reached = true })
 
 		rec := sendBody(engine, "/v1/chat/completions", "application/json", iotest.ErrReader(io.ErrUnexpectedEOF))
-		if rec.Code != http.StatusInternalServerError || rec.Body.String() != failed || reached {
-			t.Errorf("%s = %d %s (reached %t), want 500 %s", what, rec.Code, rec.Body, reached, failed)
-		}
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, what)
+		assert.JSONEq(t, failed, rec.Body.String(), what)
+		assert.False(t, reached, what)
 	}
 }
 
@@ -552,9 +514,7 @@ func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
 	engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	inner, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	listener := clearingListener{Listener: inner, conns: make(chan *clearingConn, 1)}
 	srv := &httptest.Server{Listener: listener, Config: &http.Server{Handler: engine}}
@@ -565,15 +525,14 @@ func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
 	_ = conn.SetDeadline(time.Now().Add(20 * timeout))
 
 	chat := `{"model":"gpt-5.6","messages":[{"role":"user","content":"hi"}]}`
-	if _, err := io.WriteString(conn, requestHead("/v1/chat/completions", gateSecret, len(chat))+chat[:10]); err != nil {
-		t.Fatal(err)
-	}
+	_, err = io.WriteString(conn, requestHead("/v1/chat/completions", gateSecret, len(chat))+chat[:10])
+	require.NoError(t, err)
 
 	served := <-listener.conns
 	select {
 	case <-served.set:
 	case <-time.After(10 * timeout):
-		t.Fatal("the gate set no read deadline")
+		require.Fail(t, "the gate set no read deadline")
 	}
 
 	_ = served.Conn.SetReadDeadline(time.Time{})
@@ -581,20 +540,15 @@ func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
 	started := time.Now()
 
 	resp, err := http.ReadResponse(reader, nil)
-	if err != nil {
-		t.Fatalf("stalled sender after the transport cleared the deadline: %v", err)
-	}
+	require.NoError(t, err, "stalled sender after the transport cleared the deadline")
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 
 	const timedOut = `{"error":{"message":"request body not received in time","type":"invalid_request_error"}}`
-	if resp.StatusCode != http.StatusRequestTimeout || string(body) != timedOut {
-		t.Fatalf("stalled sender = %d %s, want 408 %s", resp.StatusCode, body, timedOut)
-	}
 
-	if waited := time.Since(started); waited > 5*timeout {
-		t.Fatalf("408 came %v after the clear, want about %v", waited, timeout)
-	}
+	require.Equal(t, http.StatusRequestTimeout, resp.StatusCode, "stalled sender: %s", body)
+	require.JSONEq(t, timedOut, string(body), "stalled sender")
+	require.LessOrEqual(t, time.Since(started), 5*timeout, "408 came too long after the clear, want about %v", timeout)
 }

@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // padding streams n bytes of 'x' without holding them.
@@ -42,13 +45,10 @@ func imageEditOf(t *testing.T, model string, size int64) (io.Reader, string) {
 	var head bytes.Buffer
 
 	mw := multipart.NewWriter(&head)
-	if err := mw.WriteField("model", model); err != nil {
-		t.Fatalf("write field: %v", err)
-	}
+	require.NoError(t, mw.WriteField("model", model), "write field")
 
-	if _, err := mw.CreateFormFile("image", "cat.png"); err != nil {
-		t.Fatalf("create file: %v", err)
-	}
+	_, err := mw.CreateFormFile("image", "cat.png")
+	require.NoError(t, err, "create file")
 
 	tail := "\r\n--" + mw.Boundary() + "--\r\n"
 
@@ -95,21 +95,23 @@ func TestModelRouteBodiesAreCapped(t *testing.T) {
 		*reached = false
 
 		body, contentType := tc.body(tc.limit)
-		if rec := send(tc.path, contentType, body, -1); rec.Code != http.StatusOK || !*reached {
-			t.Fatalf("%s of exactly %d bytes = %d %s (reached %t), want 200", tc.what, tc.limit, rec.Code, rec.Body, *reached)
-		}
+		rec := send(tc.path, contentType, body, -1)
+		require.Equal(t, http.StatusOK, rec.Code, "%s of exactly %d bytes: %s", tc.what, tc.limit, rec.Body)
+		require.True(t, *reached, "%s of exactly %d bytes did not reach the handler", tc.what, tc.limit)
 
 		*reached = false
 
 		body, contentType = tc.body(tc.limit + 1)
-		if rec := send(tc.path, contentType, body, -1); rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Fatalf("%s of %d bytes = %d %s (reached %t), want 413 %s", tc.what, tc.limit+1, rec.Code, rec.Body, *reached, tooLarge)
-		}
+		rec = send(tc.path, contentType, body, -1)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s of %d bytes", tc.what, tc.limit+1)
+		require.JSONEq(t, tooLarge, rec.Body.String(), "%s of %d bytes", tc.what, tc.limit+1)
+		require.False(t, *reached, "%s of %d bytes reached the handler", tc.what, tc.limit+1)
 		// A body that declares its length is refused on it, unread: any
 		// read of this one fails the request some other way.
-		if rec := send(tc.path, contentType, iotest.ErrReader(io.ErrUnexpectedEOF), tc.limit+1); rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Fatalf("%s declaring %d bytes = %d %s (reached %t), want 413 %s", tc.what, tc.limit+1, rec.Code, rec.Body, *reached, tooLarge)
-		}
+		rec = send(tc.path, contentType, iotest.ErrReader(io.ErrUnexpectedEOF), tc.limit+1)
+		require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s declaring %d bytes", tc.what, tc.limit+1)
+		require.JSONEq(t, tooLarge, rec.Body.String(), "%s declaring %d bytes", tc.what, tc.limit+1)
+		require.False(t, *reached, "%s declaring %d bytes reached the handler", tc.what, tc.limit+1)
 	}
 }
 
@@ -202,9 +204,9 @@ func TestZstdBodiesAreCappedDecoded(t *testing.T) {
 	)
 
 	*reached = false
-	if rec, _ := send(chatDecodingTo("gpt-5.6", limit)); rec.Code != http.StatusOK || !*reached {
-		t.Fatalf("a frame decoding to exactly %d bytes = %d %s (reached %t), want 200", limit, rec.Code, rec.Body, *reached)
-	}
+	rec, _ := send(chatDecodingTo("gpt-5.6", limit))
+	require.Equal(t, http.StatusOK, rec.Code, "a frame decoding to exactly %d bytes: %s", limit, rec.Body)
+	require.True(t, *reached, "a frame decoding to exactly %d bytes did not reach the handler", limit)
 
 	for _, tc := range []struct {
 		what  string
@@ -217,14 +219,12 @@ func TestZstdBodiesAreCappedDecoded(t *testing.T) {
 		*reached = false
 
 		rec, allocated := send(tc.frame)
-		if rec.Code != http.StatusRequestEntityTooLarge || rec.Body.String() != tooLarge || *reached {
-			t.Errorf("%s (%d bytes sent) = %d %s (reached %t), want 413 %s", tc.what, len(tc.frame), rec.Code, rec.Body, *reached, tooLarge)
-		}
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "%s (%d bytes sent)", tc.what, len(tc.frame))
+		assert.JSONEq(t, tooLarge, rec.Body.String(), "%s (%d bytes sent)", tc.what, len(tc.frame))
+		assert.False(t, *reached, "%s (%d bytes sent) reached the handler", tc.what, len(tc.frame))
 		// Reading up to the limit costs a few times the limit as the buffer
 		// grows (more under the race detector); decoding the gigabyte, many
 		// times more.
-		if allocated > 8*limit {
-			t.Errorf("%s allocated %d MiB, want at most %d", tc.what, allocated>>20, 8*limit>>20)
-		}
+		assert.LessOrEqual(t, allocated, uint64(8*limit), "%s allocated too much", tc.what)
 	}
 }

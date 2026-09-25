@@ -4,6 +4,8 @@ import (
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // A spray of addresses cannot grow the limiter past MaxClients.
@@ -14,9 +16,7 @@ func TestLimiterStaysBounded(t *testing.T) {
 	for i := range 100 {
 		l.allow("spray-" + strconv.Itoa(i))
 
-		if n := len(l.buckets); n > 3 {
-			t.Fatalf("after %d clients the limiter remembers %d, want at most 3", i+1, n)
-		}
+		require.LessOrEqual(t, len(l.buckets), 3, "after %d clients the limiter remembers too many", i+1)
 	}
 }
 
@@ -35,11 +35,7 @@ func TestLimiterForgetsRecoveredClientsFirst(t *testing.T) {
 
 	rateLimiter.allow("newcomer")
 
-	if _, kept := rateLimiter.buckets["limited"]; !kept {
-		t.Fatal("a client still being limited was forgotten while a recovered one could have been")
-	}
-
-	if len(rateLimiter.buckets) != 2 {
-		t.Fatalf("the limiter remembers %d clients, want 2", len(rateLimiter.buckets))
-	}
+	require.Contains(t, rateLimiter.buckets, "limited",
+		"a client still being limited was forgotten while a recovered one could have been")
+	require.Len(t, rateLimiter.buckets, 2, "the limiter remembers the wrong number of clients")
 }

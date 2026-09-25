@@ -5,12 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func messagesRequest(target string) *http.Request {
@@ -67,13 +68,10 @@ func TestAccessProviderAcceptsEverySupportedSource(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			res, authErr := provider.Authenticate(context.Background(), tc.build())
-			if authErr != nil {
-				t.Fatalf("Authenticate: %v", authErr)
-			}
-
-			if res.Provider != "llmproxy-token" || res.Principal != wirePrincipal.String() || res.Metadata["source"] != tc.source {
-				t.Fatalf("result = %+v, want provider llmproxy-token, principal %q, source %q", res, wirePrincipal, tc.source)
-			}
+			require.Nil(t, authErr, "Authenticate")
+			require.Equal(t, "llmproxy-token", res.Provider)
+			require.Equal(t, wirePrincipal.String(), res.Principal)
+			require.Equal(t, tc.source, res.Metadata["source"])
 		})
 	}
 }
@@ -87,13 +85,9 @@ func TestAccessProviderAdmitsAnyPresentedCredentialThatAuthenticates(t *testing.
 	r.Header.Set("X-Api-Key", wireSecret)
 
 	res, authErr := NewAccessProvider(wireResolver).Authenticate(context.Background(), r)
-	if authErr != nil {
-		t.Fatalf("Authenticate: %v", authErr)
-	}
-
-	if res.Principal != wirePrincipal.String() || res.Metadata["source"] != "x-api-key" {
-		t.Fatalf("result = %+v, want the x-api-key token's principal", res)
-	}
+	require.Nil(t, authErr, "Authenticate")
+	require.Equal(t, wirePrincipal.String(), res.Principal, "want the x-api-key token's principal")
+	require.Equal(t, "x-api-key", res.Metadata["source"])
 }
 
 func TestAccessProviderRejectsAnUnknownSecret(t *testing.T) {
@@ -101,24 +95,20 @@ func TestAccessProviderRejectsAnUnknownSecret(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer sk-unknown")
 
 	_, authErr := NewAccessProvider(wireResolver).Authenticate(context.Background(), r)
-	if !sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential) {
-		t.Fatalf("err = %v, want invalid_credential", authErr)
-	}
+	require.True(t, sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential), "err = %v, want invalid_credential", authErr)
 }
 
 func TestAccessProviderWithoutACredentialReportsNone(t *testing.T) {
 	provider := NewAccessProvider(wireResolver)
-	if _, authErr := provider.Authenticate(context.Background(), messagesRequest("/v1/messages")); !sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeNoCredentials) {
-		t.Fatalf("no credential: err = %v, want no_credentials", authErr)
-	}
+	_, authErr := provider.Authenticate(context.Background(), messagesRequest("/v1/messages"))
+	require.True(t, sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeNoCredentials), "no credential: err = %v, want no_credentials", authErr)
 
 	// An empty bearer token is a credential that is present and wrong, as upstream has it.
 	r := messagesRequest("/v1/messages")
 	r.Header.Set("Authorization", "Bearer ")
 
-	if _, authErr := provider.Authenticate(context.Background(), r); !sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential) {
-		t.Fatalf("empty bearer: err = %v, want invalid_credential", authErr)
-	}
+	_, authErr = provider.Authenticate(context.Background(), r)
+	require.True(t, sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInvalidCredential), "empty bearer: err = %v, want invalid_credential", authErr)
 }
 
 // TestAccessProviderTrustsThePrincipalOnTheContext: the policy gate has
@@ -126,7 +116,7 @@ func TestAccessProviderWithoutACredentialReportsNone(t *testing.T) {
 // the provider must admit without a second lookup.
 func TestAccessProviderTrustsThePrincipalOnTheContext(t *testing.T) {
 	provider := NewAccessProvider(resolverFunc(func(context.Context, string) (app.Principal, access.Policy, error) {
-		t.Error("the resolver was called although the context carries a principal")
+		assert.Fail(t, "the resolver was called although the context carries a principal")
 
 		return app.Principal{}, nil, app.ErrInvalidCredentials
 	}))
@@ -136,13 +126,10 @@ func TestAccessProviderTrustsThePrincipalOnTheContext(t *testing.T) {
 	ctx := withPrincipal(context.Background(), wirePrincipal, "x-api-key")
 
 	res, authErr := provider.Authenticate(ctx, r)
-	if authErr != nil {
-		t.Fatalf("Authenticate: %v", authErr)
-	}
-
-	if res.Provider != "llmproxy-token" || res.Principal != wirePrincipal.String() || res.Metadata["source"] != "x-api-key" {
-		t.Fatalf("result = %+v, want the gate's principal and source", res)
-	}
+	require.Nil(t, authErr, "Authenticate")
+	require.Equal(t, "llmproxy-token", res.Provider)
+	require.Equal(t, wirePrincipal.String(), res.Principal, "want the gate's principal")
+	require.Equal(t, "x-api-key", res.Metadata["source"], "want the gate's source")
 }
 
 // TestAccessProviderReportsAFailedLookupAsInternal: an outage must not tell a
@@ -156,11 +143,8 @@ func TestAccessProviderReportsAFailedLookupAsInternal(t *testing.T) {
 	r.Header.Set("Authorization", "Bearer "+wireSecret)
 
 	_, authErr := provider.Authenticate(context.Background(), r)
-	if !sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInternal) || authErr.HTTPStatusCode() != http.StatusInternalServerError {
-		t.Fatalf("err = %v, want internal_error with status 500", authErr)
-	}
-
-	if strings.Contains(authErr.Error(), wireSecret) || strings.Contains(authErr.Message, wireSecret) {
-		t.Fatalf("error %q carries the secret", authErr)
-	}
+	require.True(t, sdkaccess.IsAuthErrorCode(authErr, sdkaccess.AuthErrorCodeInternal), "err = %v, want internal_error", authErr)
+	require.Equal(t, http.StatusInternalServerError, authErr.HTTPStatusCode())
+	require.NotContains(t, authErr.Error(), wireSecret, "error carries the secret")
+	require.NotContains(t, authErr.Message, wireSecret, "error message carries the secret")
 }

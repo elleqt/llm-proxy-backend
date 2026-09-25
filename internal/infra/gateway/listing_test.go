@@ -15,6 +15,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
 
@@ -35,9 +37,7 @@ func arrayNames(key, field string, decode func(string) string) func(*testing.T, 
 		t.Helper()
 
 		list := gjson.Get(body, key)
-		if !list.IsArray() {
-			t.Fatalf("response %s has no %q array", body, key)
-		}
+		require.True(t, list.IsArray(), "response %s has no %q array", body, key)
 
 		entries := list.Array()
 
@@ -68,25 +68,19 @@ func (r *running) getAs(t *testing.T, path string, header http.Header) (int, str
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, r.baseURL+path, http.NoBody)
-	if err != nil {
-		t.Fatalf("build GET %s: %v", path, err)
-	}
+	require.NoError(t, err, "build GET %s", path)
 
 	maps.Copy(req.Header, header)
 
 	req.Header.Set("Authorization", "Bearer "+wireSecret)
 
 	resp, err := noRedirects.Do(req)
-	if err != nil {
-		t.Fatalf("GET %s: %v", path, err)
-	}
+	require.NoError(t, err, "GET %s", path)
 
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read GET %s: %v", path, err)
-	}
+	require.NoError(t, err, "read GET %s", path)
 
 	return resp.StatusCode, string(body)
 }
@@ -118,9 +112,7 @@ func TestListingsShowOnlyWhatThePolicyAdmits(t *testing.T) {
 
 		for _, list := range modelLists {
 			code, body := srv.getAs(t, list.path, list.header)
-			if code != http.StatusOK {
-				t.Fatalf("%s list for %v = %d %s, want 200", list.name, tc.rules, code, body)
-			}
+			require.Equal(t, http.StatusOK, code, "%s list for %v: %s", list.name, tc.rules, body)
 
 			names := list.names(t, body)
 
@@ -137,12 +129,10 @@ func TestListingsShowOnlyWhatThePolicyAdmits(t *testing.T) {
 			want := slices.Clone(tc.want)
 			slices.Sort(want)
 
-			if !slices.Equal(got, want) {
-				t.Errorf("%s list for policy %v shows %v of this test's models, want %v", list.name, tc.rules, got, want)
-			}
+			assert.Equal(t, want, got, "%s list for policy %v shows these of this test's models", list.name, tc.rules)
 
-			if tc.rules == nil && len(names) != 0 {
-				t.Errorf("%s list for an empty policy = %v, want none", list.name, names)
+			if tc.rules == nil {
+				assert.Empty(t, names, "%s list for an empty policy", list.name)
 			}
 		}
 	}
@@ -168,18 +158,15 @@ func TestAnthropicListingBoundsFollowTheFilter(t *testing.T) {
 			_, body := srv.getAs(t, "/v1/models", header)
 
 			ids := gjson.Get(body, "data.#.id").Array()
-			if len(ids) != tc.want {
-				t.Fatalf("Anthropic list for %v = %s, want %d models", tc.rules, body, tc.want)
-			}
+			require.Len(t, ids, tc.want, "Anthropic list for %v = %s", tc.rules, body)
 
 			first, last := "", ""
 			if len(ids) > 0 {
 				first, last = ids[0].String(), ids[len(ids)-1].String()
 			}
 
-			if got := [2]string{gjson.Get(body, "first_id").String(), gjson.Get(body, "last_id").String()}; got != [2]string{first, last} {
-				t.Errorf("Anthropic list for %v has first_id, last_id %q, want %q", tc.rules, got, [2]string{first, last})
-			}
+			got := [2]string{gjson.Get(body, "first_id").String(), gjson.Get(body, "last_id").String()}
+			assert.Equal(t, [2]string{first, last}, got, "Anthropic list for %v: first_id, last_id", tc.rules)
 		}
 	}
 }
@@ -202,9 +189,9 @@ func TestSingleGeminiModelIsHiddenLikeAnUnknownOne(t *testing.T) {
 	policy.set("gemini:*")
 
 	for _, path := range paths {
-		if code, body := srv.getAs(t, path, nil); code != http.StatusOK || gjson.Get(body, "name").String() != "models/"+model {
-			t.Fatalf("GET %s allowed = %d %s, want 200 naming it", path, code, body)
-		}
+		code, body := srv.getAs(t, path, nil)
+		require.Equal(t, http.StatusOK, code, "GET %s allowed: %s", path, body)
+		require.Equal(t, "models/"+model, gjson.Get(body, "name").String(), "GET %s allowed: %s", path, body)
 	}
 
 	policy.set("claude:*")
@@ -212,9 +199,9 @@ func TestSingleGeminiModelIsHiddenLikeAnUnknownOne(t *testing.T) {
 	unknownCode, unknownBody := srv.getAs(t, "/v1beta/models/no-such-model-"+seq, nil)
 	for _, path := range paths {
 		code, body := srv.getAs(t, path, nil)
-		if code != http.StatusNotFound || code != unknownCode || body != unknownBody {
-			t.Fatalf("GET %s denied = %d %s, want what an unknown model gets: %d %s", path, code, body, unknownCode, unknownBody)
-		}
+		require.Equal(t, http.StatusNotFound, code, "GET %s denied: %s", path, body)
+		require.Equal(t, unknownCode, code, "GET %s denied, status of an unknown model", path)
+		require.Equal(t, unknownBody, body, "GET %s denied, body of an unknown model", path)
 	}
 }
 
@@ -258,9 +245,8 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 		rec := httptest.NewRecorder()
 		engine.ServeHTTP(rec, req)
 
-		if rec.Code != http.StatusBadGateway || rec.Body.String() != unavailable {
-			t.Errorf("%s = %d %.200s, want 502 %s", tc.what, rec.Code, rec.Body, unavailable)
-		}
+		assert.Equal(t, http.StatusBadGateway, rec.Code, tc.what)
+		assert.JSONEq(t, unavailable, rec.Body.String(), tc.what)
 	}
 }
 
@@ -271,14 +257,12 @@ func TestListingThroughTheWire(t *testing.T) {
 	pair := startVendorPair(t)
 
 	code, body := pair.getAs(t, "/v1/models", nil)
-	if code != http.StatusOK {
-		t.Fatalf("GET /v1/models = %d %s", code, body)
-	}
+	require.Equal(t, http.StatusOK, code, "GET /v1/models: %s", body)
 
 	ids := arrayNames("data", "id", same)(t, body)
-	if !slices.Contains(ids, pair.allowedAlias) || slices.Contains(ids, pair.otherAlias) || slices.Contains(ids, pair.sharedAlias) {
-		t.Fatalf("GET /v1/models = %v, want %s and neither %s nor %s", ids, pair.allowedAlias, pair.otherAlias, pair.sharedAlias)
-	}
+	require.Contains(t, ids, pair.allowedAlias, "GET /v1/models")
+	require.NotContains(t, ids, pair.otherAlias, "GET /v1/models")
+	require.NotContains(t, ids, pair.sharedAlias, "GET /v1/models")
 }
 
 // TestCabinetListsWhatTheListingLists: the cabinet's list of a user's models
@@ -314,9 +298,7 @@ func TestCabinetListsWhatTheListingLists(t *testing.T) {
 		policy.set(tc.rules...)
 
 		code, body := srv.getAs(t, "/v1/models", nil)
-		if code != http.StatusOK {
-			t.Fatalf("GET /v1/models for %v = %d %s", tc.rules, code, body)
-		}
+		require.Equal(t, http.StatusOK, code, "GET /v1/models for %v: %s", tc.rules, body)
 
 		listed := arrayNames("data", "id", same)(t, body)
 		slices.Sort(listed)
@@ -340,12 +322,7 @@ func TestCabinetListsWhatTheListingLists(t *testing.T) {
 		slices.Sort(cabinetModels)
 		cabinetModels = slices.Compact(cabinetModels)
 
-		if !slices.Equal(cabinetModels, listed) {
-			t.Errorf("policy %v: the cabinet lists %v, GET /v1/models lists %v", tc.rules, cabinetModels, listed)
-		}
-
-		if !maps.EqualFunc(ours, tc.want, slices.Equal) {
-			t.Errorf("policy %v: the cabinet lists this test's models as %v, want %v", tc.rules, ours, tc.want)
-		}
+		assert.True(t, slices.Equal(cabinetModels, listed), "policy %v: the cabinet lists %v, GET /v1/models lists %v", tc.rules, cabinetModels, listed)
+		assert.Equal(t, tc.want, ours, "policy %v: the cabinet lists this test's models", tc.rules)
 	}
 }

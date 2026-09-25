@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +15,8 @@ import (
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Tests that push run on gateways without a boot-declared vendor: a push
@@ -30,18 +31,14 @@ func (r *running) models(t *testing.T, key string) int {
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, r.baseURL+"/v1/models", http.NoBody)
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
+	require.NoError(t, err, "build request")
 
 	if key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /v1/models: %v", err)
-	}
+	require.NoError(t, err, "GET /v1/models")
 
 	_ = resp.Body.Close()
 
@@ -56,21 +53,13 @@ func (r *running) models(t *testing.T, key string) int {
 func (r *running) assertClosed(t *testing.T, admitted, when string) {
 	t.Helper()
 
-	if code := r.models(t, ""); code != http.StatusUnauthorized {
-		t.Fatalf("GET /v1/models without a credential %s = %d, want %d", when, code, http.StatusUnauthorized)
-	}
-
-	if code := r.models(t, "sk-unknown"); code != http.StatusUnauthorized {
-		t.Fatalf("GET /v1/models with an unknown token %s = %d, want %d", when, code, http.StatusUnauthorized)
-	}
-
-	if code := r.models(t, admitted); code != http.StatusOK {
-		t.Fatalf("GET /v1/models with a valid token %s = %d, want %d", when, code, http.StatusOK)
-	}
+	require.Equal(t, http.StatusUnauthorized, r.models(t, ""), "GET /v1/models without a credential %s", when)
+	require.Equal(t, http.StatusUnauthorized, r.models(t, "sk-unknown"), "GET /v1/models with an unknown token %s", when)
+	require.Equal(t, http.StatusOK, r.models(t, admitted), "GET /v1/models with a valid token %s", when)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/v1/models", http.NoBody)
-	if res, err := r.gateway.access.Authenticate(context.Background(), req); err == nil {
-		t.Fatalf("the access manager admitted an uncredentialed request %s as %q", when, res.Principal)
+	if res, authErr := r.gateway.access.Authenticate(context.Background(), req); authErr == nil {
+		require.Failf(t, "the access manager admitted an uncredentialed request", "%s as %q", when, res.Principal)
 	}
 }
 
@@ -90,22 +79,16 @@ func TestAccessThroughTheServerIsByTokenOnly(t *testing.T) {
 		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)})
 
 	for _, tc := range []struct{ key, what string }{{"", "no credential"}, {"sk-unknown", "an unknown token"}} {
-		if status, _, body := wire.postMessages(t, tc.key, false); status != http.StatusUnauthorized {
-			t.Fatalf("POST /v1/messages with %s = %d (%s), want %d", tc.what, status, body, http.StatusUnauthorized)
-		}
+		status, _, body := wire.postMessages(t, tc.key, false)
+		require.Equal(t, http.StatusUnauthorized, status, "POST /v1/messages with %s (%s)", tc.what, body)
 	}
 
-	if n := len(wire.vendor.Requests()); n != 0 {
-		t.Fatalf("vendor received %d requests from refused clients", n)
-	}
+	require.Empty(t, wire.vendor.Requests(), "vendor received requests from refused clients")
 
-	if status, _, body := wire.postMessages(t, wireSecret, false); status != http.StatusOK {
-		t.Fatalf("POST /v1/messages with a valid token = %d (%s), want 200", status, body)
-	}
+	status, _, body := wire.postMessages(t, wireSecret, false)
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages with a valid token (%s)", body)
 
-	if n := len(wire.vendor.Requests()); n != 1 {
-		t.Fatalf("vendor received %d requests, want the valid client's 1", n)
-	}
+	require.Len(t, wire.vendor.Requests(), 1, "want the valid client's 1 request at the vendor")
 }
 
 // TestAccessStaysClosedAcrossAPush: a push is when upstream rebuilds its
@@ -116,9 +99,7 @@ func TestAccessStaysClosedAcrossAPush(t *testing.T) {
 	srv := start(t, &cliproxyconfig.Config{})
 	srv.assertClosed(t, wireSecret, "at boot")
 
-	if err := srv.gateway.PushConfig(srv.emptyPush()); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	require.NoError(t, srv.gateway.PushConfig(srv.emptyPush()), "PushConfig")
 
 	srv.assertClosed(t, wireSecret, "after a push")
 }
@@ -148,9 +129,7 @@ func TestNoOtherAccessProviderCanAdmit(t *testing.T) {
 	srv := start(t, &cliproxyconfig.Config{})
 	srv.assertClosed(t, wireSecret, "beside an admit-all provider")
 
-	if err := srv.gateway.PushConfig(srv.emptyPush()); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	require.NoError(t, srv.gateway.PushConfig(srv.emptyPush()), "PushConfig")
 
 	srv.assertClosed(t, wireSecret, "beside an admit-all provider after a push")
 }
@@ -162,26 +141,17 @@ func TestConfigAPIKeysAreRefused(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	withKeys := &cliproxyconfig.Config{AuthDir: t.TempDir(), APIKeys: []string{"config-master-key"}}
-	if _, err := New(Params{Config: withKeys, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver}); !errors.Is(err, ErrConfigAPIKeys) {
-		t.Fatalf("New with api-keys = %v, want ErrConfigAPIKeys", err)
-	}
+	_, err := New(Params{Config: withKeys, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver})
+	require.ErrorIs(t, err, ErrConfigAPIKeys, "New with api-keys")
 
 	srv := start(t, &cliproxyconfig.Config{})
 	before := srv.gateway.CurrentConfig()
 	pushed := srv.emptyPush()
 
 	pushed.APIKeys = []string{"config-master-key"}
-	if err := srv.gateway.PushConfig(pushed); !errors.Is(err, ErrConfigAPIKeys) {
-		t.Fatalf("PushConfig with api-keys = %v, want ErrConfigAPIKeys", err)
-	}
-
-	if srv.gateway.CurrentConfig() != before {
-		t.Fatal("CurrentConfig reports the refused configuration")
-	}
-
-	if code := srv.models(t, "config-master-key"); code != http.StatusUnauthorized {
-		t.Fatalf("GET /v1/models with the refused config key = %d, want %d", code, http.StatusUnauthorized)
-	}
+	require.ErrorIs(t, srv.gateway.PushConfig(pushed), ErrConfigAPIKeys, "PushConfig with api-keys")
+	require.Same(t, before, srv.gateway.CurrentConfig(), "CurrentConfig reports the refused configuration")
+	require.Equal(t, http.StatusUnauthorized, srv.models(t, "config-master-key"), "GET /v1/models with the refused config key")
 }
 
 // TestPluginsAndHomeModeAreRefused: a plugin can register an access provider,
@@ -200,24 +170,20 @@ func TestPluginsAndHomeModeAreRefused(t *testing.T) {
 		{"plugins", func(c *cliproxyconfig.Config) { c.Plugins.Enabled = true }, ErrPlugins},
 		{"home mode", func(c *cliproxyconfig.Config) { c.Home.Enabled = true }, ErrHomeMode},
 	} {
-		boot := &cliproxyconfig.Config{AuthDir: t.TempDir()}
-		tc.enable(boot)
+		t.Run(tc.what, func(t *testing.T) {
+			boot := &cliproxyconfig.Config{AuthDir: t.TempDir()}
+			tc.enable(boot)
 
-		if _, err := New(Params{Config: boot, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver}); !errors.Is(err, tc.want) {
-			t.Errorf("New with %s = %v, want %v", tc.what, err, tc.want)
-		}
+			_, err := New(Params{Config: boot, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver})
+			require.ErrorIs(t, err, tc.want, "New with %s", tc.what)
 
-		before := srv.gateway.CurrentConfig()
-		pushed := srv.emptyPush()
-		tc.enable(pushed)
+			before := srv.gateway.CurrentConfig()
+			pushed := srv.emptyPush()
+			tc.enable(pushed)
 
-		if err := srv.gateway.PushConfig(pushed); !errors.Is(err, tc.want) {
-			t.Errorf("PushConfig with %s = %v, want %v", tc.what, err, tc.want)
-		}
-
-		if srv.gateway.CurrentConfig() != before {
-			t.Errorf("CurrentConfig reports the configuration enabling %s", tc.what)
-		}
+			require.ErrorIs(t, srv.gateway.PushConfig(pushed), tc.want, "PushConfig with %s", tc.what)
+			assert.Same(t, before, srv.gateway.CurrentConfig(), "CurrentConfig reports the configuration enabling %s", tc.what)
+		})
 	}
 }
 
@@ -225,9 +191,7 @@ func TestNewRefusesWithoutAResolver(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	_, err := New(Params{Config: &cliproxyconfig.Config{AuthDir: t.TempDir()}, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml")})
-	if !errors.Is(err, ErrNoResolver) {
-		t.Fatalf("New without a resolver = %v, want ErrNoResolver", err)
-	}
+	require.ErrorIs(t, err, ErrNoResolver, "New without a resolver")
 }
 
 // TestEachGatewayAuthenticatesWithItsOwnResolver: the provider is registered
@@ -246,19 +210,12 @@ func TestEachGatewayAuthenticatesWithItsOwnResolver(t *testing.T) {
 
 	second.assertClosed(t, secretB, "at the later gateway")
 
-	if code := second.models(t, wireSecret); code != http.StatusUnauthorized {
-		t.Fatalf("the earlier gateway's token at the later gateway = %d, want %d", code, http.StatusUnauthorized)
-	}
-
-	if err := first.gateway.PushConfig(first.emptyPush()); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	require.Equal(t, http.StatusUnauthorized, second.models(t, wireSecret), "the earlier gateway's token at the later gateway")
+	require.NoError(t, first.gateway.PushConfig(first.emptyPush()), "PushConfig")
 
 	first.assertClosed(t, wireSecret, "at the earlier gateway after its push")
 
-	if code := first.models(t, secretB); code != http.StatusUnauthorized {
-		t.Fatalf("the later gateway's token at the earlier gateway = %d, want %d", code, http.StatusUnauthorized)
-	}
+	require.Equal(t, http.StatusUnauthorized, first.models(t, secretB), "the later gateway's token at the earlier gateway")
 
 	second.assertClosed(t, secretB, "at the later gateway after the earlier one pushed")
 }
@@ -287,7 +244,7 @@ func awaitPprof(t *testing.T, url, when string) {
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("GET %s %s = %d, want %d", url, when, code, http.StatusOK)
+			require.Failf(t, "pprof did not answer", "GET %s %s = %d, want %d", url, when, code, http.StatusOK)
 		}
 	}
 }
@@ -298,13 +255,9 @@ func TestPushedConfigReachesTheServer(t *testing.T) {
 	srv := start(t, &cliproxyconfig.Config{})
 
 	on, url := srv.pprofOn(t)
-	if code, _ := get(t, url); code != 0 {
-		t.Fatalf("GET %s before the push = %d, want nothing listening", url, code)
-	}
-
-	if err := srv.gateway.PushConfig(on); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	code, _ := get(t, url)
+	require.Zero(t, code, "GET %s before the push: want nothing listening", url)
+	require.NoError(t, srv.gateway.PushConfig(on), "PushConfig")
 
 	awaitPprof(t, url, "after pushing pprof on")
 }
@@ -316,9 +269,7 @@ func TestPushConfigRejectsWhatUpstreamWouldDrop(t *testing.T) {
 	srv := start(t, &cliproxyconfig.Config{})
 
 	accepted, url := srv.pprofOn(t)
-	if err := srv.gateway.PushConfig(accepted); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	require.NoError(t, srv.gateway.PushConfig(accepted), "PushConfig")
 
 	awaitPprof(t, url, "after pushing pprof on")
 
@@ -331,15 +282,9 @@ func TestPushConfigRejectsWhatUpstreamWouldDrop(t *testing.T) {
 		BaseURL:       "http://" + net.JoinHostPort("", "1"),
 		APIKeyEntries: []cliproxyconfig.OpenAICompatibilityAPIKey{{APIKey: "k", Weight: &tooHeavy}},
 	}}
-	if err := srv.gateway.PushConfig(rejected); err == nil {
-		t.Fatal("PushConfig accepted a configuration with an out-of-range credential weight")
-	}
+	require.Error(t, srv.gateway.PushConfig(rejected), "PushConfig accepted a configuration with an out-of-range credential weight")
+	require.Same(t, accepted, srv.gateway.CurrentConfig(), "CurrentConfig reports the rejected configuration")
 
-	if got := srv.gateway.CurrentConfig(); got != accepted {
-		t.Fatal("CurrentConfig reports the rejected configuration")
-	}
-
-	if code, _ := get(t, url); code != http.StatusOK {
-		t.Fatalf("GET %s = %d, want %d: the running service must keep the accepted configuration", url, code, http.StatusOK)
-	}
+	code, _ := get(t, url)
+	require.Equal(t, http.StatusOK, code, "GET %s: the running service must keep the accepted configuration", url)
 }

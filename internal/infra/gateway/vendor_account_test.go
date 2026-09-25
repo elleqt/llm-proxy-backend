@@ -5,6 +5,7 @@ import (
 	"time"
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/stretchr/testify/require"
 )
 
 // An account loaded from its file at boot has no in-process refresh yet; the
@@ -37,9 +38,7 @@ func TestAccountCardShowsTheStoredLastRefresh(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := vendorAccount(&tc.auth).LastRefreshedAt
-			if !got.Equal(tc.want) {
-				t.Fatalf("LastRefreshedAt = %v, want %v", got, tc.want)
-			}
+			require.True(t, got.Equal(tc.want), "LastRefreshedAt = %v, want %v", got, tc.want)
 		})
 	}
 }

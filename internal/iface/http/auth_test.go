@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,22 +13,24 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAuthConfigReportsTheSignInMethods(t *testing.T) {
 	var off api.AuthConfig
 	decodeBody(t, newEnv(t).do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &off)
 
-	if !off.LocalLogin || off.Oidc.Enabled || off.Oidc.DisplayName != nil {
-		t.Fatalf("without OIDC: %+v, want local login only", off)
-	}
+	require.True(t, off.LocalLogin, "without OIDC: local login")
+	require.False(t, off.Oidc.Enabled, "without OIDC: oidc enabled")
+	require.Nil(t, off.Oidc.DisplayName, "without OIDC: button label")
 
 	var on api.AuthConfig
 	decodeBody(t, newEnv(t, withOIDC).do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &on)
 
-	if !on.LocalLogin || !on.Oidc.Enabled || on.Oidc.DisplayName == nil || *on.Oidc.DisplayName != "Example SSO" {
-		t.Fatalf("with OIDC: %+v, want both methods and the button label", on)
-	}
+	require.True(t, on.LocalLogin, "with OIDC: local login")
+	require.True(t, on.Oidc.Enabled, "with OIDC: oidc enabled")
+	require.NotNil(t, on.Oidc.DisplayName, "with OIDC: button label")
+	require.Equal(t, "Example SSO", *on.Oidc.DisplayName, "with OIDC: button label")
 }
 
 // With local sign-in off, the login screen is not offered the form and the login
@@ -41,9 +42,8 @@ func TestLocalLoginOffRemovesThePasswordSignIn(t *testing.T) {
 	var cfg api.AuthConfig
 	decodeBody(t, env.do(http.MethodGet, "/api/auth/config", ""), http.StatusOK, &cfg)
 
-	if cfg.LocalLogin || !cfg.Oidc.Enabled {
-		t.Fatalf("config = %+v, want OIDC only", cfg)
-	}
+	require.False(t, cfg.LocalLogin, "local login is offered")
+	require.True(t, cfg.Oidc.Enabled, "oidc is not offered")
 
 	apiError(t, env.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"right password"}`),
 		http.StatusNotFound, codeNotFound)
@@ -79,27 +79,20 @@ func TestLoginSetsTheSessionCookieAndDescribesTheUser(t *testing.T) {
 	var me api.Me
 	decodeBody(t, rec, http.StatusOK, &me)
 
-	if me.Id != user.ID || !me.Restricted || me.Email == nil || *me.Email != user.Email {
-		t.Fatalf("me = %+v, want %s, restricted", me, user.ID)
-	}
+	require.Equal(t, user.ID, me.Id, "me id")
+	require.True(t, me.Restricted, "me restricted")
+	require.NotNil(t, me.Email, "me email")
+	require.Equal(t, user.Email, *me.Email, "me email")
 
 	cookie := cookieNamed(t, rec, sessionCookieName)
-	if app.HashSessionID(cookie.Value) != stored.IDHash {
-		t.Fatal("the cookie does not carry the id of the session that was stored")
-	}
+	require.Equal(t, stored.IDHash, app.HashSessionID(cookie.Value), "the cookie does not carry the id of the session that was stored")
 
-	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" {
-		t.Fatalf("cookie HttpOnly=%t Secure=%t SameSite=%v Path=%q; want HttpOnly, Secure, Lax, /",
-			cookie.HttpOnly, cookie.Secure, cookie.SameSite, cookie.Path)
-	}
-
-	if cookie.MaxAge != int(app.SessionTTL/time.Second) {
-		t.Fatalf("MaxAge = %d, want the session TTL %d", cookie.MaxAge, int(app.SessionTTL/time.Second))
-	}
-
-	if strings.Contains(rec.Body.String(), cookie.Value) {
-		t.Fatal("the session id is in the response body")
-	}
+	require.True(t, cookie.HttpOnly, "cookie HttpOnly")
+	require.True(t, cookie.Secure, "cookie Secure")
+	require.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "cookie SameSite")
+	require.Equal(t, "/", cookie.Path, "cookie Path")
+	require.Equal(t, int(app.SessionTTL/time.Second), cookie.MaxAge, "MaxAge is not the session TTL")
+	require.NotContains(t, rec.Body.String(), cookie.Value, "the session id is in the response body")
 }
 
 // Secure comes off only when the deployment says so (local development over http).
@@ -107,9 +100,8 @@ func TestTheCookieIsNotSecureOnlyWhenConfiguredSo(t *testing.T) {
 	e := newEnv(t, withInsecureCookies)
 
 	rec := e.do(http.MethodPost, "/api/auth/logout", "")
-	if c := cookieNamed(t, rec, sessionCookieName); c.Secure {
-		t.Fatal("Secure is set although the deployment turned it off")
-	}
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.False(t, c.Secure, "Secure is set although the deployment turned it off")
 }
 
 func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
@@ -120,9 +112,7 @@ func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
 		rec := e.do(http.MethodPost, "/api/auth/login", `{"email":"nobody@example.com","password":"guess"}`)
 		apiError(t, rec, http.StatusUnauthorized, codeInvalidCredentials)
 
-		if len(rec.Result().Cookies()) != 0 {
-			t.Fatal("a refused sign-in set a cookie")
-		}
+		require.Empty(t, rec.Result().Cookies(), "a refused sign-in set a cookie")
 	})
 
 	t.Run("locked address", func(t *testing.T) {
@@ -132,9 +122,7 @@ func TestLoginRefusalsAreJSONWithTheContractsCodes(t *testing.T) {
 		rec := e.do(http.MethodPost, "/api/auth/login", `{"email":"person@example.com","password":"guess"}`)
 		apiError(t, rec, http.StatusTooManyRequests, codeLockedOut)
 
-		if got := rec.Header().Get("Retry-After"); got != "91" {
-			t.Fatalf("Retry-After = %q, want 91 (the lock's remaining time, rounded up)", got)
-		}
+		require.Equal(t, "91", rec.Header().Get("Retry-After"), "Retry-After is not the lock's remaining time, rounded up")
 	})
 
 	t.Run("store down", func(t *testing.T) {
@@ -160,17 +148,15 @@ func TestLogoutEndsTheSessionAndClearsTheCookie(t *testing.T) {
 	e.sessions.EXPECT().Delete(mock.Anything, app.HashSessionID(cookie.Value)).Return(nil)
 
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(cookie))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status")
 
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 || c.Value != "" {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
+	require.Empty(t, c.Value, "cookie %+v was not cleared", c)
 
-	if len(events) != 1 || events[0].Action != "auth.signout" || events[0].ActorID != user.ID {
-		t.Fatalf("audit = %+v, want one auth.signout by %s", events, user.ID)
-	}
+	require.Len(t, events, 1, "audit")
+	require.Equal(t, "auth.signout", events[0].Action, "audit action")
+	require.Equal(t, user.ID, events[0].ActorID, "audit actor")
 }
 
 // A cookie whose session is already gone must still be cleared, or the browser keeps
@@ -180,13 +166,10 @@ func TestLogoutClearsTheCookieOfASessionAlreadyGone(t *testing.T) {
 	e.sessions.EXPECT().ByHash(mock.Anything, mock.Anything).Return(app.Session{}, app.ErrNotFound)
 
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(&http.Cookie{Name: sessionCookieName, Value: "stale"}))
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("status = %d, want 204", rec.Code)
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status")
 
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
 }
 
 func TestLogoutReportsASessionThatCouldNotBeEnded(t *testing.T) {
@@ -196,9 +179,8 @@ func TestLogoutReportsASessionThatCouldNotBeEnded(t *testing.T) {
 	rec := e.do(http.MethodPost, "/api/auth/logout", "", withCookie(cookie))
 	apiError(t, rec, http.StatusInternalServerError, codeInternal)
 
-	if c := cookieNamed(t, rec, sessionCookieName); c.MaxAge >= 0 {
-		t.Fatalf("cookie %+v was not cleared", c)
-	}
+	c := cookieNamed(t, rec, sessionCookieName)
+	require.Negative(t, c.MaxAge, "cookie %+v was not cleared", c)
 }
 
 func TestPasswordChange(t *testing.T) {
@@ -219,9 +201,7 @@ func TestPasswordChange(t *testing.T) {
 		env.sessions.EXPECT().DeleteByUserExcept(mock.Anything, sess.UserID, app.HashSessionID(cookie.Value)).Return(nil)
 
 		rec := env.do(http.MethodPost, "/api/auth/password", `{"newPassword":"a long new password"}`, withCookie(cookie))
-		if rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204; body %s", rec.Code, rec.Body)
-		}
+		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
 	})
 
 	t.Run("too short", func(t *testing.T) {
@@ -229,9 +209,7 @@ func TestPasswordChange(t *testing.T) {
 		cookie, _ := restricted(e)
 
 		rec := e.do(http.MethodPost, "/api/auth/password", `{"newPassword":"short"}`, withCookie(cookie))
-		if f := apiError(t, rec, http.StatusBadRequest, codeWeakPassword).Field; f == nil || *f != "newPassword" {
-			t.Fatalf("field = %v, want newPassword", f)
-		}
+		wantField(t, apiError(t, rec, http.StatusBadRequest, codeWeakPassword), "newPassword")
 	})
 
 	t.Run("empty", func(t *testing.T) {
@@ -239,9 +217,7 @@ func TestPasswordChange(t *testing.T) {
 		cookie, _ := restricted(e)
 
 		rec := e.do(http.MethodPost, "/api/auth/password", `{"newPassword":""}`, withCookie(cookie))
-		if f := apiError(t, rec, http.StatusBadRequest, codeEmptyPassword).Field; f == nil || *f != "newPassword" {
-			t.Fatalf("field = %v, want newPassword", f)
-		}
+		wantField(t, apiError(t, rec, http.StatusBadRequest, codeEmptyPassword), "newPassword")
 	})
 
 	// A federated user has no local password to prove: the same answer as a wrong one.
@@ -283,9 +259,7 @@ func TestPasswordChange(t *testing.T) {
 			`{"currentPassword":"a guess","newPassword":"a long new password"}`, withCookie(e.signedIn(u)))
 		apiError(t, rec, http.StatusUnauthorized, codeInvalidCredentials)
 
-		if len(rec.Result().Cookies()) != 0 {
-			t.Fatal("a wrong current password touched the session cookie")
-		}
+		require.Empty(t, rec.Result().Cookies(), "a wrong current password touched the session cookie")
 	})
 }
 
@@ -298,20 +272,18 @@ func startOIDC(t *testing.T, env *testEnv) (*http.Cookie, url.Values) {
 	})
 
 	rec := env.do(http.MethodGet, "/api/auth/oidc/start", "")
-	if rec.Code != http.StatusFound {
-		t.Fatalf("start: status = %d, want 302", rec.Code)
-	}
+	require.Equal(t, http.StatusFound, rec.Code, "start: status")
 
 	loc, err := url.Parse(rec.Header().Get("Location"))
-	if err != nil || loc.Host != "idp.example.com" {
-		t.Fatalf("start redirected to %q, want the IdP", rec.Header().Get("Location"))
-	}
+	require.NoError(t, err, "start redirected to %q", rec.Header().Get("Location"))
+	require.Equal(t, "idp.example.com", loc.Host, "start did not redirect to the IdP")
 
 	cookie := cookieNamed(t, rec, oidcCookieName)
-	if !cookie.HttpOnly || !cookie.Secure || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != oidcCookiePath ||
-		cookie.MaxAge != int(oidcChallengeTTL/time.Second) {
-		t.Fatalf("challenge cookie %+v: want HttpOnly, Secure, Lax, path %s, ten minutes", cookie, oidcCookiePath)
-	}
+	require.True(t, cookie.HttpOnly, "challenge cookie HttpOnly")
+	require.True(t, cookie.Secure, "challenge cookie Secure")
+	require.Equal(t, http.SameSiteLaxMode, cookie.SameSite, "challenge cookie SameSite")
+	require.Equal(t, oidcCookiePath, cookie.Path, "challenge cookie Path")
+	require.Equal(t, int(oidcChallengeTTL/time.Second), cookie.MaxAge, "challenge cookie MaxAge")
 
 	return cookie, loc.Query()
 }
@@ -340,25 +312,21 @@ func TestOIDCCallbackCompletesTheLoginTheCookieStarted(t *testing.T) {
 	env.users.EXPECT().ByID(mock.Anything, user.ID).Return(user, nil)
 	env.sessions.EXPECT().Create(mock.Anything, mock.Anything).Return(nil)
 
-	if strings.Contains(cookie.Value, query.Get("state")) {
-		t.Fatal("the challenge cookie carries the state in the clear")
-	}
+	require.NotContains(t, cookie.Value, query.Get("state"), "the challenge cookie carries the state in the clear")
 
 	rec := env.do(http.MethodGet, "/api/auth/oidc/callback?code=the-code&state="+url.QueryEscape(query.Get("state")), "",
 		withCookie(cookie))
-	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
-		t.Fatalf("callback: status %d to %q, want 302 to /", rec.Code, rec.Header().Get("Location"))
-	}
+	require.Equal(t, http.StatusFound, rec.Code, "callback status")
+	require.Equal(t, "/", rec.Header().Get("Location"), "callback redirect")
 
-	if exchanged.State != query.Get("state") || exchanged.Verifier == "" || strings.Contains(cookie.Value, exchanged.Verifier) {
-		t.Fatalf("the exchange did not get the sealed challenge back intact")
-	}
+	require.Equal(t, query.Get("state"), exchanged.State, "the exchange did not get the sealed state back")
+	require.NotEmpty(t, exchanged.Verifier, "the exchange got no verifier")
+	require.NotContains(t, cookie.Value, exchanged.Verifier, "the challenge cookie carries the verifier in the clear")
 
 	cookieNamed(t, rec, sessionCookieName)
 
-	if c := cookieNamed(t, rec, oidcCookieName); c.MaxAge >= 0 {
-		t.Fatal("the spent challenge cookie was not cleared")
-	}
+	c := cookieNamed(t, rec, oidcCookieName)
+	require.Negative(t, c.MaxAge, "the spent challenge cookie was not cleared")
 }
 
 // Every failure is a redirect to the login page, never a JSON body: the callback is a
@@ -443,18 +411,12 @@ func TestOIDCCallbackFailuresRedirectToTheLoginPage(t *testing.T) {
 			}
 
 			rec := env.do(http.MethodGet, "/api/auth/oidc/callback?"+query, "", mods...)
-			if rec.Code != http.StatusFound || rec.Header().Get("Location") != tc.want {
-				t.Fatalf("status %d to %q, want 302 to %s", rec.Code, rec.Header().Get("Location"), tc.want)
-			}
-
-			if rec.Header().Get("Content-Type") == "application/json" {
-				t.Fatal("a navigational route answered with JSON")
-			}
+			require.Equal(t, http.StatusFound, rec.Code, "status")
+			require.Equal(t, tc.want, rec.Header().Get("Location"), "redirect")
+			require.NotEqual(t, "application/json", rec.Header().Get("Content-Type"), "a navigational route answered with JSON")
 
 			for _, sc := range rec.Result().Cookies() {
-				if sc.Name == sessionCookieName {
-					t.Fatal("a refused login set a session cookie")
-				}
+				require.NotEqual(t, sessionCookieName, sc.Name, "a refused login set a session cookie")
 			}
 		})
 	}

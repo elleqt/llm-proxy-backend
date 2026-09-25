@@ -1,6 +1,10 @@
 package access
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
 
 func TestPolicyAllows(t *testing.T) {
 	cases := []struct {
@@ -68,16 +72,12 @@ func TestPolicyAllows(t *testing.T) {
 
 			for _, raw := range tc.rules {
 				r, err := ParseRule(raw)
-				if err != nil {
-					t.Fatalf("ParseRule(%q): %v", raw, err)
-				}
+				require.NoError(t, err, "ParseRule(%q)", raw)
 
 				policy = append(policy, r)
 			}
 
-			if got := policy.Allows(tc.provider, tc.model); got != tc.want {
-				t.Fatalf("Allows(%q, %q) = %v, want %v", tc.provider, tc.model, got, tc.want)
-			}
+			require.Equal(t, tc.want, policy.Allows(tc.provider, tc.model), "Allows(%q, %q)", tc.provider, tc.model)
 		})
 	}
 }
@@ -87,9 +87,8 @@ func TestParseRuleRejectsMalformed(t *testing.T) {
 	// valid rule for provider "a", pattern "b:c" — which is what a versioned or
 	// tagged model identifier needs.
 	for _, raw := range []string{"", "chatgpt", ":model", "chatgpt:", "   ", ":"} {
-		if _, err := ParseRule(raw); err == nil {
-			t.Fatalf("ParseRule(%q) = nil error, want error", raw)
-		}
+		_, err := ParseRule(raw)
+		require.Error(t, err, "ParseRule(%q)", raw)
 	}
 }
 
@@ -97,26 +96,17 @@ func TestParseRuleRejectsMalformed(t *testing.T) {
 // must render the normalised rule, not the raw input.
 func TestRuleStringRendersNormalisedRule(t *testing.T) {
 	r, err := ParseRule(" ChatGPT : Claude-Sonnet-* ")
-	if err != nil {
-		t.Fatalf("ParseRule: %v", err)
-	}
-
-	if got := r.String(); got != "chatgpt:claude-sonnet-*" {
-		t.Fatalf("String() = %q, want %q", got, "chatgpt:claude-sonnet-*")
-	}
+	require.NoError(t, err, "ParseRule")
+	require.Equal(t, "chatgpt:claude-sonnet-*", r.String(), "String()")
 }
 
 // A Rule built by hand rather than by ParseRule has no compiled pattern; matches
 // must compile on demand instead of refusing everything.
 func TestHandBuiltRuleMatchesWithoutPrecompiledPattern(t *testing.T) {
 	p := Policy{{Provider: "openrouter", ModelPattern: "*claude*"}}
-	if !p.Allows("openrouter", "anthropic/claude-sonnet-4.6") {
-		t.Fatal("hand-built rule must match; compiled pattern should be built on demand")
-	}
-
-	if p.Allows("openrouter", "openai/gpt-4o") {
-		t.Fatal("hand-built rule must not over-grant")
-	}
+	require.True(t, p.Allows("openrouter", "anthropic/claude-sonnet-4.6"),
+		"hand-built rule must match; compiled pattern should be built on demand")
+	require.False(t, p.Allows("openrouter", "openai/gpt-4o"), "hand-built rule must not over-grant")
 }
 
 // A model is covered only on every provider serving it, and a model nobody serves is
@@ -125,26 +115,18 @@ func TestCoversRequiresEveryServingProvider(t *testing.T) {
 	onlyAlpha := Policy{mustRule(t, "alpha:*")}
 	both := Policy{mustRule(t, "alpha:*"), mustRule(t, "beta:shared-*")}
 
-	if onlyAlpha.Covers("shared-model", []string{"alpha", "beta"}) {
-		t.Fatal("covered with one of two serving providers denied")
-	}
-
-	if !both.Covers("shared-model", []string{"alpha", "beta"}) {
-		t.Fatal("not covered although every serving provider is allowed")
-	}
-
-	if both.Covers("shared-model", nil) {
-		t.Fatal("a model no provider serves was covered")
-	}
+	require.False(t, onlyAlpha.Covers("shared-model", []string{"alpha", "beta"}),
+		"covered with one of two serving providers denied")
+	require.True(t, both.Covers("shared-model", []string{"alpha", "beta"}),
+		"not covered although every serving provider is allowed")
+	require.False(t, both.Covers("shared-model", nil), "a model no provider serves was covered")
 }
 
 func mustRule(t *testing.T, s string) Rule {
 	t.Helper()
 
 	r, err := ParseRule(s)
-	if err != nil {
-		t.Fatalf("ParseRule(%q): %v", s, err)
-	}
+	require.NoError(t, err, "ParseRule(%q)", s)
 
 	return r
 }

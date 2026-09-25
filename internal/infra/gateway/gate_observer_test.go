@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"net/http"
-	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // observed is one refusal a recordingObserver was told of.
@@ -86,23 +86,17 @@ func TestGateReportsEveryRefusal(t *testing.T) {
 		{http.MethodGet, "/v1/ws", wireSecret, "", http.StatusNotFound},
 	} {
 		req, err := http.NewRequestWithContext(t.Context(), tc.method, wire.baseURL+tc.path, strings.NewReader(tc.body))
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		if tc.key != "" {
 			req.Header.Set("Authorization", "Bearer "+tc.key)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatalf("%s %s: %v", tc.method, tc.path, err)
-		}
+		require.NoError(t, err, "%s %s", tc.method, tc.path)
 
 		_ = resp.Body.Close()
-		if resp.StatusCode != tc.want {
-			t.Fatalf("%s %s with key %q = %d, want %d", tc.method, tc.path, tc.key, resp.StatusCode, tc.want)
-		}
+		require.Equal(t, tc.want, resp.StatusCode, "%s %s with key %q", tc.method, tc.path, tc.key)
 	}
 
 	want := []observed{
@@ -112,7 +106,5 @@ func TestGateReportsEveryRefusal(t *testing.T) {
 		{owner: "alice@example.com", model: "Client-Invented-Model", reason: DenyUnknownModel, denied: true},
 		{reason: DenyRouteNotAllowed, denied: true},
 	}
-	if got := observer.seen(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("observed %+v\nwant     %+v", got, want)
-	}
+	require.Equal(t, want, observer.seen(), "observed refusals")
 }

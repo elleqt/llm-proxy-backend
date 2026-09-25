@@ -16,6 +16,8 @@ import (
 	"github.com/gorilla/websocket"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // noRedirects reports a redirect as the response it is, not as where it leads.
@@ -27,9 +29,7 @@ func (r *running) send(t *testing.T, method, path, key, body string) (int, strin
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), method, r.baseURL+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("build %s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "build %s %s", method, path)
 
 	req.Header.Set("Content-Type", "application/json")
 
@@ -38,16 +38,12 @@ func (r *running) send(t *testing.T, method, path, key, body string) (int, strin
 	}
 
 	resp, err := noRedirects.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "%s %s", method, path)
 
 	defer func() { _ = resp.Body.Close() }()
 
 	out, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read %s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "read %s %s", method, path)
 
 	return resp.StatusCode, string(out)
 }
@@ -81,15 +77,12 @@ func TestEveryUpstreamRouteIsClassified(t *testing.T) {
 		key := info.Method + " " + info.Path
 
 		registered[key] = true
-		if _, ok := routes[key]; !ok {
-			t.Errorf("upstream route %s is not classified", key)
-		}
+
+		assert.Contains(t, routes, key, "upstream route %s is not classified", key)
 	}
 
 	for key := range routes {
-		if !registered[key] {
-			t.Errorf("classified route %s is not registered upstream", key)
-		}
+		assert.True(t, registered[key], "classified route %s is not registered upstream", key)
 	}
 }
 
@@ -125,14 +118,13 @@ func TestDeniedRoutesAreNotServed(t *testing.T) {
 
 	probes = append(probes, [2]string{http.MethodGet, "/V1/WS"})
 	for _, p := range probes {
-		if code, body := srv.send(t, p[0], p[1], wireSecret, `{"model":"x"}`); code != http.StatusNotFound || body != "" {
-			t.Errorf("%s %s with a valid token = %d %q, want an empty 404", p[0], p[1], code, body)
-		}
+		code, body := srv.send(t, p[0], p[1], wireSecret, `{"model":"x"}`)
+		assert.Equal(t, http.StatusNotFound, code, "%s %s with a valid token, want an empty 404", p[0], p[1])
+		assert.Empty(t, body, "%s %s with a valid token, want an empty 404", p[0], p[1])
 	}
 	// The service's own probe stays open, so the 404s are not a dead server.
-	if code, _ := srv.send(t, http.MethodGet, "/healthz", "", ""); code != http.StatusOK {
-		t.Fatalf("GET /healthz without a token = %d, want 200", code)
-	}
+	code, _ := srv.send(t, http.MethodGet, "/healthz", "", "")
+	require.Equal(t, http.StatusOK, code, "GET /healthz without a token")
 }
 
 // TestWebsocketRelayIsRefused: /v1/ws registers whoever connects as an
@@ -156,28 +148,23 @@ func TestWebsocketRelayIsRefused(t *testing.T) {
 		if err == nil {
 			_ = conn.Close()
 
-			t.Fatalf("websocket relay accepted a connection %s", when)
+			require.Failf(t, "websocket relay accepted a connection", "when: %s", when)
 		}
 
-		if resp == nil || resp.StatusCode != http.StatusNotFound {
-			t.Fatalf("websocket handshake %s = %v (%v), want 404", when, resp, err)
-		}
+		require.NotNil(t, resp, "websocket handshake %s (%v), want 404", when, err)
+		require.Equal(t, http.StatusNotFound, resp.StatusCode, "websocket handshake %s (%v)", when, err)
 	}
 	dial("at boot")
 
 	open := srv.emptyPush()
 
 	open.WebsocketAuth = false
-	if err := srv.gateway.PushConfig(open); err != nil {
-		t.Fatalf("PushConfig: %v", err)
-	}
+	require.NoError(t, srv.gateway.PushConfig(open), "PushConfig")
 
 	dial("after a push turning ws-auth off")
 
 	for _, a := range params.CoreAuth.List() {
-		if a.Provider == "aistudio" {
-			t.Fatalf("an aistudio account %q was registered", a.ID)
-		}
+		require.NotEqual(t, "aistudio", a.Provider, "an aistudio account %q was registered", a.ID)
 	}
 }
 
@@ -188,9 +175,8 @@ func TestRealtimeClientSecretsAreRefused(t *testing.T) {
 	r := start(t, &cliproxyconfig.Config{})
 
 	code, body := r.send(t, http.MethodPost, "/v1/realtime/client_secrets", wireSecret, `{"session":{"type":"realtime","model":"gpt-realtime"}}`)
-	if code != http.StatusNotFound || body != "" {
-		t.Fatalf("POST /v1/realtime/client_secrets with a valid token = %d %q, want an empty 404", code, body)
-	}
+	require.Equal(t, http.StatusNotFound, code, "POST /v1/realtime/client_secrets with a valid token, want an empty 404")
+	require.Empty(t, body, "POST /v1/realtime/client_secrets with a valid token, want an empty 404")
 }
 
 // vendorPair is a running gateway with two vendors on the wire, each serving
@@ -246,9 +232,7 @@ func messages(t *testing.T, model string) string {
 		"model": model, "max_tokens": 16,
 		"messages": []map[string]any{{"role": "user", "content": "hi"}},
 	})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
+	require.NoError(t, err, "marshal request")
 
 	return string(body)
 }
@@ -260,22 +244,20 @@ func messages(t *testing.T, model string) string {
 func TestPolicyDecidesWhichVendorARequestReaches(t *testing.T) {
 	pair := startVendorPair(t)
 	for _, model := range []string{pair.otherAlias, pair.sharedAlias} {
-		if code, body := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, model)); code != http.StatusForbidden {
-			t.Fatalf("POST /v1/messages for %s = %d %s, want 403", model, code, body)
-		}
+		code, body := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, model))
+		require.Equal(t, http.StatusForbidden, code, "POST /v1/messages for %s: %s", model, body)
 	}
 
-	if n, m := pair.requests(); n != 0 || m != 0 {
-		t.Fatalf("vendors received %d and %d requests from refused clients, want none", n, m)
-	}
+	toAllowed, toOther := pair.requests()
+	require.Zero(t, toAllowed, "allowed vendor's requests from refused clients")
+	require.Zero(t, toOther, "other vendor's requests from refused clients")
 
-	if code, body := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, pair.allowedAlias)); code != http.StatusOK {
-		t.Fatalf("POST /v1/messages for %s = %d %s, want 200", pair.allowedAlias, code, body)
-	}
+	code, body := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, pair.allowedAlias))
+	require.Equal(t, http.StatusOK, code, "POST /v1/messages for %s: %s", pair.allowedAlias, body)
 
-	if n, m := pair.requests(); n != 1 || m != 0 {
-		t.Fatalf("vendors received %d and %d requests, want the allowed vendor exactly 1", n, m)
-	}
+	toAllowed, toOther = pair.requests()
+	require.Equal(t, 1, toAllowed, "allowed vendor's requests")
+	require.Zero(t, toOther, "other vendor's requests")
 }
 
 // TestRepeatedModelKeysAreRefused: upstream routes and rewrites the first
@@ -294,19 +276,17 @@ func TestRepeatedModelKeysAreRefused(t *testing.T) {
 	}
 	for what, body := range bodies {
 		for _, path := range []string{"/v1/messages", "/v1/chat/completions"} {
-			if code, out := pair.send(t, http.MethodPost, path, wireSecret, body); code != http.StatusBadRequest {
-				t.Errorf("POST %s with %s = %d %s, want 400", path, what, code, out)
-			}
+			code, out := pair.send(t, http.MethodPost, path, wireSecret, body)
+			assert.Equal(t, http.StatusBadRequest, code, "POST %s with %s: %s", path, what, out)
 		}
 	}
 
-	if n, m := pair.requests(); n != 0 || m != 0 {
-		t.Fatalf("vendors received %d and %d requests carrying a repeated model, want none", n, m)
-	}
+	toAllowed, toOther := pair.requests()
+	require.Zero(t, toAllowed, "allowed vendor's requests carrying a repeated model")
+	require.Zero(t, toOther, "other vendor's requests carrying a repeated model")
 	// The refusals are the rule, not a broken setup.
-	if code, out := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, pair.allowedAlias)); code != http.StatusOK {
-		t.Fatalf("POST /v1/messages naming the allowed model once = %d %s, want 200", code, out)
-	}
+	code, out := pair.send(t, http.MethodPost, "/v1/messages", wireSecret, messages(t, pair.allowedAlias))
+	require.Equal(t, http.StatusOK, code, "POST /v1/messages naming the allowed model once: %s", out)
 }
 
 // TestAccessIsClaimedBeforeTheServerServes: upstream refreshes its access
@@ -326,9 +306,7 @@ func TestAccessIsClaimedBeforeTheServerServes(t *testing.T) {
 		ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
 		Resolver:   wireResolver,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+	require.NoError(t, err, "New")
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -349,7 +327,7 @@ func TestAccessIsClaimedBeforeTheServerServes(t *testing.T) {
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatal("the server never answered")
+			require.Fail(t, "the server never answered")
 		}
 
 		time.Sleep(time.Millisecond)
@@ -357,6 +335,6 @@ func TestAccessIsClaimedBeforeTheServerServes(t *testing.T) {
 
 	req, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, base+"/v1/models", http.NoBody)
 	if res, authErr := gw.access.Authenticate(context.Background(), req); authErr == nil {
-		t.Fatalf("the access manager admitted an uncredentialed request as %q while the server was serving", res.Principal)
+		require.Failf(t, "the access manager admitted an uncredentialed request while the server was serving", "as %q", res.Principal)
 	}
 }

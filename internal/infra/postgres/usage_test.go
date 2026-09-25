@@ -2,7 +2,6 @@ package postgres_test
 
 import (
 	"context"
-	"reflect"
 	"testing"
 	"time"
 
@@ -14,10 +13,11 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/stretchr/testify/require"
 )
 
 // TestUsageRepo shares one container; every case owns its user.
-func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests share one Postgres container; each subtest is linear
+func TestUsageRepo(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
 	users, tokens := postgres.NewUserRepo(pool), postgres.NewTokenRepo(pool)
@@ -28,9 +28,7 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 	cfg.ConnConfig.RuntimeParams["timezone"] = "Asia/Kolkata"
 
 	kolkata, err := pgxpool.NewWithConfig(ctx, cfg)
-	if err != nil {
-		t.Fatalf("pool: %v", err)
-	}
+	require.NoError(t, err, "pool")
 
 	t.Cleanup(kolkata.Close)
 	ledger := postgres.NewUsageRepo(kolkata)
@@ -39,18 +37,11 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 		t.Helper()
 
 		owner := identity.NewService(uuid.New(), "owner-"+uuid.NewString(), access.Policy{})
-		if err := users.Create(ctx, owner); err != nil {
-			t.Fatalf("create user: %v", err)
-		}
+		require.NoError(t, users.Create(ctx, owner), "create user")
 
 		tok, _, err := credentials.Generate(owner.ID, "key")
-		if err != nil {
-			t.Fatalf("generate: %v", err)
-		}
-
-		if err := tokens.Create(ctx, tok); err != nil {
-			t.Fatalf("create token: %v", err)
-		}
+		require.NoError(t, err, "generate")
+		require.NoError(t, tokens.Create(ctx, tok), "create token")
 
 		return owner, tok
 	}
@@ -69,12 +60,11 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 				CacheSavingsUSD: -0.75, UnpricedTokens: 6, Priced: true,
 			},
 		}
-		if err := ledger.AppendBatch(ctx, []app.UsageEvent{want}); err != nil {
-			t.Fatalf("AppendBatch: %v", err)
-		}
+		require.NoError(t, ledger.AppendBatch(ctx, []app.UsageEvent{want}), "AppendBatch")
 
 		var got app.UsageEvent
-		if err := pool.QueryRow(ctx, `SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
+
+		err := pool.QueryRow(ctx, `SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
 			tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_total,
 			breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id,
 			cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd, cache_savings_usd,
@@ -84,14 +74,13 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 			&got.TokensInput, &got.TokensOutput, &got.TokensReasoning, &got.TokensCacheRead, &got.TokensCacheWrite,
 			&got.TokensTotal, &got.BreakdownQuality, &got.LatencyMS, &got.TTFTMS, &got.StatusCode, &got.Failed,
 			&got.VendorAccountID, &got.Cost.InputUSD, &got.Cost.OutputUSD, &got.Cost.CacheReadUSD,
-			&got.Cost.CacheWriteUSD, &got.Cost.CacheSavingsUSD, &got.Cost.UnpricedTokens, &got.Cost.Priced); err != nil {
-			t.Fatalf("read back: %v", err)
-		}
+			&got.Cost.CacheWriteUSD, &got.Cost.CacheSavingsUSD, &got.Cost.UnpricedTokens, &got.Cost.Priced)
+		require.NoError(t, err, "read back")
 
+		// Deep equality on purpose, as before: the row normalized to UTC must match
+		// want field for field, At's location included.
 		got.At = got.At.UTC()
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("row = %+v\nwant  %+v", got, want)
-		}
+		require.Equal(t, want, got, "row")
 	})
 
 	t.Run("AppendBatchStoresUnknownPrincipalsAsNull", func(t *testing.T) {
@@ -106,21 +95,17 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 			{At: at, UserID: uuid.New(), TokenID: uuid.New(), Provider: "claude", Model: model},
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: model},
 		})
-		if err != nil {
-			t.Fatalf("AppendBatch: %v", err)
-		}
+		require.NoError(t, err, "AppendBatch")
 
 		var nulls, attributed int
-		if err := pool.QueryRow(ctx, `SELECT
+
+		err = pool.QueryRow(ctx, `SELECT
 			count(*) FILTER (WHERE user_id IS NULL AND token_id IS NULL),
 			count(*) FILTER (WHERE user_id = $2 AND token_id = $3)
-			FROM usage_events WHERE model = $1`, model, owner.ID, tok.ID).Scan(&nulls, &attributed); err != nil {
-			t.Fatalf("count: %v", err)
-		}
-
-		if nulls != 2 || attributed != 1 {
-			t.Fatalf("rows: %d unattributed, %d attributed; want 2 and 1", nulls, attributed)
-		}
+			FROM usage_events WHERE model = $1`, model, owner.ID, tok.ID).Scan(&nulls, &attributed)
+		require.NoError(t, err, "count")
+		require.Equal(t, 2, nulls, "unattributed rows")
+		require.Equal(t, 1, attributed, "attributed rows")
 	})
 
 	t.Run("AppendBatchWritesAllOrNothing", func(t *testing.T) {
@@ -133,18 +118,13 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "fine"},
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "bad\x00model"},
 		})
-		if err == nil {
-			t.Fatal("AppendBatch accepted a row Postgres refuses")
-		}
+		require.Error(t, err, "AppendBatch accepted a row Postgres refuses")
 
 		var count int
-		if err := pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE user_id = $1`, owner.ID).Scan(&count); err != nil {
-			t.Fatalf("count: %v", err)
-		}
 
-		if count != 0 {
-			t.Fatalf("%d rows of the failed batch were kept, want none", count)
-		}
+		err = pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE user_id = $1`, owner.ID).Scan(&count)
+		require.NoError(t, err, "count")
+		require.Zero(t, count, "rows of the failed batch were kept")
 	})
 
 	t.Run("SeriesForUserBucketsHoursByModel", func(t *testing.T) {
@@ -164,7 +144,7 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 		hourAt := func(hour, minute int) time.Time {
 			return from.Add(time.Duration(hour)*time.Hour + time.Duration(minute)*time.Minute)
 		}
-		if err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			ev(owner.ID, tok.ID, hourAt(10, 15), "m1", 10),
 			ev(owner.ID, tok.ID, hourAt(10, 45), "m1", 5),
 			// An attempt that failed after spending tokens, then retried on
@@ -178,14 +158,11 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 			ev(owner.ID, tok.ID, to, "m1", 100), // on to: out
 			ev(owner.ID, tok.ID, from.Add(-time.Second), "m1", 100),
 			ev(other.ID, otherTok.ID, hourAt(10, 20), "m1", 100),
-		}); err != nil {
-			t.Fatalf("AppendBatch: %v", err)
-		}
+		})
+		require.NoError(t, err, "AppendBatch")
 
 		got, err := ledger.SeriesForUser(ctx, owner.ID, from, to)
-		if err != nil {
-			t.Fatalf("SeriesForUser: %v", err)
-		}
+		require.NoError(t, err, "SeriesForUser")
 
 		want := app.UsageSeries{
 			Bucket: app.UsageBucketHour,
@@ -197,9 +174,7 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 				{At: hourAt(11, 0), Model: "m1", Requests: 1, TokensTotal: 0},
 			},
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("series = %+v\nwant     %+v", got, want)
-		}
+		require.Equal(t, want, got, "series")
 	})
 
 	// The series sums the cost each row stored; it prices nothing itself.
@@ -213,30 +188,24 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 				Provider: "claude", Model: model, TokensTotal: 100, Cost: c,
 			}
 		}
-		if err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			ev(1, "m1", app.UsageCost{InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: 1.5, Priced: true}),
 			ev(2, "m1", app.UsageCost{InputUSD: 0.5, CacheWriteUSD: 4, CacheSavingsUSD: -2, UnpricedTokens: 10, Priced: true}),
 			ev(3, "m2", app.UsageCost{UnpricedTokens: 100}),
-		}); err != nil {
-			t.Fatalf("AppendBatch: %v", err)
-		}
+		})
+		require.NoError(t, err, "AppendBatch")
 
 		got, err := ledger.SeriesForUser(ctx, owner.ID, from, from.Add(24*time.Hour))
-		if err != nil {
-			t.Fatalf("SeriesForUser: %v", err)
-		}
-
-		if len(got.Points) != 2 || got.Points[0].CostUSD != 8.25 || got.Points[1].CostUSD != 0 {
-			t.Fatalf("points = %+v, want m1 at $8.25 and m2 at $0", got.Points)
-		}
+		require.NoError(t, err, "SeriesForUser")
+		require.Len(t, got.Points, 2, "points")
+		require.Equal(t, 8.25, got.Points[0].CostUSD, "m1 cost")
+		require.Zero(t, got.Points[1].CostUSD, "m2 cost")
 
 		want := app.UsageCost{
 			InputUSD: 1.5, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 4.5,
 			CacheSavingsUSD: -0.5, UnpricedTokens: 110, Priced: true,
 		}
-		if got.Totals.Cost != want {
-			t.Fatalf("totals cost = %+v\nwant          %+v", got.Totals.Cost, want)
-		}
+		require.Equal(t, want, got.Totals.Cost, "totals cost")
 	})
 
 	t.Run("SeriesForUserBucketsDaysBeyondTwoDays", func(t *testing.T) {
@@ -245,19 +214,16 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 		to := from.Add(7 * 24 * time.Hour)
 
 		day := func(d, hour int) time.Time { return from.AddDate(0, 0, d).Add(time.Duration(hour) * time.Hour) }
-		if err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			// 20:00 UTC is already the next day in Kolkata.
 			{At: day(0, 20), UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", TokensTotal: 3},
 			{At: day(0, 1), UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", TokensTotal: 4},
 			{At: day(2, 23), UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", TokensTotal: 5},
-		}); err != nil {
-			t.Fatalf("AppendBatch: %v", err)
-		}
+		})
+		require.NoError(t, err, "AppendBatch")
 
 		got, err := ledger.SeriesForUser(ctx, owner.ID, from, to)
-		if err != nil {
-			t.Fatalf("SeriesForUser: %v", err)
-		}
+		require.NoError(t, err, "SeriesForUser")
 
 		want := app.UsageSeries{
 			Bucket: app.UsageBucketDay,
@@ -267,9 +233,7 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 				{At: day(2, 0), Model: "m1", Requests: 1, TokensTotal: 5},
 			},
 		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("series = %+v\nwant     %+v", got, want)
-		}
+		require.Equal(t, want, got, "series")
 	})
 
 	t.Run("SeriesForUserWithNoUsageIsEmpty", func(t *testing.T) {
@@ -277,12 +241,9 @@ func TestUsageRepo(t *testing.T) { //nolint:gocognit,gocyclo,cyclop // subtests 
 		from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
 		got, err := ledger.SeriesForUser(ctx, owner.ID, from, from.Add(48*time.Hour))
-		if err != nil {
-			t.Fatalf("SeriesForUser: %v", err)
-		}
-
-		if got.Bucket != app.UsageBucketHour || got.Totals != (app.UsageTotals{}) || len(got.Points) != 0 {
-			t.Fatalf("series = %+v, want hour buckets and nothing in them", got)
-		}
+		require.NoError(t, err, "SeriesForUser")
+		require.Equal(t, app.UsageBucketHour, got.Bucket, "bucket")
+		require.Zero(t, got.Totals, "totals")
+		require.Empty(t, got.Points, "points")
 	})
 }

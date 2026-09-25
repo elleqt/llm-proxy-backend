@@ -3,12 +3,13 @@ package e2e
 import (
 	"bytes"
 	"context"
-	"errors"
 	"net/http"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn is the recovery an
@@ -19,17 +20,14 @@ import (
 // password change lifts. The session held before is gone and the API key still
 // works. The command refuses what it cannot do with exit status 1, a command it does
 // not know with 2 and its usage, and a schema the server has not migrated.
-//
-//nolint:cyclop // One linear recovery scenario; each step depends on the state the previous one left.
 func TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn(t *testing.T) {
 	if !inFreshProcess(t) {
 		return
 	}
 
 	bin := filepath.Join(t.TempDir(), "gateway")
-	if out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, "github.com/elleqt/llm-proxy-backend/cmd/gateway").CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, out)
-	}
+	out, err := exec.CommandContext(t.Context(), "go", "build", "-o", bin, "github.com/elleqt/llm-proxy-backend/cmd/gateway").CombinedOutput()
+	require.NoError(t, err, "go build:\n%s", out)
 
 	proc := startProcess(t, "", nil)
 	// env is what the command's environment holds beyond the database's address.
@@ -44,11 +42,10 @@ func TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn(t *testing.T
 
 		cmd.Env = append([]string{"LLMPROXY_DATABASE_URL=" + proc.pool.Config().ConnString()}, env...)
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		err := cmd.Run()
 
-		var exit *exec.ExitError
-		if err != nil && !errors.As(err, &exit) {
-			t.Fatalf("gateway %v: %v", args, err)
+		if err := cmd.Run(); err != nil {
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit, "gateway %v", args)
 		}
 
 		return cmd.ProcessState.ExitCode(), stdout.String(), stderr.String()
@@ -66,58 +63,55 @@ func TestResetPasswordFromTheShellLetsALockedOutAdministratorBackIn(t *testing.T
 		`{"email":"`+proc.adminEmail+`","password":"a password I chose myself"}`, http.StatusTooManyRequests, nil)
 
 	code, stdout, stderr := gateway("reset-password", strings.ToUpper(proc.adminEmail))
-	if code != 0 || stderr != "" {
-		t.Fatalf("reset-password = exit %d, stderr %q", code, stderr)
-	}
+	require.Zero(t, code, "reset-password exit status (stderr %q)", stderr)
+	require.Empty(t, stderr, "reset-password stderr")
 
 	match := bootstrapBanner.FindStringSubmatch(stdout)
-	if match == nil || !strings.Contains(stdout, "account:            "+proc.adminEmail+"\n") || !strings.Contains(stdout, "expires:") {
-		t.Fatalf("reset-password printed no temporary password banner:\n%s", stdout)
-	}
+	require.NotNil(t, match, "reset-password printed no temporary password banner:\n%s", stdout)
+	require.Contains(t, stdout, "account:            "+proc.adminEmail+"\n", "reset-password banner")
+	require.Contains(t, stdout, "expires:", "reset-password banner")
 
 	t.Logf("reset-password stdout:\n%s", stdout)
 
-	if code, body := proc.webCall(t, http.MethodGet, "/api/me", ""); code != http.StatusUnauthorized {
-		t.Fatalf("GET /api/me with the session held before the reset = %d (%s), want 401", code, body)
-	}
+	code, body := proc.webCall(t, http.MethodGet, "/api/me", "")
+	require.Equal(t, http.StatusUnauthorized, code, "GET /api/me with the session held before the reset (%s)", body)
 
 	proc.claimTemporaryPassword(t, match[1], "my new password after recovery")
 
-	if code, body := send(t, http.MethodGet, proc.apiURL+"/v1/models", secret, ""); code != http.StatusOK {
-		t.Fatalf("GET /v1/models with the API key issued before the reset = %d (%s), want 200", code, body)
-	}
+	code, body = send(t, http.MethodGet, proc.apiURL+"/v1/models", secret, "")
+	require.Equal(t, http.StatusOK, code, "GET /v1/models with the API key issued before the reset (%s)", body)
 
-	if code, stdout, stderr := gateway("reset-password", "nobody@example.com"); code != 1 || stdout != "" ||
-		!strings.Contains(stderr, "no account signs in with nobody@example.com") {
-		t.Fatalf("unknown address = exit %d, stdout %q, stderr %q; want 1 and a clear message", code, stdout, stderr)
-	}
+	code, stdout, stderr = gateway("reset-password", "nobody@example.com")
+	require.Equal(t, 1, code, "unknown address: exit status (stderr %q)", stderr)
+	require.Empty(t, stdout, "unknown address: stdout")
+	require.Contains(t, stderr, "no account signs in with nobody@example.com", "unknown address: want a clear message")
 
 	for _, args := range [][]string{{"help"}, {"reset-password"}, {"reset-password", "a@example.com", "b@example.com"}, {"reset-password", "--force", "a@example.com"}} {
-		if code, stdout, stderr := gateway(args...); code != 2 || stdout != "" || !strings.Contains(stderr, "gateway reset-password [--unblock] <email>") {
-			t.Fatalf("gateway %v = exit %d, stdout %q, stderr %q; want 2 and the usage", args, code, stdout, stderr)
-		}
+		code, stdout, stderr := gateway(args...)
+		require.Equal(t, 2, code, "gateway %v: exit status (stderr %q)", args, stderr)
+		require.Empty(t, stdout, "gateway %v: stdout", args)
+		require.Contains(t, stderr, "gateway reset-password [--unblock] <email>", "gateway %v: want the usage", args)
 	}
 
 	// With local sign-in off the password is still issued, and the operator is told
 	// it cannot be used yet.
 	env = []string{"LLMPROXY_LOCAL_LOGIN=false"}
 
-	if code, stdout, stderr := gateway("reset-password", proc.adminEmail); code != 0 ||
-		bootstrapBanner.FindStringSubmatch(stdout) == nil || !strings.Contains(stderr, "cannot be used until local sign-in is enabled") {
-		t.Fatalf("local login off = exit %d, stdout %q, stderr %q; want the banner and a warning", code, stdout, stderr)
-	}
+	code, stdout, stderr = gateway("reset-password", proc.adminEmail)
+	require.Zero(t, code, "local login off: exit status (stderr %q)", stderr)
+	require.NotNil(t, bootstrapBanner.FindStringSubmatch(stdout), "local login off: no banner in stdout %q", stdout)
+	require.Contains(t, stderr, "cannot be used until local sign-in is enabled", "local login off: want a warning")
 
 	env = nil
 
 	// A build newer than the schema: the server migrates as it starts, the command
 	// does not.
-	if _, err := proc.pool.Exec(context.Background(),
-		`DELETE FROM goose_db_version WHERE version_id = (SELECT max(version_id) FROM goose_db_version)`); err != nil {
-		t.Fatal(err)
-	}
+	_, err = proc.pool.Exec(context.Background(),
+		`DELETE FROM goose_db_version WHERE version_id = (SELECT max(version_id) FROM goose_db_version)`)
+	require.NoError(t, err)
 
-	if code, stdout, stderr := gateway("reset-password", proc.adminEmail); code != 1 || stdout != "" ||
-		!strings.Contains(stderr, "not up to date") {
-		t.Fatalf("unmigrated schema = exit %d, stdout %q, stderr %q; want 1 and a clear message", code, stdout, stderr)
-	}
+	code, stdout, stderr = gateway("reset-password", proc.adminEmail)
+	require.Equal(t, 1, code, "unmigrated schema: exit status (stderr %q)", stderr)
+	require.Empty(t, stdout, "unmigrated schema: stdout")
+	require.Contains(t, stderr, "not up to date", "unmigrated schema: want a clear message")
 }

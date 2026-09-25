@@ -18,6 +18,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // testClock only moves when a test moves it.
@@ -130,9 +131,7 @@ type envOption func(*testEnv)
 // withOIDC turns federated sign-in on, with the identity provider a mock.
 func withOIDC(env *testEnv) {
 	svc, err := app.NewOIDCService(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, app.OIDCConfig{AllowSignUp: false})
-	if err != nil {
-		env.t.Fatalf("NewOIDCService: %v", err)
-	}
+	require.NoError(env.t, err, "NewOIDCService")
 
 	env.deps.OIDC = svc
 	env.deps.OIDCDisplayName = "Example SSO"
@@ -221,9 +220,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	h, err := NewRouter(env.deps)
-	if err != nil {
-		t.Fatalf("NewRouter: %v", err)
-	}
+	require.NoError(t, err, "NewRouter")
 
 	env.handler = h
 
@@ -295,22 +292,13 @@ func fromIP(ip string) func(*http.Request) {
 func apiError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string) api.Error {
 	t.Helper()
 
-	if rec.Code != status {
-		t.Fatalf("status = %d, want %d; body %s", rec.Code, status, rec.Body)
-	}
-
-	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-		t.Fatalf("Content-Type = %q, want application/json; body %q", ct, rec.Body)
-	}
+	require.Equal(t, status, rec.Code, "status; body %s", rec.Body)
+	require.Equal(t, "application/json", rec.Header().Get("Content-Type"), "Content-Type; body %q", rec.Body)
 
 	var apiErr api.Error
-	if err := json.Unmarshal(rec.Body.Bytes(), &apiErr); err != nil {
-		t.Fatalf("body is not a JSON Error: %v; body %q", err, rec.Body)
-	}
-
-	if apiErr.Code != code || apiErr.Message == "" {
-		t.Fatalf("error = %+v, want code %q and a message", apiErr, code)
-	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &apiErr), "body is not a JSON Error; body %q", rec.Body)
+	require.Equal(t, code, apiErr.Code, "error code; error %+v", apiErr)
+	require.NotEmpty(t, apiErr.Message, "error message; error %+v", apiErr)
 
 	return apiErr
 }
@@ -319,13 +307,8 @@ func apiError(t *testing.T, rec *httptest.ResponseRecorder, status int, code str
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, status int, dst any) {
 	t.Helper()
 
-	if rec.Code != status {
-		t.Fatalf("status = %d, want %d; body %s", rec.Code, status, rec.Body)
-	}
-
-	if err := json.Unmarshal(rec.Body.Bytes(), dst); err != nil {
-		t.Fatalf("decode %T: %v; body %q", dst, err, rec.Body)
-	}
+	require.Equal(t, status, rec.Code, "status; body %s", rec.Body)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), dst), "decode %T; body %q", dst, rec.Body)
 }
 
 // cookieNamed returns the Set-Cookie for name, failing if there is none.
@@ -338,7 +321,7 @@ func cookieNamed(t *testing.T, rec *httptest.ResponseRecorder, name string) *htt
 		}
 	}
 
-	t.Fatalf("no %s cookie was set; headers %v", name, rec.Header())
+	require.Failf(t, "missing cookie", "no %s cookie was set; headers %v", name, rec.Header())
 
 	return nil
 }

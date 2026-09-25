@@ -13,25 +13,20 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestPrincipalRoundTrips(t *testing.T) {
 	principal := app.Principal{UserID: uuid.New(), TokenID: uuid.New()}
 
 	rendered := principal.String()
-	if want := principal.UserID.String() + ":" + principal.TokenID.String(); rendered != want {
-		t.Fatalf("String() = %q, want %q", rendered, want)
-	}
+	require.Equal(t, principal.UserID.String()+":"+principal.TokenID.String(), rendered, "String()")
 
 	got, err := app.ParsePrincipal(rendered)
-	if err != nil {
-		t.Fatalf("ParsePrincipal(%q): %v", rendered, err)
-	}
-
-	if got != principal {
-		t.Fatalf("ParsePrincipal(String()) = %+v, want %+v", got, principal)
-	}
+	require.NoError(t, err, "ParsePrincipal(%q)", rendered)
+	require.Equal(t, principal, got, "ParsePrincipal(String())")
 }
 
 func TestParsePrincipalRejectsMalformedInput(t *testing.T) {
@@ -52,9 +47,8 @@ func TestParsePrincipalRejectsMalformedInput(t *testing.T) {
 		"upper case":       strings.ToUpper(user.String()) + ":" + token.String(),
 		"padded":           " " + user.String() + ":" + token.String(),
 	} {
-		if p, err := app.ParsePrincipal(in); !errors.Is(err, app.ErrMalformedPrincipal) {
-			t.Errorf("%s: ParsePrincipal(%q) = %+v, %v; want ErrMalformedPrincipal", name, in, p, err)
-		}
+		p, err := app.ParsePrincipal(in)
+		assert.ErrorIs(t, err, app.ErrMalformedPrincipal, "%s: ParsePrincipal(%q) = %+v", name, in, p)
 	}
 }
 
@@ -71,9 +65,7 @@ func activeHuman() identity.User {
 
 func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 	rule, err := access.ParseRule("claude:*")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	human := activeHuman()
 	human.Email = "alice@example.com"
@@ -96,18 +88,12 @@ func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 			users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
 
 			got, policy, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-
-			if want := (app.Principal{UserID: owner.ID, TokenID: tok.ID, Owner: tc.label}); got != want {
-				t.Fatalf("Resolve = %+v, want %+v", got, want)
-			}
+			require.NoError(t, err, "Resolve")
+			require.Equal(t, app.Principal{UserID: owner.ID, TokenID: tok.ID, Owner: tc.label}, got, "Resolve")
 			// The owner's policy travels with the principal: whoever decides
 			// what the request may do does not read the owner again.
-			if !policy.Allows("claude", "any-model") || policy.Allows("chatgpt", "any-model") {
-				t.Fatalf("Resolve policy = %v, want the owner's claude:*", policy)
-			}
+			require.True(t, policy.Allows("claude", "any-model"), "Resolve policy = %v, want the owner's claude:*", policy)
+			require.False(t, policy.Allows("chatgpt", "any-model"), "Resolve policy = %v, want the owner's claude:*", policy)
 		})
 	}
 }
@@ -153,13 +139,9 @@ func TestResolveRefusalsAreIndistinguishable(t *testing.T) {
 			tc.expect(users, tokens)
 
 			got, policy, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
-			if !isExactly(err, app.ErrInvalidCredentials) {
-				t.Fatalf("Resolve = %+v, %v; want exactly ErrInvalidCredentials", got, err)
-			}
-
-			if got != (app.Principal{}) || policy != nil {
-				t.Fatalf("a refusal returned principal %+v, policy %v", got, policy)
-			}
+			require.Same(t, app.ErrInvalidCredentials, err, "Resolve = %+v; want exactly ErrInvalidCredentials", got)
+			require.Zero(t, got, "a refusal returned a principal")
+			require.Nil(t, policy, "a refusal returned a policy")
 		})
 	}
 }
@@ -168,9 +150,8 @@ func TestResolveRefusalsAreIndistinguishable(t *testing.T) {
 // expectations, so any repository call fails the test.
 func TestResolveRefusesAnEmptySecretWithoutALookup(t *testing.T) {
 	users, tokens := mocks.NewUserRepo(t), mocks.NewTokenRepo(t)
-	if _, _, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), ""); !isExactly(err, app.ErrInvalidCredentials) {
-		t.Fatalf("Resolve(\"\") = %v, want ErrInvalidCredentials", err)
-	}
+	_, _, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), "")
+	require.Same(t, app.ErrInvalidCredentials, err, "Resolve(\"\")")
 }
 
 // TestResolveReportsAFailedLookupAsAFailure: a database outage is not a
@@ -197,13 +178,9 @@ func TestResolveReportsAFailedLookupAsAFailure(t *testing.T) {
 			tc.expect(users, tokens)
 
 			_, _, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
-			if !errors.Is(err, outage) || errors.Is(err, app.ErrInvalidCredentials) {
-				t.Fatalf("Resolve = %v, want the lookup failure and not ErrInvalidCredentials", err)
-			}
-
-			if strings.Contains(err.Error(), presented) {
-				t.Fatalf("error %q carries the secret", err)
-			}
+			require.ErrorIs(t, err, outage, "Resolve: want the lookup failure")
+			require.NotErrorIs(t, err, app.ErrInvalidCredentials, "Resolve: a lookup failure is not a refusal")
+			require.NotContains(t, err.Error(), presented, "error carries the secret")
 		})
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/require"
 )
 
 const vendorKey = "vendor-upstream-key"
@@ -106,9 +107,7 @@ func (w *onTheWire) postMessages(t *testing.T, key string, stream bool) (int, ht
 	defer func() { _ = resp.Body.Close() }()
 
 	out, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read response: %v", err)
-	}
+	require.NoError(t, err, "read response")
 
 	return resp.StatusCode, resp.Header, out
 }
@@ -123,14 +122,10 @@ func (w *onTheWire) sendMessages(t *testing.T, key string, stream bool) *http.Re
 		"stream":     stream,
 		"messages":   []map[string]any{{"role": "user", "content": "say hello"}},
 	})
-	if err != nil {
-		t.Fatalf("marshal request: %v", err)
-	}
+	require.NoError(t, err, "marshal request")
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, w.baseURL+"/v1/messages", strings.NewReader(string(body)))
-	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
+	require.NoError(t, err, "build request")
 
 	req.Header.Set("Content-Type", "application/json")
 
@@ -139,9 +134,7 @@ func (w *onTheWire) sendMessages(t *testing.T, key string, stream bool) *http.Re
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("POST /v1/messages: %v", err)
-	}
+	require.NoError(t, err, "POST /v1/messages")
 
 	return resp
 }
@@ -153,18 +146,12 @@ func (w *onTheWire) assertTranslatedUpstreamRequest(t *testing.T, stream bool) {
 	t.Helper()
 
 	reqs := w.vendor.Requests()
-	if len(reqs) != 1 {
-		t.Fatalf("vendor received %d requests, want 1", len(reqs))
-	}
+	require.Len(t, reqs, 1, "vendor requests")
 
 	got := reqs[0]
-	if got.Method != http.MethodPost || got.Path != "/chat/completions" {
-		t.Fatalf("vendor received %s %s, want POST /chat/completions", got.Method, got.Path)
-	}
-
-	if auth := got.Header.Get("Authorization"); auth != "Bearer "+vendorKey {
-		t.Fatalf("vendor Authorization = %q, want the configured vendor key", auth)
-	}
+	require.Equal(t, http.MethodPost, got.Method, "vendor request method")
+	require.Equal(t, "/chat/completions", got.Path, "vendor request path")
+	require.Equal(t, "Bearer "+vendorKey, got.Header.Get("Authorization"), "vendor Authorization, want the configured vendor key")
 
 	var body struct {
 		Model    string `json:"model"`
@@ -174,21 +161,14 @@ func (w *onTheWire) assertTranslatedUpstreamRequest(t *testing.T, stream bool) {
 			Content any    `json:"content"`
 		} `json:"messages"`
 	}
-	if err := json.Unmarshal(got.Body, &body); err != nil {
-		t.Fatalf("vendor body %s is not JSON: %v", got.Body, err)
-	}
+	require.NoError(t, json.Unmarshal(got.Body, &body), "vendor body %s is not JSON", got.Body)
 
-	if body.Model != w.model {
-		t.Fatalf("vendor model = %q, want the upstream name %q for alias %q", body.Model, w.model, w.alias)
-	}
+	require.Equal(t, w.model, body.Model, "vendor model, want the upstream name for alias %q", w.alias)
+	require.Equal(t, stream, body.Stream, "vendor stream")
 
-	if body.Stream != stream {
-		t.Fatalf("vendor stream = %t, want %t", body.Stream, stream)
-	}
-
-	if len(body.Messages) != 1 || body.Messages[0].Role != "user" || !strings.Contains(string(got.Body), "say hello") {
-		t.Fatalf("vendor messages = %s, want the one user message", got.Body)
-	}
+	require.Len(t, body.Messages, 1, "vendor messages = %s, want the one user message", got.Body)
+	require.Equal(t, "user", body.Messages[0].Role, "vendor message role")
+	require.Contains(t, string(got.Body), "say hello", "vendor messages, want the one user message")
 }
 
 func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
@@ -202,25 +182,17 @@ func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 	})
 
 	// Access control is on the path: without a token nothing reaches the vendor.
-	if status, _, body := wire.postMessages(t, "", false); status != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated POST /v1/messages = %d (%s), want %d", status, body, http.StatusUnauthorized)
-	}
+	status, _, body := wire.postMessages(t, "", false)
+	require.Equal(t, http.StatusUnauthorized, status, "unauthenticated POST /v1/messages (%s)", body)
 
-	if n := len(wire.vendor.Requests()); n != 0 {
-		t.Fatalf("vendor received %d requests from an unauthenticated client", n)
-	}
+	require.Empty(t, wire.vendor.Requests(), "vendor received requests from an unauthenticated client")
 
 	began := time.Now()
-	status, _, body := wire.postMessages(t, wireSecret, false)
+	status, _, body = wire.postMessages(t, wireSecret, false)
 	elapsed := time.Since(began)
 
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
-	}
-
-	if elapsed < latency {
-		t.Fatalf("response took %s, want at least the vendor latency %s", elapsed, latency)
-	}
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
+	require.GreaterOrEqual(t, elapsed, latency, "response took less than the vendor latency")
 
 	wire.assertTranslatedUpstreamRequest(t, false)
 
@@ -237,18 +209,17 @@ func TestRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 			OutputTokens int `json:"output_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.Unmarshal(body, &msg); err != nil {
-		t.Fatalf("response %s is not JSON: %v", body, err)
-	}
+	require.NoError(t, json.Unmarshal(body, &msg), "response %s is not JSON", body)
 
-	if msg.Type != "message" || msg.Role != "assistant" || len(msg.Content) != 1 ||
-		msg.Content[0].Type != "text" || msg.Content[0].Text != "hello from the vendor" {
-		t.Fatalf("response = %s, want an Anthropic message carrying the vendor's text", body)
-	}
+	require.Equal(t, "message", msg.Type, "response = %s", body)
+	require.Equal(t, "assistant", msg.Role, "response = %s", body)
+	require.Len(t, msg.Content, 1, "response = %s", body)
+	require.Equal(t, "text", msg.Content[0].Type, "response = %s", body)
+	require.Equal(t, "hello from the vendor", msg.Content[0].Text, "response = %s, want the vendor's text", body)
 
-	if msg.StopReason != "end_turn" || msg.Usage.InputTokens != 3 || msg.Usage.OutputTokens != 4 {
-		t.Fatalf("response = %s, want stop_reason end_turn and the vendor's usage translated", body)
-	}
+	require.Equal(t, "end_turn", msg.StopReason, "response = %s", body)
+	require.Equal(t, 3, msg.Usage.InputTokens, "response = %s, want the vendor's usage translated", body)
+	require.Equal(t, 4, msg.Usage.OutputTokens, "response = %s, want the vendor's usage translated", body)
 }
 
 // streamChunk is an OpenAI chat.completion.chunk carrying delta, and finish
@@ -270,24 +241,19 @@ func TestStreamingRequestReachesVendorAndReturnsTranslated(t *testing.T) {
 	})
 
 	status, header, body := wire.postMessages(t, wireSecret, true)
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages stream = %d (%s), want 200", status, body)
-	}
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages stream (%s)", body)
 
-	if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
-	}
+	ct := header.Get("Content-Type")
+	require.True(t, strings.HasPrefix(ct, "text/event-stream"), "Content-Type = %q, want text/event-stream", ct)
 
 	wire.assertTranslatedUpstreamRequest(t, true)
 
 	events, texts := anthropicEvents(t, body)
-	if want := []string{"first ", "second ", "third"}; strings.Join(texts, "|") != strings.Join(want, "|") {
-		t.Fatalf("text deltas = %q, want %q in order; events %q", texts, want, events)
-	}
+	require.Equal(t, []string{"first ", "second ", "third"}, texts, "text deltas in order; events %q", events)
 
-	if len(events) == 0 || events[0] != "message_start" || events[len(events)-1] != "message_stop" {
-		t.Fatalf("events = %q, want an Anthropic stream from message_start to message_stop", events)
-	}
+	require.NotEmpty(t, events, "events")
+	require.Equal(t, "message_start", events[0], "events = %q", events)
+	require.Equal(t, "message_stop", events[len(events)-1], "events = %q", events)
 }
 
 func TestVendorFailureReachesTheClient(t *testing.T) {
@@ -297,13 +263,8 @@ func TestVendorFailureReachesTheClient(t *testing.T) {
 	})
 
 	status, _, body := w.postMessages(t, wireSecret, false)
-	if status != http.StatusBadRequest {
-		t.Fatalf("POST /v1/messages = %d (%s), want the vendor's %d", status, body, http.StatusBadRequest)
-	}
-
-	if !strings.Contains(string(body), "vendor refused the prompt") {
-		t.Fatalf("response %s does not carry the vendor's error", body)
-	}
+	require.Equal(t, http.StatusBadRequest, status, "POST /v1/messages (%s), want the vendor's status", body)
+	require.Contains(t, string(body), "vendor refused the prompt", "response does not carry the vendor's error")
 }
 
 func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
@@ -316,15 +277,8 @@ func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
 	_, _, body := wire.postMessages(t, wireSecret, true)
 
 	events, texts := anthropicEvents(t, body)
-	if len(texts) != 1 || texts[0] != "partial" {
-		t.Fatalf("text deltas = %q, want the one chunk sent before the vendor died; events %q", texts, events)
-	}
-
-	for _, e := range events {
-		if e == "message_stop" {
-			t.Fatalf("events = %q: the stream completed normally although the vendor died", events)
-		}
-	}
+	require.Equal(t, []string{"partial"}, texts, "text deltas, want the one chunk sent before the vendor died; events %q", events)
+	require.NotContains(t, events, "message_stop", "the stream completed normally although the vendor died")
 }
 
 // TestRequestThroughProductionWiringReachesVendor sends a request through a
@@ -340,13 +294,8 @@ func TestRequestThroughProductionWiringReachesVendor(t *testing.T) {
 	}, params)
 
 	status, _, body := wire.postMessages(t, wireSecret, false)
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
-	}
-
-	if !strings.Contains(string(body), "hello through production wiring") {
-		t.Fatalf("response %s does not carry the vendor's text", body)
-	}
+	require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
+	require.Contains(t, string(body), "hello through production wiring", "response does not carry the vendor's text")
 
 	wire.assertTranslatedUpstreamRequest(t, false)
 
@@ -365,7 +314,7 @@ func TestRequestThroughProductionWiringReachesVendor(t *testing.T) {
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("the supplied manager recorded %d successful requests, want 1: another manager served it", served)
+			require.Failf(t, "another manager served it", "the supplied manager recorded %d successful requests, want 1", served)
 		}
 
 		time.Sleep(10 * time.Millisecond)
@@ -387,25 +336,20 @@ func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 	resp := wire.sendMessages(t, wireSecret, true)
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST /v1/messages stream = %d, want 200", resp.StatusCode)
-	}
+	require.Equal(t, http.StatusOK, resp.StatusCode, "POST /v1/messages stream")
 
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("stream ended before any text delta: %v", err)
-		}
+		require.NoError(t, err, "stream ended before any text delta")
 
 		if !strings.Contains(line, `"text_delta"`) {
 			continue
 		}
 
 		started := wire.vendor.ChunksStarted()
-		if started >= len(chunks) {
-			t.Fatalf("first text delta arrived after %s, once the vendor had begun all %d chunks: the stream is buffered, not flushed", time.Since(began), started)
-		}
+		require.Less(t, started, len(chunks),
+			"first text delta arrived after %s, once the vendor had begun all chunks: the stream is buffered, not flushed", time.Since(began))
 
 		t.Logf("first text delta after %s, with %d of %d vendor chunks begun", time.Since(began), started, len(chunks))
 
@@ -413,13 +357,8 @@ func TestStreamingIsFlushedAsTheVendorSends(t *testing.T) {
 	}
 	// Drain, so the stream is shown to complete as well.
 	rest, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read rest of stream: %v", err)
-	}
-
-	if !strings.Contains(string(rest), "message_stop") {
-		t.Fatalf("stream did not complete: %s", rest)
-	}
+	require.NoError(t, err, "read rest of stream")
+	require.Contains(t, string(rest), "message_stop", "stream did not complete")
 }
 
 // anthropicEvents returns the event names of an Anthropic SSE stream and the
@@ -455,9 +394,7 @@ func anthropicEvents(t *testing.T, body []byte) ([]string, []string) {
 		}
 	}
 
-	if err := scanner.Err(); err != nil {
-		t.Fatalf("scan stream: %v", err)
-	}
+	require.NoError(t, scanner.Err(), "scan stream")
 
 	return events, texts
 }
@@ -494,9 +431,8 @@ func TestBootRoutingStrategyPicksTheCredential(t *testing.T) {
 			awaitProviders(t, wire.gateway.catalog, wire.alias, []string{"fakevendor"})
 
 			for range 4 {
-				if status, _, body := wire.postMessages(t, wireSecret, false); status != http.StatusOK {
-					t.Fatalf("POST /v1/messages = %d (%s), want 200", status, body)
-				}
+				status, _, body := wire.postMessages(t, wireSecret, false)
+				require.Equal(t, http.StatusOK, status, "POST /v1/messages (%s)", body)
 			}
 
 			keys := map[string]bool{}
@@ -504,9 +440,7 @@ func TestBootRoutingStrategyPicksTheCredential(t *testing.T) {
 				keys[r.Header.Get("Authorization")] = true
 			}
 
-			if len(keys) != tc.keys {
-				t.Fatalf("4 requests reached the vendor with keys %v, want %d distinct", keys, tc.keys)
-			}
+			require.Len(t, keys, tc.keys, "distinct keys the 4 requests reached the vendor with")
 		})
 	}
 }

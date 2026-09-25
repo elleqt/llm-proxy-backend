@@ -15,7 +15,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // catalogFunc is an access.Catalog stub.
@@ -83,9 +85,7 @@ func TestGateSeesAProviderTheMomentItIsRegistered(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for rec := chat(engine, gateSecret, model); rec.Code != http.StatusOK; rec = chat(engine, gateSecret, model) {
-		if time.Now().After(deadline) {
-			t.Fatalf("served by gatea alone = %d, want 200", rec.Code)
-		}
+		require.False(t, time.Now().After(deadline), "served by gatea alone = %d, want 200", rec.Code)
 
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -94,9 +94,9 @@ func TestGateSeesAProviderTheMomentItIsRegistered(t *testing.T) {
 
 	registerClient(t, "growing-client-b", "openai-compatible-gateb", model)
 
-	if rec := chat(engine, gateSecret, model); rec.Code != http.StatusForbidden || *reached {
-		t.Fatalf("served by gatea and gateb, straight after gateb registered = %d (reached %t), want 403", rec.Code, *reached)
-	}
+	rec := chat(engine, gateSecret, model)
+	require.Equal(t, http.StatusForbidden, rec.Code, "served by gatea and gateb, straight after gateb registered")
+	require.False(t, *reached, "served by gatea and gateb, straight after gateb registered, reached the handler")
 }
 
 // TestGateDecidesImagesOnTheRoutedModel: image requests are decided on the
@@ -125,28 +125,27 @@ func TestGateDecidesImagesOnTheRoutedModel(t *testing.T) {
 		*reached = false
 
 		rec := post(engine, gateSecret, tc.path, tc.contentType, tc.body)
-		if rec.Code != tc.want || *reached != (tc.want == http.StatusOK) {
-			t.Errorf("%s = %d %s (reached %t), want %d", tc.what, rec.Code, rec.Body, *reached, tc.want)
-		}
+		assert.Equal(t, tc.want, rec.Code, "%s: %s", tc.what, rec.Body)
+		assert.Equal(t, tc.want == http.StatusOK, *reached, "%s: reached the handler", tc.what)
 
-		if tc.denied != "" && !strings.Contains(rec.Body.String(), "model "+tc.denied+" is not allowed") {
-			t.Errorf("%s: 403 body %s does not name %s", tc.what, rec.Body, tc.denied)
+		if tc.denied != "" {
+			assert.Contains(t, rec.Body.String(), "model "+tc.denied+" is not allowed", "%s: 403 body does not name %s", tc.what, tc.denied)
 		}
 	}
 
 	body, contentType := imageForm(t, [][2]string{{"model", "gpt-image-2"}, {"prompt", "a cat"}})
 	*reached = false
 
-	if rec := post(engine, gateSecret, edits, contentType, body); rec.Code != http.StatusOK || rec.Body.String() != "gpt-image-2" {
-		t.Fatalf("a multipart edit of an allowed model = %d %q, want 200 and the form still readable", rec.Code, rec.Body)
-	}
+	rec := post(engine, gateSecret, edits, contentType, body)
+	require.Equal(t, http.StatusOK, rec.Code, "a multipart edit of an allowed model")
+	require.Equal(t, "gpt-image-2", rec.Body.String(), "a multipart edit of an allowed model, want the form still readable")
 
 	body, contentType = imageForm(t, [][2]string{{"model", "grok-imagine-image"}, {"prompt", "a cat"}})
 
 	*reached = false
-	if rec := post(engine, gateSecret, edits, contentType, body); rec.Code != http.StatusForbidden || *reached {
-		t.Fatalf("a multipart edit of a denied model = %d (reached %t), want 403", rec.Code, *reached)
-	}
+	rec = post(engine, gateSecret, edits, contentType, body)
+	require.Equal(t, http.StatusForbidden, rec.Code, "a multipart edit of a denied model")
+	require.False(t, *reached, "a multipart edit of a denied model reached the handler")
 }
 
 // TestGateRequiresEveryProviderOfAModel: upstream may route a model to any
@@ -156,15 +155,15 @@ func TestGateRequiresEveryProviderOfAModel(t *testing.T) {
 
 	for _, only := range []string{"acme:*", "chatgpt:*"} {
 		engine, reached := gated(staticResolver(gateSecret, gatePrincipal, only), catalog)
-		if rec := chat(engine, gateSecret, "shared-model"); rec.Code != http.StatusForbidden || *reached {
-			t.Fatalf("a model served by acme and chatgpt, policy %s only = %d (reached %t), want 403", only, rec.Code, *reached)
-		}
+		rec := chat(engine, gateSecret, "shared-model")
+		require.Equal(t, http.StatusForbidden, rec.Code, "a model served by acme and chatgpt, policy %s only", only)
+		require.False(t, *reached, "a model served by acme and chatgpt, policy %s only, reached the handler", only)
 	}
 
 	engine, reached := gated(staticResolver(gateSecret, gatePrincipal, "chatgpt:*", "acme:shared-*"), catalog)
-	if rec := chat(engine, gateSecret, "shared-model"); rec.Code != http.StatusOK || !*reached {
-		t.Fatalf("a model served by acme and chatgpt, policy allowing both = %d (reached %t), want 200", rec.Code, *reached)
-	}
+	rec := chat(engine, gateSecret, "shared-model")
+	require.Equal(t, http.StatusOK, rec.Code, "a model served by acme and chatgpt, policy allowing both")
+	require.True(t, *reached, "a model served by acme and chatgpt, policy allowing both, did not reach the handler")
 }
 
 // TestGateNamesOnlyTheRequestedModel: a model no provider serves and a model
@@ -178,9 +177,9 @@ func TestGateNamesOnlyTheRequestedModel(t *testing.T) {
 		rec := chat(engine, gateSecret, model)
 
 		want := `{"error":{"message":"model ` + model + ` is not allowed","type":"permission_error"}}`
-		if rec.Code != http.StatusForbidden || rec.Body.String() != want || *reached {
-			t.Fatalf("%s = %d %s (reached %t), want 403 %s", model, rec.Code, rec.Body, *reached, want)
-		}
+		require.Equal(t, http.StatusForbidden, rec.Code, model)
+		require.Equal(t, want, rec.Body.String(), model)
+		require.False(t, *reached, "%s reached the handler", model)
 	}
 }
 
@@ -192,15 +191,16 @@ func TestGateResolvesTheModelAsUpstreamRoutesIt(t *testing.T) {
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}, "auto": {"chatgpt"}})
 	engine, reached := gated(staticResolver(gateSecret, gatePrincipal, "chatgpt:gpt-*"), catalog)
 
-	if rec := chat(engine, gateSecret, "gpt-5.6(high)"); rec.Code != http.StatusOK || !*reached {
-		t.Fatalf("gpt-5.6(high) = %d, want 200", rec.Code)
-	}
+	rec := chat(engine, gateSecret, "gpt-5.6(high)")
+	require.Equal(t, http.StatusOK, rec.Code, "gpt-5.6(high)")
+	require.True(t, *reached, "gpt-5.6(high) did not reach the handler")
 
 	*reached = false
+
 	for _, model := range []string{"auto", "auto(high)"} {
-		if rec := chat(engine, gateSecret, model); rec.Code != http.StatusForbidden || *reached {
-			t.Fatalf("%s = %d (reached %t), want 403", model, rec.Code, *reached)
-		}
+		rec := chat(engine, gateSecret, model)
+		require.Equal(t, http.StatusForbidden, rec.Code, model)
+		require.False(t, *reached, "%s reached the handler", model)
 	}
 }
 
@@ -221,9 +221,8 @@ func TestModelRequestReadsEachRepositoryOnce(t *testing.T) {
 		users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil).Once()
 
 		engine, _ := gated(app.NewTokenResolver(users, tokens), catalog)
-		if rec := chat(engine, gateSecret, tc.model); rec.Code != tc.want {
-			t.Fatalf("%s = %d %s, want %d", tc.model, rec.Code, rec.Body, tc.want)
-		}
+		rec := chat(engine, gateSecret, tc.model)
+		require.Equal(t, tc.want, rec.Code, "%s: %s", tc.model, rec.Body)
 	}
 }
 
@@ -238,9 +237,8 @@ func TestGateAppliesTheDomainRule(t *testing.T) {
 		engine, _ := gated(staticResolver(gateSecret, gatePrincipal, rules...), catalog)
 
 		admitted := chat(engine, gateSecret, "shared-model").Code == http.StatusOK
-		if covers := mustPolicy(rules...).Covers("shared-model", providers); admitted != covers {
-			t.Errorf("policy %v: gate admitted %t, Covers says %t", rules, admitted, covers)
-		}
+		covers := mustPolicy(rules...).Covers("shared-model", providers)
+		assert.Equal(t, covers, admitted, "policy %v: gate admitted vs Covers", rules)
 	}
 }
 
@@ -283,9 +281,9 @@ func TestGateRefusalsAreUpstreamsOwn(t *testing.T) {
 			engine, reached := gated(app.NewTokenResolver(users, tokens), fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}))
 
 			rec := chat(engine, tc.key, "gpt-5.6")
-			if rec.Code != http.StatusUnauthorized || rec.Body.String() != tc.want || *reached {
-				t.Fatalf("= %d %s (reached %t), want 401 %s", rec.Code, rec.Body, *reached, tc.want)
-			}
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+			require.Equal(t, tc.want, rec.Body.String())
+			require.False(t, *reached, "reached the handler")
 		})
 	}
 }
@@ -305,10 +303,10 @@ func TestGateResolvesTheTokenOnce(t *testing.T) {
 	var admitted string
 
 	engine.POST("/v1/chat/completions", func(c *gin.Context) {
+		// err is a *sdkaccess.AuthError: a nil one is no refusal, though as an
+		// error interface it would not be nil.
 		res, err := NewAccessProvider(resolver).Authenticate(c.Request.Context(), c.Request)
-		if err != nil {
-			t.Errorf("access provider refused a request the gate admitted: %v", err)
-
+		if !assert.Nil(t, err, "access provider refused a request the gate admitted") {
 			return
 		}
 
@@ -317,7 +315,6 @@ func TestGateResolvesTheTokenOnce(t *testing.T) {
 
 	chat(engine, gateSecret, "gpt-5.6")
 
-	if admitted != gatePrincipal.String() || lookups != 1 {
-		t.Fatalf("admitted as %q after %d lookups, want %q after 1", admitted, lookups, gatePrincipal)
-	}
+	require.Equal(t, gatePrincipal.String(), admitted, "admitted as")
+	require.Equal(t, 1, lookups, "lookups")
 }

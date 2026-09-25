@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +15,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // catalogDoc is a catalog in the upstream shape: sections we map, one we do not,
@@ -51,9 +52,7 @@ const catalogDoc = `{
 
 func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 	got, err := pricecatalog.Parse([]byte(catalogDoc))
-	if err != nil {
-		t.Fatalf("Parse: %v", err)
-	}
+	require.NoError(t, err, "Parse")
 
 	want := []app.ModelPrice{
 		// openai fills what openai-codex lacks a price for, and nothing else.
@@ -63,22 +62,15 @@ func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 		{Provider: "claude", Model: "claude-free"},
 		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
 	}
-	if len(got) != len(want) {
-		t.Fatalf("Parse = %+v, want %+v", got, want)
-	}
+	require.Len(t, got, len(want), "Parse = %+v", got)
 
-	for i := range want {
-		if got[i] != want[i] {
-			t.Errorf("[%d] = %+v, want %+v", i, got[i], want[i])
-		}
-	}
+	assert.Equal(t, want, got)
 }
 
 func TestParseRefusesWhatIsNotACatalog(t *testing.T) {
 	for _, doc := range []string{`[]`, `{"anthropic": [1, 2]}`, `not json`} {
-		if _, err := pricecatalog.Parse([]byte(doc)); err == nil {
-			t.Errorf("Parse(%s) accepted", doc)
-		}
+		_, err := pricecatalog.Parse([]byte(doc))
+		assert.Error(t, err, "Parse(%s) accepted", doc)
 	}
 }
 
@@ -104,27 +96,22 @@ func TestFetchIsConditional(t *testing.T) {
 	src := pricecatalog.New(srv.URL, "v9.9.9")
 
 	first, err := src.Fetch(context.Background(), app.CatalogValidators{})
-	if err != nil {
-		t.Fatalf("first fetch: %v", err)
-	}
+	require.NoError(t, err, "first fetch")
 
 	want := app.CatalogValidators{ETag: `"v1"`, LastModified: "Tue, 22 Sep 2026 10:00:00 GMT"}
-	if first.Unchanged || len(first.Prices) != 5 || first.Validators != want {
-		t.Fatalf("first fetch = %+v, want 5 prices and the validators", first)
-	}
 
-	if gotETag != "" || gotSince != "" || !strings.Contains(gotUA, "llm-proxy/v9.9.9") {
-		t.Fatalf("first request: If-None-Match %q, If-Modified-Since %q, User-Agent %q", gotETag, gotSince, gotUA)
-	}
+	require.False(t, first.Unchanged, "first fetch unchanged")
+	require.Len(t, first.Prices, 5, "first fetch prices")
+	require.Equal(t, want, first.Validators, "first fetch validators")
+
+	require.Empty(t, gotETag, "first request If-None-Match")
+	require.Empty(t, gotSince, "first request If-Modified-Since")
+	require.Contains(t, gotUA, "llm-proxy/v9.9.9", "first request User-Agent")
 
 	second, err := src.Fetch(context.Background(), first.Validators)
-	if err != nil {
-		t.Fatalf("second fetch: %v", err)
-	}
-
-	if !second.Unchanged || gotSince != want.LastModified {
-		t.Fatalf("second fetch = %+v (If-Modified-Since %q), want unchanged", second, gotSince)
-	}
+	require.NoError(t, err, "second fetch")
+	require.True(t, second.Unchanged, "second fetch = %+v, want unchanged", second)
+	require.Equal(t, want.LastModified, gotSince, "second request If-Modified-Since")
 }
 
 // A failure is an error that says what happened and never repeats the body.
@@ -189,9 +176,8 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 			defer srv.Close()
 
 			_, err := pricecatalog.New(srv.URL, "").Fetch(context.Background(), app.CatalogValidators{})
-			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), secret) {
-				t.Fatalf("err = %v, want one naming %q without the body", err, tc.want)
-			}
+			require.ErrorContains(t, err, tc.want)
+			require.NotContains(t, err.Error(), secret, "error repeats the body")
 		})
 	}
 }
@@ -223,9 +209,7 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 	m := metrics.New(prometheus.NewRegistry())
 
 	prices := app.NewPrices(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
-	if err := prices.Load(context.Background()); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, prices.Load(context.Background()), "Load")
 
 	usage := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 1_000_000, TokensTotal: 1_000_000}
 
@@ -234,18 +218,17 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 
 		return app.PriceUsage(usage, p, ok)
 	}
-	if before := cost(); before.Priced || before.UnpricedTokens != 1_000_000 {
-		t.Fatalf("before the check: %+v, want every token unpriced", before)
-	}
+	before := cost()
+	require.False(t, before.Priced, "before the check: %+v, want every token unpriced", before)
+	require.Equal(t, int64(1_000_000), before.UnpricedTokens, "before the check: want every token unpriced")
 
 	admin := identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin, Status: identity.StatusActive}
-	if _, err := prices.Refresh(context.Background(), admin); err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
+	_, err := prices.Refresh(context.Background(), admin)
+	require.NoError(t, err, "Refresh")
 
-	if after := cost(); !after.Priced || after.TotalUSD() != 3 {
-		t.Fatalf("after the check: %+v, want $3", after)
-	}
+	after := cost()
+	require.True(t, after.Priced, "after the check: %+v, want priced", after)
+	require.Equal(t, 3.0, after.TotalUSD(), "after the check")
 }
 
 type clock struct{}
@@ -263,7 +246,7 @@ func TestFingerprintNamesTheURLWithoutHoldingIt(t *testing.T) {
 	a := pricecatalog.New("https://user:s3cret@catalog.example.com/models.json", "").Fingerprint()
 
 	b := pricecatalog.New("https://catalog.example.com/models.json", "").Fingerprint()
-	if a == b || strings.Contains(a, "s3cret") || strings.Contains(a, "catalog.example.com") {
-		t.Fatalf("fingerprints %q and %q: want distinct and free of the URL", a, b)
-	}
+	require.NotEqual(t, a, b, "fingerprints must be distinct")
+	require.NotContains(t, a, "s3cret", "fingerprint holds the URL")
+	require.NotContains(t, a, "catalog.example.com", "fingerprint holds the URL")
 }

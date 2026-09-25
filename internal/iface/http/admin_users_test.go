@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +15,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func mustPolicy(t *testing.T, rules ...string) access.Policy {
@@ -24,9 +24,7 @@ func mustPolicy(t *testing.T, rules ...string) access.Policy {
 	policy := make(access.Policy, 0, len(rules))
 	for _, s := range rules {
 		r, err := access.ParseRule(s)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err, "ParseRule %q", s)
 
 		policy = append(policy, r)
 	}
@@ -38,9 +36,8 @@ func mustPolicy(t *testing.T, rules ...string) access.Policy {
 func wantField(t *testing.T, e api.Error, field string) {
 	t.Helper()
 
-	if e.Field == nil || *e.Field != field {
-		t.Fatalf("field = %v, want %q", e.Field, field)
-	}
+	require.NotNil(t, e.Field, "the error names no field; want %q", field)
+	require.Equal(t, field, *e.Field, "field")
 }
 
 func TestListUsersDescribesEveryAccount(t *testing.T) {
@@ -62,24 +59,31 @@ func TestListUsersDescribesEveryAccount(t *testing.T) {
 	var got []api.AdminUser
 	decodeBody(t, env.do(http.MethodGet, "/api/admin/users", "", withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if len(got) != 3 {
-		t.Fatalf("got %d accounts, want 3", len(got))
-	}
+	require.Len(t, got, 3, "accounts")
 
 	personRow, serviceRow, invitedRow := got[0], got[1], got[2]
-	if personRow.Id != human.ID || personRow.Email == nil || *personRow.Email != human.Email || personRow.Kind != "human" || personRow.Status != "active" ||
-		len(personRow.Policy) != 1 || personRow.Policy[0] != "claude:*" || len(personRow.SignIn) != 2 || personRow.SignIn[0] != "password" || personRow.SignIn[1] != "oidc" ||
-		personRow.LastSeenAt == nil || !personRow.LastSeenAt.Equal(seen) || !personRow.CreatedAt.Equal(human.CreatedAt) || personRow.InvitationExpiresAt != nil {
-		t.Fatalf("person = %+v", personRow)
-	}
+	require.Equal(t, human.ID, personRow.Id, "person id")
+	require.NotNil(t, personRow.Email, "person email")
+	require.Equal(t, human.Email, *personRow.Email, "person email")
+	require.Equal(t, api.Human, personRow.Kind, "person kind")
+	require.Equal(t, api.Active, personRow.Status, "person status")
+	require.Equal(t, []string{"claude:*"}, personRow.Policy, "person policy")
+	require.Equal(t, []api.AdminUserSignIn{api.AdminUserSignInPassword, api.AdminUserSignInOidc}, personRow.SignIn, "person sign-in")
+	require.NotNil(t, personRow.LastSeenAt, "person last seen")
+	require.True(t, personRow.LastSeenAt.Equal(seen), "person last seen = %v, want %v", personRow.LastSeenAt, seen)
+	require.True(t, personRow.CreatedAt.Equal(human.CreatedAt), "person created = %v, want %v", personRow.CreatedAt, human.CreatedAt)
+	require.Nil(t, personRow.InvitationExpiresAt, "person invitation")
 
-	if serviceRow.Kind != "service" || serviceRow.Email != nil || serviceRow.SignIn == nil || len(serviceRow.SignIn) != 0 || serviceRow.Policy == nil {
-		t.Fatalf("service account = %+v, want no email and empty (not null) sign-in and policy", serviceRow)
-	}
+	require.Equal(t, api.Service, serviceRow.Kind, "service account kind")
+	require.Nil(t, serviceRow.Email, "service account email")
+	require.NotNil(t, serviceRow.SignIn, "service account sign-in must be empty, not null")
+	require.Empty(t, serviceRow.SignIn, "service account sign-in")
+	require.NotNil(t, serviceRow.Policy, "service account policy must be empty, not null")
 
-	if invitedRow.InvitationExpiresAt == nil || !invitedRow.InvitationExpiresAt.Equal(lapsed) || len(invitedRow.SignIn) != 0 {
-		t.Fatalf("invited person = %+v, want the lapsed invitation and no way in", invitedRow)
-	}
+	require.NotNil(t, invitedRow.InvitationExpiresAt, "the invited person has no invitation")
+	require.True(t, invitedRow.InvitationExpiresAt.Equal(lapsed), "invitation expires = %v, want the lapsed %v",
+		invitedRow.InvitationExpiresAt, lapsed)
+	require.Empty(t, invitedRow.SignIn, "the invited person has a way in")
 }
 
 func TestAnAdminServiceFailureIsInternalAndUndescribed(t *testing.T) {
@@ -88,9 +92,7 @@ func TestAnAdminServiceFailureIsInternalAndUndescribed(t *testing.T) {
 	rec := e.do(http.MethodGet, "/api/admin/users", "", withCookie(e.signedIn(admin())))
 	apiError(t, rec, http.StatusInternalServerError, codeInternal)
 
-	if strings.Contains(rec.Body.String(), "relation") {
-		t.Fatalf("the response describes the failure: %s", rec.Body)
-	}
+	require.NotContains(t, rec.Body.String(), "relation", "the response describes the failure")
 }
 
 // The temporary password is in the response that creates the account and nowhere
@@ -113,19 +115,19 @@ func TestCreatingAPersonShowsTheTemporaryPasswordOnlyThere(t *testing.T) {
 		http.StatusCreated, &out)
 
 	temp := out.TemporaryPassword
-	if temp == nil || acct.Password == nil || acct.Password.Hash != "plain:"+temp.Password {
-		t.Fatalf("temporary password %+v is not the one whose hash was stored", temp)
-	}
+	require.NotNil(t, temp, "no temporary password")
+	require.NotNil(t, acct.Password, "no password was stored")
+	require.Equal(t, "plain:"+temp.Password, acct.Password.Hash, "the temporary password is not the one whose hash was stored")
+	require.True(t, temp.ExpiresAt.Equal(env.clock.Now().Add(app.TemporaryPasswordTTL)),
+		"expires at %s, want %s", temp.ExpiresAt, env.clock.Now().Add(app.TemporaryPasswordTTL))
 
-	if !temp.ExpiresAt.Equal(env.clock.Now().Add(app.TemporaryPasswordTTL)) {
-		t.Fatalf("expires at %s, want %s", temp.ExpiresAt, env.clock.Now().Add(app.TemporaryPasswordTTL))
-	}
-
-	u := out.User
-	if u.Id != acct.User.ID || u.Email == nil || *u.Email != "new@example.com" || !u.MustChangePassword ||
-		len(u.SignIn) != 1 || u.SignIn[0] != "password" || len(u.Policy) != 1 || u.Policy[0] != "claude:*" {
-		t.Fatalf("created user = %+v", u)
-	}
+	created := out.User
+	require.Equal(t, acct.User.ID, created.Id, "created user id")
+	require.NotNil(t, created.Email, "created user email")
+	require.Equal(t, "new@example.com", *created.Email, "created user email")
+	require.True(t, created.MustChangePassword, "created user must change password")
+	require.Equal(t, []api.AdminUserSignIn{api.AdminUserSignInPassword}, created.SignIn, "created user sign-in")
+	require.Equal(t, []string{"claude:*"}, created.Policy, "created user policy")
 
 	view := app.UserView{User: acct.User, SignIn: []app.SignInMethod{app.SignInPassword}}
 	env.users.EXPECT().View(mock.Anything, acct.User.ID).Return(view, nil)
@@ -133,9 +135,9 @@ func TestCreatingAPersonShowsTheTemporaryPasswordOnlyThere(t *testing.T) {
 
 	for _, path := range []string{"/api/admin/users/" + acct.User.ID.String(), "/api/admin/users"} {
 		rec := env.do(http.MethodGet, path, "", cookie)
-		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), temp.Password) || strings.Contains(rec.Body.String(), acct.Password.Hash) {
-			t.Fatalf("GET %s = %d %s: want 200 without the password or its hash", path, rec.Code, rec.Body)
-		}
+		require.Equal(t, http.StatusOK, rec.Code, "GET %s status; body %s", path, rec.Body)
+		require.NotContains(t, rec.Body.String(), temp.Password, "GET %s shows the password", path)
+		require.NotContains(t, rec.Body.String(), acct.Password.Hash, "GET %s shows the password hash", path)
 	}
 }
 
@@ -148,9 +150,7 @@ func TestCreatingAServiceAccountIssuesNoPassword(t *testing.T) {
 	var raw map[string]json.RawMessage
 	decodeBody(t, rec, http.StatusCreated, &raw)
 
-	if _, ok := raw["temporaryPassword"]; ok {
-		t.Fatalf("a service account got a temporary password: %s", rec.Body)
-	}
+	require.NotContains(t, raw, "temporaryPassword", "a service account got a temporary password: %s", rec.Body)
 }
 
 func TestCreateUserRefusals(t *testing.T) {
@@ -203,9 +203,8 @@ func TestGetUser(t *testing.T) {
 	var got api.AdminUser
 	decodeBody(t, env.do(http.MethodGet, "/api/admin/users/"+user.ID.String(), "", cookie), http.StatusOK, &got)
 
-	if got.Id != user.ID || got.Status != "blocked" {
-		t.Fatalf("user = %+v", got)
-	}
+	require.Equal(t, user.ID, got.Id, "user id")
+	require.Equal(t, api.Blocked, got.Status, "user status")
 
 	unknown := uuid.New()
 	env.users.EXPECT().View(mock.Anything, unknown).Return(app.UserView{}, app.ErrNotFound)
@@ -234,14 +233,16 @@ func TestUpdateUserAppliesTheEdit(t *testing.T) {
 	decodeBody(t, env.do(http.MethodPatch, "/api/admin/users/"+user.ID.String(), `{"displayName":"Renamed","policy":["chatgpt:*"]}`,
 		withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if change.DisplayName == nil || *change.DisplayName != "Renamed" || change.Policy == nil || len(*change.Policy) != 1 || (*change.Policy)[0].String() != "chatgpt:*" ||
-		change.Role != nil || change.Status != nil {
-		t.Fatalf("change = %+v, want the name and policy only", change)
-	}
+	require.NotNil(t, change.DisplayName, "change display name")
+	require.Equal(t, "Renamed", *change.DisplayName, "change display name")
+	require.NotNil(t, change.Policy, "change policy")
+	require.Len(t, *change.Policy, 1, "change policy")
+	require.Equal(t, "chatgpt:*", (*change.Policy)[0].String(), "change policy")
+	require.Nil(t, change.Role, "the change touches the role")
+	require.Nil(t, change.Status, "the change touches the status")
 
-	if got.DisplayName != "Renamed" || len(got.Policy) != 1 || got.Policy[0] != "chatgpt:*" {
-		t.Fatalf("user = %+v, want the account as it now stands", got)
-	}
+	require.Equal(t, "Renamed", got.DisplayName, "the account as it now stands")
+	require.Equal(t, []string{"chatgpt:*"}, got.Policy, "the account as it now stands")
 }
 
 func TestUpdateUserRefusals(t *testing.T) {
@@ -326,17 +327,17 @@ func TestResetPasswordShowsTheNewPasswordOnlyThere(t *testing.T) {
 	var temp api.TemporaryPassword
 	decodeBody(t, env.do(http.MethodPost, "/api/admin/users/"+user.ID.String()+"/password-reset", "", cookie), http.StatusOK, &temp)
 
-	if temp.Password == "" || hash != "plain:"+temp.Password || !temp.ExpiresAt.Equal(env.clock.Now().Add(app.TemporaryPasswordTTL)) {
-		t.Fatalf("temporary password %+v is not the one stored", temp)
-	}
+	require.NotEmpty(t, temp.Password, "no temporary password")
+	require.Equal(t, "plain:"+temp.Password, hash, "the temporary password is not the one stored")
+	require.True(t, temp.ExpiresAt.Equal(env.clock.Now().Add(app.TemporaryPasswordTTL)),
+		"expires at %s, want %s", temp.ExpiresAt, env.clock.Now().Add(app.TemporaryPasswordTTL))
 
 	user.MustChangePassword = true
 	env.users.EXPECT().View(mock.Anything, user.ID).Return(app.UserView{User: user, SignIn: []app.SignInMethod{app.SignInPassword}}, nil)
 
 	rec := env.do(http.MethodGet, "/api/admin/users/"+user.ID.String(), "", cookie)
-	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), temp.Password) {
-		t.Fatalf("GET = %d %s: want 200 without the password", rec.Code, rec.Body)
-	}
+	require.Equal(t, http.StatusOK, rec.Code, "GET status; body %s", rec.Body)
+	require.NotContains(t, rec.Body.String(), temp.Password, "GET shows the password")
 }
 
 func TestResetPasswordOfAServiceAccountIsNotLocal(t *testing.T) {
@@ -361,9 +362,8 @@ func TestRenewInvitation(t *testing.T) {
 		}).Return(nil)
 
 		rec := env.do(http.MethodPost, path, "", withCookie(env.signedIn(admin())))
-		if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
-			t.Fatalf("status = %d, body %s; want 204", rec.Code, rec.Body)
-		}
+		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
+		require.Zero(t, rec.Body.Len(), "body %s", rec.Body)
 	})
 	// Two renewals for one address race on the invitation's unique index; the one
 	// that loses finds the account freshly invited, which is what it asked for.
@@ -373,9 +373,8 @@ func TestRenewInvitation(t *testing.T) {
 		e.idents.EXPECT().Invite(mock.Anything, user.ID, mock.Anything).Return(app.ErrConflict)
 
 		rec := e.do(http.MethodPost, path, "", withCookie(e.signedIn(admin())))
-		if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
-			t.Fatalf("status = %d, body %s; want 204", rec.Code, rec.Body)
-		}
+		require.Equal(t, http.StatusNoContent, rec.Code, "status; body %s", rec.Body)
+		require.Zero(t, rec.Body.Len(), "body %s", rec.Body)
 	})
 	t.Run("already linked", func(t *testing.T) {
 		e := newEnv(t, withAdminConfig(app.AdminUsersConfig{OIDCIssuer: issuer}))
@@ -408,9 +407,10 @@ func TestIssuingATokenForAnAccountShowsItsSecretOnlyThere(t *testing.T) {
 	var out api.IssuedToken
 	decodeBody(t, env.do(http.MethodPost, "/api/admin/users/"+bot.ID.String()+"/tokens", `{"label":"ci"}`, cookie), http.StatusCreated, &out)
 
-	if out.Secret == "" || credentials.HashSecret(out.Secret) != stored.Hash || stored.UserID != bot.ID || out.Token.Id != stored.ID {
-		t.Fatalf("issued %+v, stored for %s: want the account's token and its secret", out.Token, stored.UserID)
-	}
+	require.NotEmpty(t, out.Secret, "no secret was issued")
+	require.Equal(t, stored.Hash, credentials.HashSecret(out.Secret), "the issued secret is not the stored token's")
+	require.Equal(t, bot.ID, stored.UserID, "the token was stored for another account")
+	require.Equal(t, stored.ID, out.Token.Id, "issued token id")
 
 	env.tokens.EXPECT().ListByUser(mock.Anything, bot.ID).Return([]credentials.Token{stored}, nil)
 	rec := env.do(http.MethodGet, "/api/admin/users/"+bot.ID.String()+"/tokens", "", cookie)
@@ -418,10 +418,10 @@ func TestIssuingATokenForAnAccountShowsItsSecretOnlyThere(t *testing.T) {
 	var list []api.Token
 	decodeBody(t, rec, http.StatusOK, &list)
 
-	if len(list) != 1 || list[0].Prefix != stored.Prefix ||
-		strings.Contains(rec.Body.String(), out.Secret) || strings.Contains(rec.Body.String(), stored.Hash) {
-		t.Fatalf("token list %s: want the prefix and never the secret or hash", rec.Body)
-	}
+	require.Len(t, list, 1, "token list %s", rec.Body)
+	require.Equal(t, stored.Prefix, list[0].Prefix, "token list prefix")
+	require.NotContains(t, rec.Body.String(), out.Secret, "the token list shows the secret")
+	require.NotContains(t, rec.Body.String(), stored.Hash, "the token list shows the hash")
 }
 
 func TestIssuingATokenWithABadLabelIsInvalidInputOnTheLabel(t *testing.T) {
@@ -444,9 +444,7 @@ func TestRevokingAnAccountsToken(t *testing.T) {
 	owner := person("p@example.com")
 
 	tok, _, err := credentials.Generate(owner.ID, "laptop")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Generate")
 
 	path := "/api/admin/users/" + owner.ID.String() + "/tokens/" + tok.ID.String()
 
@@ -464,9 +462,8 @@ func TestRevokingAnAccountsToken(t *testing.T) {
 		})
 
 		rec := env.do(http.MethodDelete, path, "", withCookie(env.signedIn(admin())))
-		if rec.Code != http.StatusNoContent || saved.Active() {
-			t.Fatalf("status = %d, revoked = %t; want 204 and the token revoked", rec.Code, !saved.Active())
-		}
+		require.Equal(t, http.StatusNoContent, rec.Code, "status")
+		require.False(t, saved.Active(), "the token was not revoked")
 	})
 	// The address names the token as one of that account's; another account's token
 	// is not there, and nothing is revoked.
@@ -506,44 +503,38 @@ func TestActivityReportsServedRequestsAsSuccessful(t *testing.T) {
 	var got api.Activity
 	decodeBody(t, env.do(http.MethodGet, "/api/admin/users/"+user.ID.String()+"/activity", "", withCookie(env.signedIn(self))), http.StatusOK, &got)
 
-	if len(got.Requests) != 3 || len(got.Audit) != 2 {
-		t.Fatalf("activity = %+v", got)
-	}
+	require.Len(t, got.Requests, 3, "activity requests")
+	require.Len(t, got.Audit, 2, "activity audit")
 
 	served, failed, unknown := got.Requests[0], got.Requests[1], got.Requests[2]
-	if served.StatusCode != http.StatusOK || served.TokenId == nil || *served.TokenId != tokenID ||
-		!served.Stream || served.TokensTotal != 42 || served.LatencyMs != 1500 {
-		t.Fatalf("served request = %+v, want status 200 and its token", served)
-	}
+	require.Equal(t, http.StatusOK, served.StatusCode, "served request status")
+	require.NotNil(t, served.TokenId, "served request token")
+	require.Equal(t, tokenID, *served.TokenId, "served request token")
+	require.True(t, served.Stream, "served request stream")
+	require.Equal(t, 42, served.TokensTotal, "served request tokens")
+	require.Equal(t, 1500, served.LatencyMs, "served request latency")
 
-	if failed.StatusCode != http.StatusBadGateway || failed.TokenId != nil {
-		t.Fatalf("failed request = %+v, want its 502 and no token", failed)
-	}
+	require.Equal(t, http.StatusBadGateway, failed.StatusCode, "failed request status")
+	require.Nil(t, failed.TokenId, "failed request token")
 
-	if unknown.StatusCode != 0 {
-		t.Fatalf("a failure without a status reads as %d, want 0", unknown.StatusCode)
-	}
+	require.Zero(t, unknown.StatusCode, "a failure without a status")
 
-	if served.CostUSD == nil || *served.CostUSD != 1.5 {
-		t.Fatalf("served cost = %v, want 1.5", served.CostUSD)
-	}
-
-	if failed.CostUSD == nil || *failed.CostUSD != 0 {
-		t.Fatalf("priced-at-zero cost = %v, want 0", failed.CostUSD)
-	}
-
-	if unknown.CostUSD != nil {
-		t.Fatalf("unpriced request's cost = %v, want none", *unknown.CostUSD)
-	}
+	require.NotNil(t, served.CostUSD, "served cost")
+	require.Equal(t, 1.5, *served.CostUSD, "served cost")
+	require.NotNil(t, failed.CostUSD, "priced-at-zero cost")
+	require.Zero(t, *failed.CostUSD, "priced-at-zero cost")
+	require.Nil(t, unknown.CostUSD, "unpriced request's cost")
 
 	issue, signIn := got.Audit[0], got.Audit[1]
-	if issue.ActorId == nil || *issue.ActorId != self.ID || issue.Target == nil || issue.Detail == nil || (*issue.Detail)["label"] != "ci" {
-		t.Fatalf("audit event = %+v", issue)
-	}
+	require.NotNil(t, issue.ActorId, "audit actor")
+	require.Equal(t, self.ID, *issue.ActorId, "audit actor")
+	require.NotNil(t, issue.Target, "audit target")
+	require.NotNil(t, issue.Detail, "audit detail")
+	require.Equal(t, "ci", (*issue.Detail)["label"], "audit detail label")
 
-	if signIn.ActorId != nil || signIn.Target != nil || signIn.Detail != nil {
-		t.Fatalf("audit event without actor, target or detail = %+v", signIn)
-	}
+	require.Nil(t, signIn.ActorId, "audit event without actor")
+	require.Nil(t, signIn.Target, "audit event without target")
+	require.Nil(t, signIn.Detail, "audit event without detail")
 }
 
 func TestActivityLimit(t *testing.T) {
@@ -557,9 +548,7 @@ func TestActivityLimit(t *testing.T) {
 		e.activity.EXPECT().RecentAudit(mock.Anything, user.ID, app.MaxActivityLimit).Return(nil, nil)
 
 		rec := e.do(http.MethodGet, path+"200", "", withCookie(e.signedIn(admin())))
-		if strings.TrimSpace(rec.Body.String()) != `{"audit":[],"requests":[]}` {
-			t.Fatalf("body = %s, want empty arrays", rec.Body)
-		}
+		require.JSONEq(t, `{"audit":[],"requests":[]}`, rec.Body.String(), "want empty arrays")
 	})
 
 	for _, bad := range []string{"0", "201", "ten"} {
@@ -578,10 +567,10 @@ func TestCatalogListsProvidersAndModelsSorted(t *testing.T) {
 	var got api.Catalog
 	decodeBody(t, e.do(http.MethodGet, "/api/admin/catalog", "", withCookie(e.signedIn(admin()))), http.StatusOK, &got)
 
-	if len(got.Providers) != 2 || got.Providers[0].Name != "chatgpt" || got.Providers[1].Name != "claude" ||
-		strings.Join(got.Providers[1].Models, ",") != "a,b" {
-		t.Fatalf("catalog = %+v", got)
-	}
+	require.Len(t, got.Providers, 2, "catalog providers")
+	require.Equal(t, "chatgpt", got.Providers[0].Name, "first provider")
+	require.Equal(t, "claude", got.Providers[1].Name, "second provider")
+	require.Equal(t, []string{"a", "b"}, got.Providers[1].Models, "claude's models")
 }
 
 // The preview reports each rule that does not parse and covers a model only when
@@ -596,11 +585,11 @@ func TestPolicyPreview(t *testing.T) {
 	decodeBody(t, env.do(http.MethodPost, "/api/admin/policy/preview", `{"rules":["chatgpt:*","nonsense"]}`,
 		withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
-	if len(got.Errors) != 1 || got.Errors[0].Rule != "nonsense" || got.Errors[0].Code != codeInvalidRule {
-		t.Fatalf("errors = %+v", got.Errors)
-	}
+	require.Len(t, got.Errors, 1, "errors")
+	require.Equal(t, "nonsense", got.Errors[0].Rule, "error rule")
+	require.Equal(t, codeInvalidRule, got.Errors[0].Code, "error code")
 
-	if len(got.Covered) != 1 || got.Covered[0].Provider != "chatgpt" || got.Covered[0].Model != "own" {
-		t.Fatalf("covered = %+v, want only chatgpt's own model", got.Covered)
-	}
+	require.Len(t, got.Covered, 1, "covered; want only chatgpt's own model")
+	require.Equal(t, "chatgpt", got.Covered[0].Provider, "covered provider")
+	require.Equal(t, "own", got.Covered[0].Model, "covered model")
 }

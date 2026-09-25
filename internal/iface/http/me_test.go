@@ -16,7 +16,9 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMeDescribesTheCaller(t *testing.T) {
@@ -24,19 +26,19 @@ func TestMeDescribesTheCaller(t *testing.T) {
 	user := person("person@example.com")
 
 	rule, err := access.ParseRule("claude:claude-sonnet-*")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "ParseRule")
 
 	user.Policy = access.Policy{rule}
 
 	var me api.Me
 	decodeBody(t, env.do(http.MethodGet, "/api/me", "", withCookie(env.signedIn(user))), http.StatusOK, &me)
 
-	if me.Id != user.ID || me.Kind != api.Kind("human") || me.Role != api.Role("user") || me.Restricted ||
-		len(me.Policy) != 1 || me.Policy[0] != "claude:claude-sonnet-*" || me.PolicySource != api.PolicySource("local") {
-		t.Fatalf("me = %+v, want %+v", me, user)
-	}
+	require.Equal(t, user.ID, me.Id, "me id")
+	require.Equal(t, api.Human, me.Kind, "me kind")
+	require.Equal(t, api.User, me.Role, "me role")
+	require.False(t, me.Restricted, "me restricted")
+	require.Equal(t, []string{"claude:claude-sonnet-*"}, me.Policy, "me policy")
+	require.Equal(t, api.Local, me.PolicySource, "me policy source")
 }
 
 // Every stored token appears, secret never: the list shows the prefix that tells keys
@@ -46,9 +48,7 @@ func TestTokenListShowsPrefixesAndNeverSecrets(t *testing.T) {
 	user := person("person@example.com")
 
 	tok, secret, err := credentials.Generate(user.ID, "laptop")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Generate")
 
 	used := tok.CreatedAt.Add(time.Hour)
 	tok.LastUsedAt = &used
@@ -59,13 +59,13 @@ func TestTokenListShowsPrefixesAndNeverSecrets(t *testing.T) {
 	var got []api.Token
 	decodeBody(t, rec, http.StatusOK, &got)
 
-	if len(got) != 1 || got[0].Id != tok.ID || got[0].Prefix != secret[:7] || got[0].LastUsedAt == nil || got[0].RevokedAt != nil {
-		t.Fatalf("tokens = %+v, want the laptop token with its prefix and last use", got)
-	}
-
-	if strings.Contains(rec.Body.String(), secret) || strings.Contains(rec.Body.String(), tok.Hash) {
-		t.Fatal("the token list carries the secret or its hash")
-	}
+	require.Len(t, got, 1, "tokens")
+	require.Equal(t, tok.ID, got[0].Id, "token id")
+	require.Equal(t, secret[:7], got[0].Prefix, "token prefix")
+	require.NotNil(t, got[0].LastUsedAt, "token last use")
+	require.Nil(t, got[0].RevokedAt, "token revoked")
+	require.NotContains(t, rec.Body.String(), secret, "the token list carries the secret")
+	require.NotContains(t, rec.Body.String(), tok.Hash, "the token list carries the secret's hash")
 }
 
 // An empty list is [] rather than null, as the contract's array type says.
@@ -75,9 +75,7 @@ func TestAnEmptyTokenListIsAnArray(t *testing.T) {
 	e.tokens.EXPECT().ListByUser(mock.Anything, u.ID).Return(nil, nil)
 
 	rec := e.do(http.MethodGet, "/api/me/tokens", "", withCookie(e.signedIn(u)))
-	if strings.TrimSpace(rec.Body.String()) != "[]" {
-		t.Fatalf("body = %s, want []", rec.Body)
-	}
+	require.JSONEq(t, "[]", rec.Body.String(), "an empty token list")
 }
 
 func TestIssuingATokenShowsItsSecretOnce(t *testing.T) {
@@ -95,13 +93,11 @@ func TestIssuingATokenShowsItsSecretOnce(t *testing.T) {
 	var out api.IssuedToken
 	decodeBody(t, env.do(http.MethodPost, "/api/me/tokens", `{"label":"laptop"}`, withCookie(env.signedIn(user))), http.StatusCreated, &out)
 
-	if out.Secret == "" || credentials.HashSecret(out.Secret) != stored.Hash {
-		t.Fatal("the secret returned is not the one whose hash was stored")
-	}
-
-	if stored.UserID != user.ID || out.Token.Id != stored.ID || out.Token.Label != "laptop" {
-		t.Fatalf("issued %+v for %s, want the caller's own laptop token", out.Token, stored.UserID)
-	}
+	require.NotEmpty(t, out.Secret, "no secret was returned")
+	require.Equal(t, stored.Hash, credentials.HashSecret(out.Secret), "the secret returned is not the one whose hash was stored")
+	require.Equal(t, user.ID, stored.UserID, "the token is not the caller's own")
+	require.Equal(t, stored.ID, out.Token.Id, "issued token id")
+	require.Equal(t, "laptop", out.Token.Label, "issued token label")
 }
 
 // An owner at the live-token limit is refused 409 token_limit on both routes that
@@ -138,9 +134,7 @@ func TestAnInvalidTokenLabelIsInvalidInputOnTheLabel(t *testing.T) {
 			e := newEnv(t)
 
 			rec := e.do(http.MethodPost, "/api/me/tokens", body, withCookie(e.signedIn(person("p@example.com"))))
-			if f := apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput).Field; f == nil || *f != "label" {
-				t.Fatalf("field = %v, want label", f)
-			}
+			wantField(t, apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput), "label")
 		})
 	}
 }
@@ -156,9 +150,7 @@ func TestRevokingSomeoneElsesTokenIsNotFound(t *testing.T) {
 			user.Role = role
 
 			theirs, _, err := credentials.Generate(uuid.New(), "theirs")
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err, "Generate")
 
 			env.tokens.EXPECT().ByID(mock.Anything, theirs.ID).Return(theirs, nil)
 			// No Save expectation: revoking it fails the test.
@@ -173,9 +165,7 @@ func TestRevokingOwnToken(t *testing.T) {
 	user := person("person@example.com")
 
 	mine, _, err := credentials.Generate(user.ID, "mine")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err, "Generate")
 
 	env.tokens.EXPECT().ByID(mock.Anything, mine.ID).Return(mine, nil)
 
@@ -188,9 +178,8 @@ func TestRevokingOwnToken(t *testing.T) {
 	})
 
 	rec := env.do(http.MethodDelete, "/api/me/tokens/"+mine.ID.String(), "", withCookie(env.signedIn(user)))
-	if rec.Code != http.StatusNoContent || saved.Active() {
-		t.Fatalf("status = %d, revoked = %t; want 204 and the token revoked", rec.Code, !saved.Active())
-	}
+	require.Equal(t, http.StatusNoContent, rec.Code, "status")
+	require.False(t, saved.Active(), "the token was not revoked")
 }
 
 func TestRevokeAnswersForTokensThatCannotBeRevoked(t *testing.T) {
@@ -199,15 +188,12 @@ func TestRevokeAnswersForTokensThatCannotBeRevoked(t *testing.T) {
 		user := person("person@example.com")
 
 		tok, _, _ := credentials.Generate(user.ID, "old")
-		if err := tok.Revoke(user.ID, time.Now()); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, tok.Revoke(user.ID, time.Now()), "Revoke")
 
 		env.tokens.EXPECT().ByID(mock.Anything, tok.ID).Return(tok, nil)
 
-		if rec := env.do(http.MethodDelete, "/api/me/tokens/"+tok.ID.String(), "", withCookie(env.signedIn(user))); rec.Code != http.StatusNoContent {
-			t.Fatalf("status = %d, want 204", rec.Code)
-		}
+		rec := env.do(http.MethodDelete, "/api/me/tokens/"+tok.ID.String(), "", withCookie(env.signedIn(user)))
+		require.Equal(t, http.StatusNoContent, rec.Code, "status")
 	})
 	t.Run("unknown id", func(t *testing.T) {
 		e := newEnv(t)
@@ -240,18 +226,20 @@ func TestUsageDefaultsToTheLastSevenDays(t *testing.T) {
 	var out api.Usage
 	decodeBody(t, env.do(http.MethodGet, "/api/me/usage", "", withCookie(env.signedIn(user))), http.StatusOK, &out)
 
-	if out.Bucket != "day" || out.Totals.Requests != 3 || out.Totals.TokensTotal != 70 ||
-		len(out.Points) != 1 || out.Points[0].Model != "m" || !out.From.Equal(now.Add(-7*24*time.Hour)) || !out.To.Equal(now) {
-		t.Fatalf("usage = %+v", out)
-	}
+	require.Equal(t, api.Day, out.Bucket, "bucket")
+	require.Equal(t, 3, out.Totals.Requests, "total requests")
+	require.Equal(t, 70, out.Totals.TokensTotal, "total tokens")
+	require.Len(t, out.Points, 1, "points")
+	require.Equal(t, "m", out.Points[0].Model, "point model")
+	require.True(t, out.From.Equal(now.Add(-7*24*time.Hour)), "from = %v, want %v", out.From, now.Add(-7*24*time.Hour))
+	require.True(t, out.To.Equal(now), "to = %v, want %v", out.To, now)
 
 	want := api.CostSummary{
 		TotalUSD: 3.75, InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5,
 		CacheSavingsUSD: -0.75, UnpricedTokens: 9,
 	}
-	if out.Totals.Cost != want || out.Points[0].CostUSD != 3.75 {
-		t.Fatalf("cost = %+v, point cost %v; want %+v and 3.75", out.Totals.Cost, out.Points[0].CostUSD, want)
-	}
+	require.Equal(t, want, out.Totals.Cost, "total cost")
+	require.Equal(t, 3.75, out.Points[0].CostUSD, "point cost")
 }
 
 func TestUsageTakesAnExplicitRangeAndRefusesABadOne(t *testing.T) {
@@ -266,9 +254,7 @@ func TestUsageTakesAnExplicitRangeAndRefusesABadOne(t *testing.T) {
 	var raw map[string]json.RawMessage
 	decodeBody(t, rec, http.StatusOK, &raw)
 
-	if string(raw["points"]) != "[]" {
-		t.Fatalf("points = %s, want [] for an empty series", raw["points"])
-	}
+	require.JSONEq(t, "[]", string(raw["points"]), "points of an empty series")
 
 	for query, field := range map[string]string{
 		"from=yesterday":                                    "from",
@@ -277,9 +263,9 @@ func TestUsageTakesAnExplicitRangeAndRefusesABadOne(t *testing.T) {
 		"from=2026-09-03T00:00:00Z&to=2026-09-02T00:00:00Z": "from",
 	} {
 		rec := env.do(http.MethodGet, "/api/me/usage?"+query, "", withCookie(env.signedIn(user)))
-		if f := apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput).Field; f == nil || *f != field {
-			t.Fatalf("%s: field = %v, want %s", query, f, field)
-		}
+		f := apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput).Field
+		require.NotNil(t, f, "%s: no field", query)
+		require.Equal(t, field, *f, "%s: field", query)
 	}
 }
 
@@ -297,9 +283,7 @@ func TestConnectNamesThePublicAPI(t *testing.T) {
 	var out api.ConnectInfo
 	decodeBody(t, e.do(http.MethodGet, "/api/connect", "", withCookie(e.signedIn(person("p@example.com")))), http.StatusOK, &out)
 
-	if out.ApiBaseURL != testAPIURL {
-		t.Fatalf("apiBaseURL = %q, want %q", out.ApiBaseURL, testAPIURL)
-	}
+	require.Equal(t, testAPIURL, out.ApiBaseURL, "apiBaseURL")
 }
 
 // The caller's models follow the policy the session loads with each request: an
@@ -336,16 +320,13 @@ func TestMyModelsFollowTheCurrentPolicy(t *testing.T) {
 
 		if tc.rule != "" {
 			rule, err := access.ParseRule(tc.rule)
-			if err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, err, "ParseRule %q", tc.rule)
 
 			current.Policy = access.Policy{rule}
 		}
 
 		rec := env.do(http.MethodGet, "/api/me/models", "", cookie)
-		if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != tc.want {
-			t.Errorf("policy %q: GET /api/me/models = %d %s, want 200 %s", tc.rule, rec.Code, rec.Body, tc.want)
-		}
+		assert.Equal(t, http.StatusOK, rec.Code, "policy %q: GET /api/me/models status; body %s", tc.rule, rec.Body)
+		assert.JSONEq(t, tc.want, rec.Body.String(), "policy %q: GET /api/me/models", tc.rule)
 	}
 }

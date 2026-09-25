@@ -1,15 +1,17 @@
 package gateway
 
 import (
-	"errors"
 	"net"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // registryCatalog is a Catalog over upstream's global model registry, the one
@@ -18,9 +20,7 @@ func registryCatalog(t *testing.T) *Catalog {
 	t.Helper()
 
 	c, err := newCatalog(cliproxy.GlobalModelRegistry())
-	if err != nil {
-		t.Fatalf("newCatalog: %v", err)
-	}
+	require.NoError(t, err, "newCatalog")
 
 	return c
 }
@@ -39,7 +39,7 @@ func awaitProviders(t *testing.T, catalog *Catalog, model string, want []string)
 		}
 
 		if time.Now().After(deadline) {
-			t.Fatalf("ProvidersFor(%q) = %v, want %v", model, got, want)
+			require.Failf(t, "providers never matched", "ProvidersFor(%q) = %v, want %v", model, got, want)
 		}
 
 		time.Sleep(5 * time.Millisecond)
@@ -69,25 +69,17 @@ func TestCatalogReadsTheRegistryAsItIs(t *testing.T) {
 
 	registerClient(t, "catalog-client-compat", "openai-compatible-acme", model)
 
-	if got := catalog.ProvidersFor(model); !slices.Equal(got, []string{"acme"}) {
-		t.Fatalf("ProvidersFor(%q) = %v, want [acme]", model, got)
-	}
+	require.Equal(t, []string{"acme"}, catalog.ProvidersFor(model), "ProvidersFor(%q)", model)
 
 	registerClient(t, "catalog-client-codex", "codex", model, "other-"+model)
 
-	if got := catalog.ProvidersFor(model); !slices.Equal(got, []string{"acme", "chatgpt"}) {
-		t.Fatalf("ProvidersFor(%q) = %v, want [acme chatgpt]", model, got)
-	}
+	require.Equal(t, []string{"acme", "chatgpt"}, catalog.ProvidersFor(model), "ProvidersFor(%q)", model)
 
 	cliproxy.GlobalModelRegistry().UnregisterClient("catalog-client-compat")
 
-	if got := catalog.ProvidersFor(model); !slices.Equal(got, []string{"chatgpt"}) {
-		t.Fatalf("ProvidersFor(%q) = %v after acme left, want [chatgpt]", model, got)
-	}
+	require.Equal(t, []string{"chatgpt"}, catalog.ProvidersFor(model), "ProvidersFor(%q) after acme left", model)
 	// Upstream looks a name up in lower case when it finds nothing as given.
-	if got := catalog.ProvidersFor("OTHER-" + model); !slices.Equal(got, []string{"chatgpt"}) {
-		t.Fatalf("ProvidersFor in upper case = %v, want [chatgpt]", got)
-	}
+	require.Equal(t, []string{"chatgpt"}, catalog.ProvidersFor("OTHER-"+model), "ProvidersFor in upper case")
 }
 
 // TestKnownModelNamesOnlyServedModels: spelling variants of a served model
@@ -99,14 +91,13 @@ func TestKnownModelNamesOnlyServedModels(t *testing.T) {
 	registerClient(t, "known-model-client", "codex", model)
 
 	for in, want := range map[string]string{model: model, "Known-Model-SERVED": model} {
-		if got, ok := catalog.KnownModel(in); !ok || got != want {
-			t.Fatalf("KnownModel(%q) = %q, %t; want %q, true", in, got, ok, want)
-		}
+		got, ok := catalog.KnownModel(in)
+		require.True(t, ok, "KnownModel(%q) known", in)
+		require.Equal(t, want, got, "KnownModel(%q)", in)
 	}
 
-	if got, ok := catalog.KnownModel("known-model-never-served"); ok {
-		t.Fatalf("KnownModel of an unserved model = %q, true; want false", got)
-	}
+	got, ok := catalog.KnownModel("known-model-never-served")
+	require.False(t, ok, "KnownModel of an unserved model = %q", got)
 }
 
 func TestPolicyProviderNames(t *testing.T) {
@@ -119,9 +110,7 @@ func TestPolicyProviderNames(t *testing.T) {
 		// provider it stands for is still checked.
 		"openai-compatible-": "openai-compatible-",
 	} {
-		if got := policyProvider(key); got != want {
-			t.Errorf("policyProvider(%q) = %q, want %q", key, got, want)
-		}
+		assert.Equal(t, want, policyProvider(key), "policyProvider(%q)", key)
 	}
 }
 
@@ -134,13 +123,14 @@ func TestCompatNamesOfBuiltinProvidersAreRefused(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 
 	for _, name := range []string{"claude", "Claude", "chatgpt", "codex", "openai-compatible-gemini", "", "openai-compatibility", "openai-compatible-", " OpenAI-Compatible- "} {
-		cfg := &cliproxyconfig.Config{AuthDir: t.TempDir()}
-		cfg.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{{Name: name, BaseURL: "http://" + net.JoinHostPort("", "1")}}
+		// A subtest per name: a wrong answer for one still checks the others.
+		t.Run(strconv.Quote(name), func(t *testing.T) {
+			cfg := &cliproxyconfig.Config{AuthDir: t.TempDir()}
+			cfg.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{{Name: name, BaseURL: "http://" + net.JoinHostPort("", "1")}}
 
-		_, err := New(Params{Config: cfg, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver})
-		if !errors.Is(err, ErrCompatName) {
-			t.Errorf("New with an openai-compatibility entry named %q = %v, want ErrCompatName", name, err)
-		}
+			_, err := New(Params{Config: cfg, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"), Resolver: wireResolver})
+			require.ErrorIs(t, err, ErrCompatName, "New with an openai-compatibility entry named %q", name)
+		})
 	}
 
 	srv := start(t, &cliproxyconfig.Config{})
@@ -148,13 +138,10 @@ func TestCompatNamesOfBuiltinProvidersAreRefused(t *testing.T) {
 	pushed := srv.emptyPush()
 
 	pushed.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{{Name: "claude", BaseURL: "http://" + net.JoinHostPort("", "1")}}
-	if err := srv.gateway.PushConfig(pushed); !errors.Is(err, ErrCompatName) {
-		t.Fatalf("PushConfig with an entry named claude = %v, want ErrCompatName", err)
-	}
+	err := srv.gateway.PushConfig(pushed)
+	require.ErrorIs(t, err, ErrCompatName, "PushConfig with an entry named claude")
 
-	if srv.gateway.CurrentConfig() != before {
-		t.Fatal("CurrentConfig reports the refused configuration")
-	}
+	require.Same(t, before, srv.gateway.CurrentConfig(), "CurrentConfig reports the refused configuration")
 }
 
 // TestCatalogListsModelsByProvider: Models groups what the registry serves
@@ -166,17 +153,12 @@ func TestCatalogListsModelsByProvider(t *testing.T) {
 	registerClient(t, "models-client-compat", "openai-compatible-acme", "models-shared")
 
 	got := c.Models()
-	if !slices.Contains(got["claude"], "models-claude-only") || !slices.Contains(got["claude"], "models-shared") {
-		t.Errorf("claude serves %v, want both of its models", got["claude"])
-	}
-
-	if !slices.Contains(got["acme"], "models-shared") || slices.Contains(got["acme"], "models-claude-only") {
-		t.Errorf("acme serves %v, want only the shared model", got["acme"])
-	}
+	assert.Contains(t, got["claude"], "models-claude-only", "claude serves both of its models")
+	assert.Contains(t, got["claude"], "models-shared", "claude serves both of its models")
+	assert.Contains(t, got["acme"], "models-shared", "acme serves only the shared model")
+	assert.NotContains(t, got["acme"], "models-claude-only", "acme serves only the shared model")
 
 	for provider, models := range got {
-		if !slices.IsSorted(models) {
-			t.Errorf("%s's models %v are not sorted", provider, models)
-		}
+		assert.True(t, slices.IsSorted(models), "%s's models %v are not sorted", provider, models)
 	}
 }

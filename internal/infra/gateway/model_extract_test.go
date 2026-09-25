@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // extractOn runs source the way the gate does — inside a handler on the route
@@ -27,12 +29,10 @@ func extractOn(t *testing.T, source modelSource, pattern string, req *http.Reque
 	engine := gin.New()
 	engine.Handle(req.Method, pattern, func(ginCtx *gin.Context) {
 		raw, err := io.ReadAll(ginCtx.Request.Body)
-		if err != nil {
-			t.Fatalf("read body: %v", err)
+		if assert.NoError(t, err, "read body") {
+			ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
+			model, ok = source(ginCtx, raw)
 		}
-
-		ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
-		model, ok = source(ginCtx, raw)
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -43,9 +43,7 @@ func zstdCompress(t *testing.T, plain string) string {
 	t.Helper()
 
 	enc, err := zstd.NewWriter(nil)
-	if err != nil {
-		t.Fatalf("zstd writer: %v", err)
-	}
+	require.NoError(t, err, "zstd writer")
 
 	defer func() { _ = enc.Close() }()
 
@@ -112,9 +110,8 @@ func TestModelIsReadWhereTheHandlerReadsIt(t *testing.T) {
 			}
 
 			model, ok := extractOn(t, tc.source, tc.pattern, req)
-			if !ok || model != tc.want {
-				t.Fatalf("model = %q, %t; want %q", model, ok, tc.want)
-			}
+			require.True(t, ok, "no model read; want %q", tc.want)
+			require.Equal(t, tc.want, model, "model")
 		})
 	}
 }
@@ -153,9 +150,8 @@ func TestUnreadableRequestsNameNoModel(t *testing.T) {
 				req.Header.Set("Content-Type", "text/plain")
 			}
 
-			if model, ok := extractOn(t, tc.source, tc.pattern, req); ok {
-				t.Fatalf("model = %q, want none", model)
-			}
+			model, ok := extractOn(t, tc.source, tc.pattern, req)
+			require.False(t, ok, "model = %q, want none", model)
 		})
 	}
 }
@@ -169,21 +165,15 @@ func imageForm(t *testing.T, fields [][2]string) (string, string) {
 
 	mw := multipart.NewWriter(&buf)
 	for _, f := range fields {
-		if err := mw.WriteField(f[0], f[1]); err != nil {
-			t.Fatalf("write field: %v", err)
-		}
+		require.NoError(t, mw.WriteField(f[0], f[1]), "write field")
 	}
 
 	part, err := mw.CreateFormFile("image", "cat.png")
-	if err != nil {
-		t.Fatalf("create file: %v", err)
-	}
+	require.NoError(t, err, "create file")
 
 	_, _ = part.Write([]byte("png bytes"))
 
-	if err := mw.Close(); err != nil {
-		t.Fatalf("close form: %v", err)
-	}
+	require.NoError(t, mw.Close(), "close form")
 
 	return buf.String(), mw.FormDataContentType()
 }
@@ -203,25 +193,25 @@ func TestImageEditFormModel(t *testing.T) {
 		ok    bool
 	)
 
-	engine.POST("/v1/images/edits", func(c *gin.Context) {
-		model, ok = imageEditModel(c, nil)
+	engine.POST("/v1/images/edits", func(ginCtx *gin.Context) {
+		model, ok = imageEditModel(ginCtx, nil)
 
-		form, err := c.MultipartForm()
-		if err != nil || len(form.File["image"]) != 1 || c.PostForm("prompt") != "a cat" {
-			t.Errorf("the handler's form after extraction = %v, %v; want the image and the prompt", form, err)
+		form, err := ginCtx.MultipartForm()
+		if assert.NoError(t, err, "the handler's form after extraction") {
+			assert.Len(t, form.File["image"], 1, "the handler's form after extraction, want the image")
 		}
+
+		assert.Equal(t, "a cat", ginCtx.PostForm("prompt"), "the handler's form after extraction, want the prompt")
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
 
-	if !ok || model != "grok-imagine-image" {
-		t.Fatalf("model = %q, %t; want grok-imagine-image", model, ok)
-	}
+	require.True(t, ok, "no model read; want grok-imagine-image")
+	require.Equal(t, "grok-imagine-image", model, "model")
 
 	body, contentType = imageForm(t, [][2]string{{"model", "gpt-image-2"}, {"Model", "grok-imagine-image"}})
 	req = httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/images/edits", strings.NewReader(body))
 	req.Header.Set("Content-Type", contentType)
 
-	if model, ok := extractOn(t, imageEditModel, "/v1/images/edits", req); ok {
-		t.Fatalf("a form naming model twice gave %q, want none", model)
-	}
+	model, ok = extractOn(t, imageEditModel, "/v1/images/edits", req)
+	require.False(t, ok, "a form naming model twice gave %q, want none", model)
 }

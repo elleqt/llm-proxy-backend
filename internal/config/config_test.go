@@ -1,20 +1,22 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"maps"
-	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("LLMPROXY_DATABASE_URL", "")
 
-	if _, err := Load(); err == nil {
-		t.Fatal("expected error when LLMPROXY_DATABASE_URL is empty")
-	}
+	_, err := Load()
+	require.Error(t, err, "expected error when LLMPROXY_DATABASE_URL is empty")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -26,29 +28,15 @@ func TestLoadDefaults(t *testing.T) {
 	t.Setenv("LLMPROXY_DATABASE_URL", "postgres://u:p@localhost:5432/db")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if cfg.ListenAddr != ":8080" {
-		t.Fatalf("ListenAddr = %q, want \":8080\"", cfg.ListenAddr)
-	}
+	require.Equal(t, ":8080", cfg.ListenAddr, "ListenAddr")
 	// Metrics stay off every non-loopback interface unless the operator says so.
-	if cfg.MetricsAddr != "127.0.0.1:9090" {
-		t.Fatalf("MetricsAddr = %q, want 127.0.0.1:9090", cfg.MetricsAddr)
-	}
-
-	if cfg.RuntimeDir != "/var/lib/llmproxy/runtime" {
-		t.Fatalf("RuntimeDir = %q", cfg.RuntimeDir)
-	}
-
-	if cfg.AuthDir != "/var/lib/llmproxy/auths" {
-		t.Fatalf("AuthDir = %q, want \"/var/lib/llmproxy/auths\"", cfg.AuthDir)
-	}
+	require.Equal(t, "127.0.0.1:9090", cfg.MetricsAddr, "MetricsAddr")
+	require.Equal(t, "/var/lib/llmproxy/runtime", cfg.RuntimeDir, "RuntimeDir")
+	require.Equal(t, "/var/lib/llmproxy/auths", cfg.AuthDir, "AuthDir")
 	// Zero would deadlock every sign-in on the semaphore.
-	if cfg.PasswordHashConcurrency < 1 {
-		t.Fatalf("PasswordHashConcurrency = %d, want a positive default", cfg.PasswordHashConcurrency)
-	}
+	require.GreaterOrEqual(t, cfg.PasswordHashConcurrency, 1, "PasswordHashConcurrency, want a positive default")
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -62,38 +50,19 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", "3")
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err)
 
-	if host, port := cfg.ListenHostPort(); host != "127.0.0.1" || port != 9191 {
-		t.Fatalf("ListenHostPort() = %q, %d; want 127.0.0.1, 9191", host, port)
-	}
-
-	if cfg.MetricsAddr != ":9292" {
-		t.Fatalf("MetricsAddr = %q, want \":9292\"", cfg.MetricsAddr)
-	}
-
-	if cfg.DatabaseURL != "postgres://user:pass@db.example.com:5432/gateway" {
-		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
-	}
-
-	if cfg.RuntimeDir != "/tmp/runtime" {
-		t.Fatalf("RuntimeDir = %q, want \"/tmp/runtime\"", cfg.RuntimeDir)
-	}
-
-	if cfg.AuthDir != "/tmp/auths" {
-		t.Fatalf("AuthDir = %q, want \"/tmp/auths\"", cfg.AuthDir)
-	}
+	host, port := cfg.ListenHostPort()
+	require.Equal(t, "127.0.0.1", host, "ListenHostPort() host")
+	require.Equal(t, 9191, port, "ListenHostPort() port")
+	require.Equal(t, ":9292", cfg.MetricsAddr, "MetricsAddr")
+	require.Equal(t, "postgres://user:pass@db.example.com:5432/gateway", cfg.DatabaseURL, "DatabaseURL")
+	require.Equal(t, "/tmp/runtime", cfg.RuntimeDir, "RuntimeDir")
+	require.Equal(t, "/tmp/auths", cfg.AuthDir, "AuthDir")
 	// The name is fixed by the docker-compose files; reading any other
 	// spelling silently disables the bootstrap on a fresh install.
-	if cfg.BootstrapAdminEmail != "admin@example.com" {
-		t.Fatalf("BootstrapAdminEmail = %q, want \"admin@example.com\"", cfg.BootstrapAdminEmail)
-	}
-
-	if cfg.PasswordHashConcurrency != 3 {
-		t.Fatalf("PasswordHashConcurrency = %d, want 3", cfg.PasswordHashConcurrency)
-	}
+	require.Equal(t, "admin@example.com", cfg.BootstrapAdminEmail, "BootstrapAdminEmail")
+	require.Equal(t, 3, cfg.PasswordHashConcurrency, "PasswordHashConcurrency")
 }
 
 // A non-positive capacity would deadlock every sign-in; refusing to start says so.
@@ -104,9 +73,8 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 	for _, raw := range []string{"0", "-1", "many"} {
 		t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", raw)
 
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_PASSWORD_HASH_CONCURRENCY") {
-			t.Fatalf("%q: err = %v, want one naming LLMPROXY_PASSWORD_HASH_CONCURRENCY", raw, err)
-		}
+		_, err := Load()
+		require.ErrorContains(t, err, "LLMPROXY_PASSWORD_HASH_CONCURRENCY", "%q", raw)
 	}
 }
 
@@ -117,26 +85,20 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 func TestLoadDatabaseReadsOnlyWhatTheDatabaseNeeds(t *testing.T) {
 	setOIDCEnv(t, map[string]string{"LLMPROXY_OIDC_CLIENT_SECRET": "", "LLMPROXY_LISTEN_ADDR": "8080"})
 
-	if _, err := Load(); err == nil {
-		t.Fatal("Load accepted the broken server settings this test relies on")
-	}
+	_, err := Load()
+	require.Error(t, err, "Load accepted the broken server settings this test relies on")
 
 	t.Setenv("LLMPROXY_PASSWORD_HASH_CONCURRENCY", "3")
 
 	db, err := LoadDatabase()
-	if err != nil {
-		t.Fatalf("LoadDatabase: %v", err)
-	}
-
-	if db.URL != "postgres://u:p@localhost:5432/db" || db.PasswordHashConcurrency != 3 {
-		t.Fatalf("LoadDatabase = %+v", db)
-	}
+	require.NoError(t, err, "LoadDatabase")
+	require.Equal(t, "postgres://u:p@localhost:5432/db", db.URL, "LoadDatabase URL")
+	require.Equal(t, 3, db.PasswordHashConcurrency, "LoadDatabase PasswordHashConcurrency")
 
 	t.Setenv("LLMPROXY_DATABASE_URL", "")
 
-	if _, err := LoadDatabase(); err == nil {
-		t.Fatal("LoadDatabase accepted no LLMPROXY_DATABASE_URL")
-	}
+	_, err = LoadDatabase()
+	require.Error(t, err, "LoadDatabase accepted no LLMPROXY_DATABASE_URL")
 }
 
 // reset-password warns when the password it issues cannot be used: the server takes
@@ -156,9 +118,8 @@ func TestLoadDatabaseTellsWhetherTheServerTakesPasswords(t *testing.T) {
 		setWebEnv(t, map[string]string{"LLMPROXY_WEB_ADDR": tc.webAddr, "LLMPROXY_LOCAL_LOGIN": tc.localLogin})
 
 		db, err := LoadDatabase()
-		if err != nil || db.LocalLogin != tc.want {
-			t.Fatalf("web %q, local login %q: LocalLogin = %v, %v; want %v", tc.webAddr, tc.localLogin, db.LocalLogin, err, tc.want)
-		}
+		require.NoError(t, err, "web %q, local login %q", tc.webAddr, tc.localLogin)
+		require.Equal(t, tc.want, db.LocalLogin, "web %q, local login %q: LocalLogin", tc.webAddr, tc.localLogin)
 	}
 }
 
@@ -178,17 +139,19 @@ func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {
 		return cfg.PriceCatalog, err
 	}
 
-	if got, err := load("", ""); err != nil || !got.Enabled() || got.URL != DefaultPriceCatalogURL || got.Interval != 6*time.Hour {
-		t.Fatalf("defaults = %+v, %v; want the default URL every 6h", got, err)
-	}
+	got, err := load("", "")
+	require.NoError(t, err, "defaults")
+	require.True(t, got.Enabled(), "defaults: want enabled")
+	require.Equal(t, DefaultPriceCatalogURL, got.URL, "defaults: want the default URL")
+	require.Equal(t, 6*time.Hour, got.Interval, "defaults: want every 6h")
 
-	if got, err := load("http://catalog.example.com/models.json", "5m"); err != nil || got.Interval != 5*time.Minute {
-		t.Fatalf("5m = %+v, %v; want accepted", got, err)
-	}
+	got, err = load("http://catalog.example.com/models.json", "5m")
+	require.NoError(t, err, "5m: want accepted")
+	require.Equal(t, 5*time.Minute, got.Interval, "5m: want accepted")
 
-	if got, err := load(PriceCatalogOff, "nonsense"); err != nil || got.Enabled() {
-		t.Fatalf("off = %+v, %v; want disabled, the interval ignored", got, err)
-	}
+	got, err = load(PriceCatalogOff, "nonsense")
+	require.NoError(t, err, "off: want the interval ignored")
+	require.False(t, got.Enabled(), "off: want disabled")
 
 	for _, tc := range []struct{ url, interval, name string }{
 		{"", "4m59s", "LLMPROXY_PRICES_CATALOG_INTERVAL"},
@@ -196,9 +159,8 @@ func TestPriceCatalogIsOnUnlessOffAndItsIntervalIsBounded(t *testing.T) {
 		{"catalog.example.com/models.json", "", "LLMPROXY_PRICES_CATALOG_URL"},
 		{"ftp://catalog.example.com/models.json", "", "LLMPROXY_PRICES_CATALOG_URL"},
 	} {
-		if _, err := load(tc.url, tc.interval); err == nil || !strings.Contains(err.Error(), tc.name) {
-			t.Errorf("%q every %q: err = %v, want one naming %s", tc.url, tc.interval, err, tc.name)
-		}
+		_, err := load(tc.url, tc.interval)
+		assert.ErrorContains(t, err, tc.name, "%q every %q", tc.url, tc.interval)
 	}
 }
 
@@ -212,21 +174,15 @@ func TestModelCatalogUpdatesAreOnUnlessTurnedOff(t *testing.T) {
 		t.Setenv("LLMPROXY_MODEL_CATALOG_UPDATES", raw)
 
 		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("%q: %v", raw, err)
-		}
-
-		if cfg.ModelCatalogUpdates != want {
-			t.Fatalf("%q: ModelCatalogUpdates = %v, want %v", raw, cfg.ModelCatalogUpdates, want)
-		}
+		require.NoError(t, err, "%q", raw)
+		require.Equal(t, want, cfg.ModelCatalogUpdates, "%q: ModelCatalogUpdates", raw)
 	}
 
 	for _, raw := range []string{"false", "OFF", "no"} {
 		t.Setenv("LLMPROXY_MODEL_CATALOG_UPDATES", raw)
 
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_MODEL_CATALOG_UPDATES") {
-			t.Fatalf("%q: err = %v, want one naming LLMPROXY_MODEL_CATALOG_UPDATES", raw, err)
-		}
+		_, err := Load()
+		require.ErrorContains(t, err, "LLMPROXY_MODEL_CATALOG_UPDATES", "%q", raw)
 	}
 }
 
@@ -240,21 +196,15 @@ func TestLogFormatIsTextUnlessJSON(t *testing.T) {
 		t.Setenv("LLMPROXY_LOG_FORMAT", raw)
 
 		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("%q: %v", raw, err)
-		}
-
-		if cfg.LogFormat != want {
-			t.Fatalf("%q: LogFormat = %q, want %q", raw, cfg.LogFormat, want)
-		}
+		require.NoError(t, err, "%q", raw)
+		require.Equal(t, want, cfg.LogFormat, "%q: LogFormat", raw)
 	}
 
 	for _, raw := range []string{"JSON", "logfmt", "yaml"} {
 		t.Setenv("LLMPROXY_LOG_FORMAT", raw)
 
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_LOG_FORMAT") {
-			t.Fatalf("%q: err = %v, want one naming LLMPROXY_LOG_FORMAT", raw, err)
-		}
+		_, err := Load()
+		require.ErrorContains(t, err, "LLMPROXY_LOG_FORMAT", "%q", raw)
 	}
 }
 
@@ -265,9 +215,8 @@ func TestLoadRejectsAMalformedListenAddress(t *testing.T) {
 		for _, bad := range []string{"8080", ":http", ":0", ":70000", "::1:8080"} {
 			setWebEnv(t, map[string]string{name: bad})
 
-			if _, err := Load(); err == nil || !strings.Contains(err.Error(), name) {
-				t.Fatalf("%s=%q: err = %v, want one naming %s", name, bad, err, name)
-			}
+			_, err := Load()
+			require.ErrorContains(t, err, name, "%s=%q", name, bad)
 		}
 	}
 }
@@ -279,13 +228,11 @@ func TestAnIPv6ListenAddressReachesUpstreamBracketed(t *testing.T) {
 	setWebEnv(t, map[string]string{"LLMPROXY_LISTEN_ADDR": "[::1]:9191"})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, err, "Load")
 
-	if host, port := cfg.ListenHostPort(); host != "[::1]" || port != 9191 {
-		t.Fatalf("ListenHostPort() = %q, %d; want [::1], 9191", host, port)
-	}
+	host, port := cfg.ListenHostPort()
+	require.Equal(t, "[::1]", host, "ListenHostPort() host")
+	require.Equal(t, 9191, port, "ListenHostPort() port")
 }
 
 const testSecret = "s3cret-client-value"
@@ -327,9 +274,7 @@ func TestOIDCEnabledButIncompleteNamesTheMissingVariable(t *testing.T) {
 			setOIDCEnv(t, map[string]string{name: ""})
 
 			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), name) {
-				t.Fatalf("err = %v, want an error naming %s", err, name)
-			}
+			require.ErrorContains(t, err, name)
 		})
 	}
 }
@@ -343,13 +288,8 @@ func TestOIDCDisabledIgnoresTheOtherVariables(t *testing.T) {
 	})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.OIDC.Enabled() {
-		t.Fatalf("OIDC = %+v, want disabled", cfg.OIDC)
-	}
+	require.NoError(t, err, "Load")
+	require.False(t, cfg.OIDC.Enabled(), "OIDC = %+v, want disabled", cfg.OIDC)
 }
 
 func TestOIDCParsesTheDocumentedExample(t *testing.T) {
@@ -361,31 +301,18 @@ func TestOIDCParsesTheDocumentedExample(t *testing.T) {
 	})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, err, "Load")
 
 	oidc := cfg.OIDC
 
-	want := map[string][]string{
+	require.Equal(t, map[string][]string{
 		"/team-a":   {"claude:*"},
 		"/everyone": {"*:*"},
-	}
-	if !maps.EqualFunc(oidc.GroupPolicy, want, slices.Equal[[]string]) {
-		t.Fatalf("GroupPolicy = %v, want %v", oidc.GroupPolicy, want)
-	}
-
-	if want := []string{"claude:claude-sonnet-5", "openai:gpt-*"}; !slices.Equal(oidc.DefaultPolicy, want) {
-		t.Fatalf("DefaultPolicy = %q, want %q", oidc.DefaultPolicy, want)
-	}
-
-	if !oidc.AllowSignUp || oidc.GroupsClaim != "groups" {
-		t.Fatalf("AllowSignUp = %v, GroupsClaim = %q; want true and the default claim", oidc.AllowSignUp, oidc.GroupsClaim)
-	}
-
-	if oidc.DisplayName != "Example SSO" {
-		t.Fatalf("DisplayName = %q, want Example SSO", oidc.DisplayName)
-	}
+	}, oidc.GroupPolicy, "GroupPolicy")
+	require.Equal(t, []string{"claude:claude-sonnet-5", "openai:gpt-*"}, oidc.DefaultPolicy, "DefaultPolicy")
+	require.True(t, oidc.AllowSignUp, "AllowSignUp")
+	require.Equal(t, "groups", oidc.GroupsClaim, "GroupsClaim, want the default claim")
+	require.Equal(t, "Example SSO", oidc.DisplayName, "DisplayName")
 }
 
 // An operator who pastes the secret into the wrong variable gets an error that names
@@ -400,13 +327,8 @@ func TestOIDCErrorsNeverQuoteTheSecret(t *testing.T) {
 			setOIDCEnv(t, map[string]string{name: testSecret})
 
 			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), name) {
-				t.Fatalf("err = %v, want an error naming %s", err, name)
-			}
-
-			if strings.Contains(err.Error(), testSecret) {
-				t.Fatalf("error quotes the secret: %v", err)
-			}
+			require.ErrorContains(t, err, name)
+			require.NotContains(t, err.Error(), testSecret, "error quotes the secret")
 		})
 	}
 }
@@ -440,17 +362,11 @@ func TestWebDefaultsToALoopbackListenerWithSecureCookies(t *testing.T) {
 	setWebEnv(t, map[string]string{"LLMPROXY_SESSION_KEY": ""})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Web.Addr != "127.0.0.1:8081" || !cfg.Web.CookieSecure {
-		t.Fatalf("Web.Addr = %q, CookieSecure = %t; want 127.0.0.1:8081 and true", cfg.Web.Addr, cfg.Web.CookieSecure)
-	}
+	require.NoError(t, err, "Load")
+	require.Equal(t, "127.0.0.1:8081", cfg.Web.Addr, "Web.Addr")
+	require.True(t, cfg.Web.CookieSecure, "CookieSecure")
 	// Without OIDC nothing is sealed, so no key is demanded.
-	if cfg.Web.SessionKey != nil {
-		t.Fatal("a session key appeared from nowhere")
-	}
+	require.Nil(t, cfg.Web.SessionKey, "a session key appeared from nowhere")
 }
 
 // The contract promises apiBaseURL without a trailing slash; clients append paths.
@@ -458,20 +374,14 @@ func TestWebPublicAPIURLIsRequiredAndLosesItsTrailingSlash(t *testing.T) {
 	setWebEnv(t, map[string]string{"LLMPROXY_PUBLIC_API_URL": "https://api.example.com/llm/"})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Web.PublicAPIURL != "https://api.example.com/llm" {
-		t.Fatalf("PublicAPIURL = %q, want https://api.example.com/llm", cfg.Web.PublicAPIURL)
-	}
+	require.NoError(t, err, "Load")
+	require.Equal(t, "https://api.example.com/llm", cfg.Web.PublicAPIURL, "PublicAPIURL")
 
 	for _, bad := range []string{"", "api.example.com", "ftp://api.example.com", "https://u:pw@api.example.com"} {
 		setWebEnv(t, map[string]string{"LLMPROXY_PUBLIC_API_URL": bad})
 
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_PUBLIC_API_URL") {
-			t.Fatalf("%q: err = %v, want one naming LLMPROXY_PUBLIC_API_URL", bad, err)
-		}
+		_, err := Load()
+		require.ErrorContains(t, err, "LLMPROXY_PUBLIC_API_URL", "%q", bad)
 	}
 }
 
@@ -483,32 +393,21 @@ func TestWebOffIgnoresTheOtherVariables(t *testing.T) {
 	})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Web.Enabled() {
-		t.Fatalf("Web.Addr = %q, want the listener off", cfg.Web.Addr)
-	}
+	require.NoError(t, err, "Load")
+	require.False(t, cfg.Web.Enabled(), "Web.Addr = %q, want the listener off", cfg.Web.Addr)
 }
 
 func TestWebCookieSecureCanBeTurnedOffOnlyExplicitly(t *testing.T) {
 	setWebEnv(t, map[string]string{"LLMPROXY_COOKIE_SECURE": "false"})
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if cfg.Web.CookieSecure {
-		t.Fatal("CookieSecure = true, want false")
-	}
+	require.NoError(t, err, "Load")
+	require.False(t, cfg.Web.CookieSecure, "CookieSecure")
 
 	setWebEnv(t, map[string]string{"LLMPROXY_COOKIE_SECURE": "no thanks"})
 
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_COOKIE_SECURE") {
-		t.Fatalf("err = %v, want one naming LLMPROXY_COOKIE_SECURE", err)
-	}
+	_, err = Load()
+	require.ErrorContains(t, err, "LLMPROXY_COOKIE_SECURE")
 }
 
 // Local sign-in is on unless turned off explicitly, and a value that is not a
@@ -518,20 +417,14 @@ func TestWebLocalLoginIsOnUnlessTurnedOff(t *testing.T) {
 		setWebEnv(t, map[string]string{"LLMPROXY_LOCAL_LOGIN": raw})
 
 		cfg, err := Load()
-		if err != nil {
-			t.Fatalf("%q: Load: %v", raw, err)
-		}
-
-		if cfg.Web.LocalLogin != want {
-			t.Fatalf("LLMPROXY_LOCAL_LOGIN=%q: LocalLogin = %t, want %t", raw, cfg.Web.LocalLogin, want)
-		}
+		require.NoError(t, err, "%q: Load", raw)
+		require.Equal(t, want, cfg.Web.LocalLogin, "LLMPROXY_LOCAL_LOGIN=%q: LocalLogin", raw)
 	}
 
 	setWebEnv(t, map[string]string{"LLMPROXY_LOCAL_LOGIN": "off"})
 
-	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_LOCAL_LOGIN") {
-		t.Fatalf("err = %v, want one naming LLMPROXY_LOCAL_LOGIN", err)
-	}
+	_, err := Load()
+	require.ErrorContains(t, err, "LLMPROXY_LOCAL_LOGIN")
 }
 
 // The key seals the OIDC challenge. OIDC without one cannot start; a short one is
@@ -546,34 +439,26 @@ func TestWebSessionKeyIsRequiredForOIDCAndNeverQuoted(t *testing.T) {
 			setOIDCEnv(t, overrides)
 
 			_, err := Load()
-			if err == nil || !strings.Contains(err.Error(), "LLMPROXY_SESSION_KEY") {
-				t.Fatalf("err = %v, want one naming LLMPROXY_SESSION_KEY", err)
-			}
-
-			if strings.Contains(err.Error(), short) {
-				t.Fatal("the error quotes the key")
-			}
+			require.ErrorContains(t, err, "LLMPROXY_SESSION_KEY")
+			// Not NotContains: its failure message would print the key.
+			quoted := strings.Contains(err.Error(), short)
+			require.False(t, quoted, "the error quotes the key")
 		})
 	}
 
 	t.Run("short without OIDC", func(t *testing.T) {
 		setWebEnv(t, map[string]string{"LLMPROXY_SESSION_KEY": short})
 
-		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LLMPROXY_SESSION_KEY") {
-			t.Fatalf("err = %v, want one naming LLMPROXY_SESSION_KEY", err)
-		}
+		_, err := Load()
+		require.ErrorContains(t, err, "LLMPROXY_SESSION_KEY")
 	})
 
 	setOIDCEnv(t, nil)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if string(cfg.Web.SessionKey) != testSessionKey {
-		t.Fatal("SessionKey is not the configured key")
-	}
+	require.NoError(t, err, "Load")
+	// Not Equal: its failure message would print the key.
+	require.True(t, bytes.Equal([]byte(testSessionKey), cfg.Web.SessionKey), "SessionKey is not the configured key")
 }
 
 // Config is the kind of value that ends up in a startup log line or a panic. The
@@ -582,13 +467,11 @@ func TestFormattingTheConfigNeverPrintsTheSessionKey(t *testing.T) {
 	setWebEnv(t, nil)
 
 	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	require.NoError(t, err, "Load")
 
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
-		if strings.Contains(fmt.Sprintf(verb, cfg), testSessionKey) {
-			t.Fatalf("formatting the config with %s prints the session key", verb)
-		}
+		// Not NotContains: its failure message would print the key.
+		printed := strings.Contains(fmt.Sprintf(verb, cfg), testSessionKey)
+		require.False(t, printed, "formatting the config with %s prints the session key", verb)
 	}
 }

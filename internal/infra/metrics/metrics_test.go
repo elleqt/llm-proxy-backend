@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"io"
-	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,6 +15,8 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type fakeClock struct{ t time.Time }
@@ -33,14 +34,11 @@ func TestObserveUsageCountsTokensByKind(t *testing.T) {
 	metricSet.ObserveUsage(ev, "alice@example.com")
 
 	for kind, want := range map[string]float64{"input": 20, "output": 40, "reasoning": 8, "cache_read": 10} {
-		if got := testutil.ToFloat64(metricSet.tokens.WithLabelValues("alice@example.com", "claude", "claude-sonnet-5", "priority", kind)); got != want {
-			t.Errorf("%s tokens = %v, want %v", kind, got, want)
-		}
+		got := testutil.ToFloat64(metricSet.tokens.WithLabelValues("alice@example.com", "claude", "claude-sonnet-5", "priority", kind))
+		assert.Equal(t, want, got, "%s tokens", kind)
 	}
 	// ToFloat64 above created no new series; cache_write was zero, so it must not exist.
-	if n := testutil.CollectAndCount(metricSet.tokens); n != 4 {
-		t.Fatalf("token series = %d, want 4 (zero-valued cache_write must not be emitted)", n)
-	}
+	require.Equal(t, 4, testutil.CollectAndCount(metricSet.tokens), "token series (zero-valued cache_write must not be emitted)")
 }
 
 func TestServiceTierIsAClosedSet(t *testing.T) {
@@ -50,14 +48,11 @@ func TestServiceTierIsAClosedSet(t *testing.T) {
 	}
 
 	for tier, want := range map[string]float64{"default": 1, "flex": 1, "auto": 1, "scale": 1, "priority": 1, "other": 2} {
-		if got := testutil.ToFloat64(metricSet.tokens.WithLabelValues("u", "codex", "gpt-6", tier, "input")); got != want {
-			t.Errorf("tokens{service_tier=%q} = %v, want %v", tier, got, want)
-		}
+		got := testutil.ToFloat64(metricSet.tokens.WithLabelValues("u", "codex", "gpt-6", tier, "input"))
+		assert.Equal(t, want, got, "tokens{service_tier=%q}", tier)
 	}
 
-	if n := testutil.CollectAndCount(metricSet.tokens); n != 6 {
-		t.Fatalf("token series = %d, want 6", n)
-	}
+	require.Equal(t, 6, testutil.CollectAndCount(metricSet.tokens), "token series")
 }
 
 func TestRequestsCountedByStatusClassAndStream(t *testing.T) {
@@ -86,14 +81,11 @@ func TestRequestsCountedByStatusClassAndStream(t *testing.T) {
 		{"false", "error", 1},
 		{"false", "ok", 1},
 	} {
-		if got := testutil.ToFloat64(metricSet.requests.WithLabelValues("svc-ci", "codex", "gpt-6", tc.stream, tc.status)); got != tc.want {
-			t.Errorf("requests{stream=%q,status=%q} = %v, want %v", tc.stream, tc.status, got, tc.want)
-		}
+		got := testutil.ToFloat64(metricSet.requests.WithLabelValues("svc-ci", "codex", "gpt-6", tc.stream, tc.status))
+		assert.Equal(t, tc.want, got, "requests{stream=%q,status=%q}", tc.stream, tc.status)
 	}
 
-	if n := testutil.CollectAndCount(metricSet.requests); n != 6 {
-		t.Fatalf("request series = %d, want 6", n)
-	}
+	require.Equal(t, 6, testutil.CollectAndCount(metricSet.requests), "request series")
 }
 
 func TestDurationsInSecondsAndTTFTOnlyWhenStreamed(t *testing.T) {
@@ -117,18 +109,20 @@ func TestDurationsInSecondsAndTTFTOnlyWhenStreamed(t *testing.T) {
 		}
 	}
 
-	if h := durations["true"]; h.GetSampleCount() != 2 || h.GetSampleSum() != 92 {
-		t.Fatalf("streamed duration count/sum = %d/%v, want 2/92", h.GetSampleCount(), h.GetSampleSum())
-	}
+	streamed := durations["true"]
+	require.Equal(t, uint64(2), streamed.GetSampleCount(), "streamed duration count")
+	require.Equal(t, 92.0, streamed.GetSampleSum(), "streamed duration sum")
 
-	if h := durations["false"]; h.GetSampleCount() != 1 || h.GetSampleSum() != 0.5 {
-		t.Fatalf("non-streamed duration count/sum = %d/%v, want 1/0.5", h.GetSampleCount(), h.GetSampleSum())
-	}
+	nonStreamed := durations["false"]
+	require.Equal(t, uint64(1), nonStreamed.GetSampleCount(), "non-streamed duration count")
+	require.Equal(t, 0.5, nonStreamed.GetSampleSum(), "non-streamed duration sum")
 
-	ttft := fams["llmproxy_ttft_seconds"].GetMetric()[0].GetHistogram()
-	if ttft.GetSampleCount() != 2 || ttft.GetSampleSum() != 2 {
-		t.Fatalf("ttft count/sum = %d/%v, want 2/2 (streamed requests only)", ttft.GetSampleCount(), ttft.GetSampleSum())
-	}
+	ttftMetrics := fams["llmproxy_ttft_seconds"].GetMetric()
+	require.NotEmpty(t, ttftMetrics, "ttft histogram")
+
+	ttft := ttftMetrics[0].GetHistogram()
+	require.Equal(t, uint64(2), ttft.GetSampleCount(), "ttft count (streamed requests only)")
+	require.Equal(t, 2.0, ttft.GetSampleSum(), "ttft sum (streamed requests only)")
 }
 
 func TestPolicyDeniedModelLabelIsTheCanonicalName(t *testing.T) {
@@ -158,27 +152,20 @@ func TestPolicyDeniedModelLabelIsTheCanonicalName(t *testing.T) {
 		{Unknown, "unknown_model", 4},
 		{"claude-sonnet-5", "other", 1},
 	} {
-		if got := testutil.ToFloat64(metricSet.policyDenied.WithLabelValues("u", tc.model, tc.reason)); got != tc.want {
-			t.Errorf("policy_denied{model=%q,reason=%q} = %v, want %v", tc.model, tc.reason, got, tc.want)
-		}
+		got := testutil.ToFloat64(metricSet.policyDenied.WithLabelValues("u", tc.model, tc.reason))
+		assert.Equal(t, tc.want, got, "policy_denied{model=%q,reason=%q}", tc.model, tc.reason)
 	}
 
-	if n := testutil.CollectAndCount(metricSet.policyDenied); n != 3 {
-		t.Fatalf("policy_denied series = %d, want 3: client strings must not create series", n)
-	}
+	require.Equal(t, 3, testutil.CollectAndCount(metricSet.policyDenied), "policy_denied series: client strings must not create series")
 }
 
 func TestPolicyDeniedWithoutPredicateNeverLabelsTheModel(t *testing.T) {
 	metricSet := New(prometheus.NewRegistry())
 	metricSet.ObservePolicyDenied("u", "claude-sonnet-5", DenyModelNotAllowed)
 
-	if got := testutil.ToFloat64(metricSet.policyDenied.WithLabelValues("u", Unknown, "model_not_allowed")); got != 1 {
-		t.Fatalf("policy_denied{model=%q} = %v, want 1", Unknown, got)
-	}
-
-	if n := testutil.CollectAndCount(metricSet.policyDenied); n != 1 {
-		t.Fatalf("policy_denied series = %d, want 1", n)
-	}
+	require.Equal(t, 1.0, testutil.ToFloat64(metricSet.policyDenied.WithLabelValues("u", Unknown, "model_not_allowed")),
+		"policy_denied{model=%q}", Unknown)
+	require.Equal(t, 1, testutil.CollectAndCount(metricSet.policyDenied), "policy_denied series")
 }
 
 // A request refused before anyone was authenticated has no owner: it is counted
@@ -187,13 +174,9 @@ func TestPolicyDeniedWithoutOwnerIsUnknown(t *testing.T) {
 	metricSet := New(prometheus.NewRegistry())
 	metricSet.ObservePolicyDenied("", "", DenyRouteNotAllowed)
 
-	if got := testutil.ToFloat64(metricSet.policyDenied.WithLabelValues(Unknown, Unknown, "route_not_allowed")); got != 1 {
-		t.Fatalf("policy_denied{user=%q} = %v, want 1", Unknown, got)
-	}
-
-	if n := testutil.CollectAndCount(metricSet.policyDenied); n != 1 {
-		t.Fatalf("policy_denied series = %d, want 1", n)
-	}
+	require.Equal(t, 1.0, testutil.ToFloat64(metricSet.policyDenied.WithLabelValues(Unknown, Unknown, "route_not_allowed")),
+		"policy_denied{user=%q}", Unknown)
+	require.Equal(t, 1, testutil.CollectAndCount(metricSet.policyDenied), "policy_denied series")
 }
 
 func TestVendorQuotaGauges(t *testing.T) {
@@ -205,49 +188,30 @@ func TestVendorQuotaGauges(t *testing.T) {
 	metricSet.ObserveVendorQuota("acct-1", "claude", "5h", 0.42, reset)
 
 	labels := []string{"acct-1", "claude", "5h"}
-	if got := testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues(labels...)); got != 0.42 {
-		t.Fatalf("quota ratio = %v, want 0.42 (ratio in, ratio out)", got)
-	}
-
-	if got := testutil.ToFloat64(metricSet.quotaReset.WithLabelValues(labels...)); got != float64(reset.Unix()) {
-		t.Fatalf("reset timestamp = %v, want %v", got, reset.Unix())
-	}
-
-	if got := testutil.ToFloat64(metricSet.quotaObserved.WithLabelValues(labels...)); got != float64(now.Unix()) {
-		t.Fatalf("observed timestamp = %v, want %v", got, now.Unix())
-	}
+	require.Equal(t, 0.42, testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues(labels...)), "quota ratio (ratio in, ratio out)")
+	require.Equal(t, float64(reset.Unix()), testutil.ToFloat64(metricSet.quotaReset.WithLabelValues(labels...)), "reset timestamp")
+	require.Equal(t, float64(now.Unix()), testutil.ToFloat64(metricSet.quotaObserved.WithLabelValues(labels...)), "observed timestamp")
 
 	// A later report without a reset time updates use and observation, keeps the reset.
 	clock.t = now.Add(time.Minute)
 
 	metricSet.ObserveVendorQuota("acct-1", "claude", "5h", 0.5, time.Time{})
 
-	if got := testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues(labels...)); got != 0.5 {
-		t.Fatalf("quota ratio = %v, want 0.5", got)
-	}
-
-	if got := testutil.ToFloat64(metricSet.quotaReset.WithLabelValues(labels...)); got != float64(reset.Unix()) {
-		t.Fatalf("reset timestamp = %v after zero resetAt, want it kept at %v", got, reset.Unix())
-	}
-
-	if got := testutil.ToFloat64(metricSet.quotaObserved.WithLabelValues(labels...)); got != float64(clock.t.Unix()) {
-		t.Fatalf("observed timestamp = %v, want %v", got, clock.t.Unix())
-	}
+	require.Equal(t, 0.5, testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues(labels...)), "quota ratio")
+	require.Equal(t, float64(reset.Unix()), testutil.ToFloat64(metricSet.quotaReset.WithLabelValues(labels...)),
+		"reset timestamp after zero resetAt must be kept")
+	require.Equal(t, float64(clock.t.Unix()), testutil.ToFloat64(metricSet.quotaObserved.WithLabelValues(labels...)), "observed timestamp")
 }
 
 func TestAccountDisabledFollowsLatestState(t *testing.T) {
 	metricSet := New(prometheus.NewRegistry())
 	metricSet.SetAccountDisabled("acct-1", "codex", true)
 
-	if got := testutil.ToFloat64(metricSet.accountDisabled.WithLabelValues("acct-1", "codex")); got != 1 {
-		t.Fatalf("disabled = %v, want 1", got)
-	}
+	require.Equal(t, 1.0, testutil.ToFloat64(metricSet.accountDisabled.WithLabelValues("acct-1", "codex")), "disabled")
 
 	metricSet.SetAccountDisabled("acct-1", "codex", false)
 
-	if got := testutil.ToFloat64(metricSet.accountDisabled.WithLabelValues("acct-1", "codex")); got != 0 {
-		t.Fatalf("disabled = %v after re-enable, want 0", got)
-	}
+	require.Zero(t, testutil.ToFloat64(metricSet.accountDisabled.WithLabelValues("acct-1", "codex")), "disabled after re-enable")
 }
 
 func TestForgetAccountDropsOnlyThatAccountsSeries(t *testing.T) {
@@ -275,14 +239,10 @@ func TestForgetAccountDropsOnlyThatAccountsSeries(t *testing.T) {
 		{"vendor_quota_reset_timestamp_seconds", metricSet.quotaReset, 2},
 		{"vendor_quota_observed_timestamp_seconds", metricSet.quotaObserved, 2},
 	} {
-		if n := testutil.CollectAndCount(tc.c); n != tc.want {
-			t.Errorf("%s series = %d after ForgetAccount, want %d", tc.name, n, tc.want)
-		}
+		assert.Equal(t, tc.want, testutil.CollectAndCount(tc.c), "%s series after ForgetAccount", tc.name)
 	}
 
-	if got := testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues("kept", "claude", "5h")); got != 0.9 {
-		t.Fatalf("kept account's quota = %v, want 0.9", got)
-	}
+	require.Equal(t, 0.9, testutil.ToFloat64(metricSet.quotaUsed.WithLabelValues("kept", "claude", "5h")), "kept account's quota")
 }
 
 func TestHandlerServesPrefixedFamilies(t *testing.T) {
@@ -307,9 +267,7 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 	body := scrape(t, metricSet)
 
 	fams, err := parser().TextToMetricFamilies(strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("handler output is not Prometheus text: %v\n%s", err, body)
-	}
+	require.NoError(t, err, "handler output is not Prometheus text:\n%s", body)
 
 	for _, name := range []string{
 		"llmproxy_tokens_total", "llmproxy_requests_total",
@@ -324,20 +282,14 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 		"llmproxy_price_catalog_checked_timestamp_seconds", "llmproxy_price_catalog_models",
 		"llmproxy_price_catalog_check_failures_total",
 	} {
-		if _, ok := fams[name]; !ok {
-			t.Errorf("family %s missing from handler output", name)
-		}
+		assert.Contains(t, fams, name, "family missing from handler output")
 	}
 
 	for name := range fams {
-		if !strings.HasPrefix(name, "llmproxy_") {
-			t.Errorf("family %s lacks the llmproxy_ prefix", name)
-		}
+		assert.True(t, strings.HasPrefix(name, "llmproxy_"), "family %s lacks the llmproxy_ prefix", name)
 	}
 
-	if !strings.Contains(body, `llmproxy_build_info{version="v1.2.3"} 1`) {
-		t.Errorf("build_info does not carry the configured version:\n%s", body)
-	}
+	assert.Contains(t, body, `llmproxy_build_info{version="v1.2.3"} 1`, "build_info does not carry the configured version")
 }
 
 func TestLabelsNeverCarryThePrincipal(t *testing.T) {
@@ -350,14 +302,10 @@ func TestLabelsNeverCarryThePrincipal(t *testing.T) {
 	}, "alice@example.com")
 
 	body := scrape(t, metricSet)
-	if !strings.Contains(body, `user="alice@example.com"`) {
-		t.Fatalf("caller-supplied user label missing:\n%s", body)
-	}
+	require.Contains(t, body, `user="alice@example.com"`, "caller-supplied user label missing")
 	// The principal upstream carries as the record's APIKey is "<userID>:<tokenID>".
 	for _, id := range []string{userID.String(), tokenID.String()} {
-		if strings.Contains(body, id) {
-			t.Fatalf("handler output contains %q:\n%s", id, body)
-		}
+		require.NotContains(t, body, id, "handler output contains the principal")
 	}
 }
 
@@ -367,14 +315,10 @@ func scrape(t *testing.T, m *Metrics) string {
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))
 
-	if rec.Code != 200 {
-		t.Fatalf("handler status = %d", rec.Code)
-	}
+	require.Equal(t, http.StatusOK, rec.Code, "handler status")
 
 	b, err := io.ReadAll(rec.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return string(b)
 }
@@ -383,9 +327,7 @@ func gather(t *testing.T, reg *prometheus.Registry) map[string]*dto.MetricFamily
 	t.Helper()
 
 	mfs, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	out := make(map[string]*dto.MetricFamily, len(mfs))
 	for _, mf := range mfs {
@@ -414,22 +356,14 @@ func TestCostIsCountedByKind(t *testing.T) {
 	metricSet.ObserveUsage(ev, "u")
 
 	for kind, want := range map[string]float64{"input": 1, "output": 2, "cache_read": 0.25, "cache_write": 4.5} {
-		if got := testutil.ToFloat64(metricSet.cost.WithLabelValues("u", "claude", "claude-sonnet-5", kind)); got != want {
-			t.Errorf("cost{kind=%s} = %v, want %v", kind, got, want)
-		}
+		assert.Equal(t, want, testutil.ToFloat64(metricSet.cost.WithLabelValues("u", "claude", "claude-sonnet-5", kind)), "cost{kind=%s}", kind)
 	}
 
-	if got := testutil.ToFloat64(metricSet.cacheSavings.WithLabelValues("u", "claude", "claude-sonnet-5")); got != 0.75 {
-		t.Errorf("cache savings = %v, want 0.75 (the positive request only)", got)
-	}
-
-	if got := testutil.ToFloat64(metricSet.cachePremium.WithLabelValues("u", "claude", "claude-sonnet-5")); got != 1 {
-		t.Errorf("cache write premium = %v, want 1 (the negative request, as a positive amount)", got)
-	}
-
-	if got := testutil.ToFloat64(metricSet.unpriced.WithLabelValues("claude", "claude-sonnet-5")); got != 40 {
-		t.Errorf("unpriced tokens = %v, want 40", got)
-	}
+	assert.Equal(t, 0.75, testutil.ToFloat64(metricSet.cacheSavings.WithLabelValues("u", "claude", "claude-sonnet-5")),
+		"cache savings (the positive request only)")
+	assert.Equal(t, 1.0, testutil.ToFloat64(metricSet.cachePremium.WithLabelValues("u", "claude", "claude-sonnet-5")),
+		"cache write premium (the negative request, as a positive amount)")
+	assert.Equal(t, 40.0, testutil.ToFloat64(metricSet.unpriced.WithLabelValues("claude", "claude-sonnet-5")), "unpriced tokens")
 }
 
 // The burned counter counts rises above each window's high-water mark.
@@ -446,9 +380,7 @@ func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
 			metricSet.ObserveVendorQuota("a", "claude", "5h", r, reset)
 		}
 
-		if got := burned(metricSet, "a", "5h"); math.Abs(got-0.06) > 1e-12 {
-			t.Fatalf("burned = %v, want 0.06", got)
-		}
+		require.InDelta(t, 0.06, burned(metricSet, "a", "5h"), 1e-12, "burned")
 	})
 
 	t.Run("the first reading of a new window counts from zero", func(t *testing.T) {
@@ -462,9 +394,7 @@ func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
 		metricSet.ObserveVendorQuota("a", "claude", "5h", 0.8, reset)
 		metricSet.ObserveVendorQuota("a", "claude", "5h", 0.95, next)
 
-		if got := burned(metricSet, "a", "5h"); math.Abs(got-(0.25+0.9+0.05)) > 1e-12 {
-			t.Fatalf("burned = %v, want 0.25 + 0.9 + 0.05", got)
-		}
+		require.InDelta(t, 0.25+0.9+0.05, burned(metricSet, "a", "5h"), 1e-12, "burned")
 	})
 
 	t.Run("a late reading of the previous window counts nothing", func(t *testing.T) {
@@ -475,9 +405,7 @@ func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
 		metricSet.ObserveVendorQuota("a", "claude", "5h", 0.8, reset) // late, old window
 		metricSet.ObserveVendorQuota("a", "claude", "5h", 0.15, next) // +0.05
 
-		if got := burned(metricSet, "a", "5h"); math.Abs(got-0.15) > 1e-12 {
-			t.Fatalf("burned = %v, want 0.1 + 0.05", got)
-		}
+		require.InDelta(t, 0.1+0.05, burned(metricSet, "a", "5h"), 1e-12, "burned")
 	})
 
 	t.Run("reset time jitter is the same window", func(t *testing.T) {
@@ -486,9 +414,7 @@ func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
 		m.ObserveVendorQuota("a", "codex", "5h", 0.2, reset.Add(30*time.Second)) // late, not a new window
 		m.ObserveVendorQuota("a", "codex", "5h", 0.35, reset.Add(-20*time.Second))
 
-		if got := testutil.ToFloat64(m.quotaBurned.WithLabelValues("a", "codex", "5h")); math.Abs(got-0.05) > 1e-12 {
-			t.Fatalf("burned = %v, want 0.05", got)
-		}
+		require.InDelta(t, 0.05, testutil.ToFloat64(m.quotaBurned.WithLabelValues("a", "codex", "5h")), 1e-12, "burned")
 	})
 
 	t.Run("windows and accounts are apart", func(t *testing.T) {
@@ -499,17 +425,9 @@ func TestQuotaBurnedCountsRisesAboveTheHighWaterMark(t *testing.T) {
 		metricSet.ObserveVendorQuota("b", "claude", "5h", 0.2, reset)
 		metricSet.ObserveVendorQuota("a", "claude", "5h", 0.6, reset)
 
-		if got := burned(metricSet, "a", "7d"); got != 0 {
-			t.Errorf("a/7d burned = %v, want 0 (first reading of that window)", got)
-		}
-
-		if got := burned(metricSet, "b", "5h"); math.Abs(got-0.1) > 1e-12 {
-			t.Errorf("b/5h burned = %v, want 0.1", got)
-		}
-
-		if got := burned(metricSet, "a", "5h"); math.Abs(got-0.1) > 1e-12 {
-			t.Errorf("a/5h burned = %v, want 0.1", got)
-		}
+		assert.Zero(t, burned(metricSet, "a", "7d"), "a/7d burned (first reading of that window)")
+		assert.InDelta(t, 0.1, burned(metricSet, "b", "5h"), 1e-12, "b/5h burned")
+		assert.InDelta(t, 0.1, burned(metricSet, "a", "5h"), 1e-12, "a/5h burned")
 	})
 }
 
@@ -524,14 +442,9 @@ func TestForgetAccountForgetsTheBurnedMark(t *testing.T) {
 	metricSet.ObserveVendorQuota("kept", "claude", "5h", 0.3, reset)
 	metricSet.ForgetAccount("gone", "claude")
 
-	if n := testutil.CollectAndCount(metricSet.quotaBurned); n != 1 {
-		t.Fatalf("burned series = %d after ForgetAccount, want the kept account's only", n)
-	}
+	require.Equal(t, 1, testutil.CollectAndCount(metricSet.quotaBurned), "burned series after ForgetAccount: want the kept account's only")
 
 	metricSet.ObserveVendorQuota("gone", "claude", "5h", 0.9, reset)
 
-	if n := testutil.CollectAndCount(metricSet.quotaBurned); n != 1 {
-		t.Fatalf("a first reading after ForgetAccount burned %v, want nothing",
-			testutil.ToFloat64(metricSet.quotaBurned.WithLabelValues("gone", "claude", "5h")))
-	}
+	require.Equal(t, 1, testutil.CollectAndCount(metricSet.quotaBurned), "a first reading after ForgetAccount must burn nothing")
 }

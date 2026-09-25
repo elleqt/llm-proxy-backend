@@ -33,6 +33,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/sirupsen/logrus"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // childEnv marks the fresh process a test runs its body in.
@@ -52,9 +54,8 @@ func inFreshProcess(t *testing.T) bool {
 	}
 
 	out, err := runChild(t)
-	if err != nil || !strings.Contains(string(out), "--- PASS: "+t.Name()) {
-		t.Fatalf("in a fresh process: %v\n%s", err, out)
-	}
+	require.NoError(t, err, "in a fresh process:\n%s", out)
+	require.Contains(t, string(out), "--- PASS: "+t.Name(), "in a fresh process")
 
 	return false
 }
@@ -153,9 +154,8 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 
 	pool := pgtest.NewTestPool(t)
 	if settingsDoc != "" {
-		if err := postgres.NewSettingsRepo(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now()); err != nil {
-			t.Fatalf("store settings: %v", err)
-		}
+		err := postgres.NewSettingsRepo(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now())
+		require.NoError(t, err, "store settings")
 	}
 
 	proc := &process{
@@ -225,16 +225,14 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 	}()
 
 	t.Cleanup(func() {
-		if err := proc.stop(); err != nil {
-			t.Errorf("the process stopped with %v", err)
-		}
+		assert.NoError(t, proc.stop(), "the process stopped with an error")
 	})
 
 	for _, probe := range []string{proc.apiURL + "/healthz", proc.webURL + "/api/auth/config", proc.metricsURL + "/metrics"} {
 		eventually(t, "GET "+probe+" answers 200", func() bool {
 			select {
 			case err := <-proc.done:
-				t.Fatalf("the process stopped while starting: %v", err)
+				require.Failf(t, "the process stopped while starting", "Run returned %v", err)
 			default:
 			}
 
@@ -252,23 +250,19 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 	select {
 	case <-watching.seen:
 	case err := <-proc.done:
-		t.Fatalf("the process stopped while starting: %v", err)
+		require.Failf(t, "the process stopped while starting", "Run returned %v", err)
 	case <-time.After(30 * time.Second):
-		t.Fatal("upstream never finished starting: no file watcher")
+		require.Fail(t, "upstream never finished starting: no file watcher")
 	}
 
 	m := bootstrapBanner.FindStringSubmatch(proc.out.String())
-	if m == nil {
-		t.Fatal("the process printed no bootstrap password")
-	}
+	require.NotNil(t, m, "the process printed no bootstrap password")
 
 	proc.adminPassword = m[1]
 	proc.readyAt = time.Now()
 
 	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	proc.browser = &http.Client{Jar: jar, Timeout: 30 * time.Second}
 
@@ -317,14 +311,10 @@ func freeAddr(t *testing.T) string {
 	t.Helper()
 
 	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve port: %v", err)
-	}
+	require.NoError(t, err, "reserve port")
 
 	addr := listener.Addr().String()
-	if err := listener.Close(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, listener.Close())
 
 	return addr
 }
@@ -334,9 +324,7 @@ func get(t *testing.T, target string) (*http.Response, error) {
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, target, http.NoBody)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return http.DefaultClient.Do(req)
 }
@@ -347,7 +335,7 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	deadline := time.Now().Add(30 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting until %s", what)
+			require.Failf(t, "timed out", "waiting until %s", what)
 		}
 
 		time.Sleep(20 * time.Millisecond)
@@ -359,9 +347,7 @@ func (p *process) webCall(t *testing.T, method, path, body string) (int, []byte)
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), method, p.webURL+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	switch method {
 	case http.MethodPost, http.MethodPut, http.MethodPatch:
@@ -369,16 +355,12 @@ func (p *process) webCall(t *testing.T, method, path, body string) (int, []byte)
 	}
 
 	resp, err := p.browser.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
+	require.NoError(t, err, "%s %s", method, path)
 
 	defer func() { _ = resp.Body.Close() }()
 
 	out, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return resp.StatusCode, out
 }
@@ -388,14 +370,10 @@ func (p *process) webJSON(t *testing.T, method, path, body string, status int, d
 	t.Helper()
 
 	code, out := p.webCall(t, method, path, body)
-	if code != status {
-		t.Fatalf("%s %s = %d (%s), want %d", method, path, code, out, status)
-	}
+	require.Equal(t, status, code, "%s %s (%s)", method, path, out)
 
 	if dest != nil {
-		if err := json.Unmarshal(out, dest); err != nil {
-			t.Fatalf("%s %s: decode: %v (%s)", method, path, err, out)
-		}
+		require.NoError(t, json.Unmarshal(out, dest), "%s %s: decode (%s)", method, path, out)
 	}
 }
 
@@ -416,23 +394,17 @@ func (p *process) claimTemporaryPassword(t *testing.T, temporary, chosen string)
 	p.webJSON(t, http.MethodPost, "/api/auth/login",
 		`{"email":"`+p.adminEmail+`","password":"`+temporary+`"}`, http.StatusOK, &me)
 
-	if !me.Restricted {
-		t.Fatal("the session a temporary password opens is not restricted")
-	}
+	require.True(t, me.Restricted, "the session a temporary password opens is not restricted")
 
 	var refused api.Error
 	p.webJSON(t, http.MethodGet, "/api/me/tokens", "", http.StatusForbidden, &refused)
 
-	if refused.Code != "password_change_required" {
-		t.Fatalf("restricted session on /api/me/tokens: code %q, want password_change_required", refused.Code)
-	}
+	require.Equal(t, "password_change_required", refused.Code, "restricted session on /api/me/tokens")
 
 	p.webJSON(t, http.MethodPost, "/api/auth/password", `{"newPassword":"`+chosen+`"}`, http.StatusNoContent, nil)
 	p.webJSON(t, http.MethodGet, "/api/me", "", http.StatusOK, &me)
 
-	if me.Restricted {
-		t.Fatal("the session is still restricted after the password change")
-	}
+	require.False(t, me.Restricted, "the session is still restricted after the password change")
 }
 
 // issueToken issues an API token in the cabinet and returns its secret.
@@ -450,9 +422,7 @@ func (p *process) sessionCookie(t *testing.T) *http.Cookie {
 	t.Helper()
 
 	u, err := url.Parse(p.webURL)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	for _, c := range p.browser.Jar.Cookies(u) {
 		if c.Name == "llmproxy_session" {
@@ -460,7 +430,7 @@ func (p *process) sessionCookie(t *testing.T) *http.Cookie {
 		}
 	}
 
-	t.Fatal("the browser holds no session cookie")
+	require.Fail(t, "the browser holds no session cookie")
 
 	return nil
 }
@@ -479,9 +449,7 @@ func send(t *testing.T, method, target, secret, body string) (int, []byte) {
 	t.Helper()
 
 	req, err := http.NewRequestWithContext(t.Context(), method, target, strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -492,16 +460,12 @@ func send(t *testing.T, method, target, secret, body string) (int, []byte) {
 	}
 
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, target, err)
-	}
+	require.NoError(t, err, "%s %s", method, target)
 
 	defer func() { _ = resp.Body.Close() }()
 
 	out, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	return resp.StatusCode, out
 }
@@ -516,9 +480,7 @@ func (p *process) models(t *testing.T, secret string) map[string]bool {
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		t.Fatalf("GET /v1/models: status %d, decode: %v", code, err)
-	}
+	require.NoError(t, json.Unmarshal(body, &list), "GET /v1/models: status %d, decode", code)
 
 	out := map[string]bool{}
 	for _, m := range list.Data {
@@ -535,23 +497,17 @@ func (p *process) setPolicy(t *testing.T, email string, rules ...string) {
 	ctx := context.Background()
 
 	user, err := p.users.ByEmail(ctx, email)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	policy := make(access.Policy, 0, len(rules))
 	for _, raw := range rules {
 		r, err := access.ParseRule(raw)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		policy = append(policy, r)
 	}
 
-	if err := p.users.UpdatePolicy(ctx, user.ID, policy); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, p.users.UpdatePolicy(ctx, user.ID, policy))
 }
 
 // scrapeMetrics returns what the metrics listener serves on /metrics.
@@ -559,9 +515,7 @@ func (p *process) scrapeMetrics(t *testing.T) string {
 	t.Helper()
 
 	code, body := send(t, http.MethodGet, p.metricsURL+"/metrics", "", "")
-	if code != http.StatusOK {
-		t.Fatalf("GET /metrics on the metrics listener = %d", code)
-	}
+	require.Equal(t, http.StatusOK, code, "GET /metrics on the metrics listener")
 
 	return string(body)
 }
