@@ -128,8 +128,8 @@ func NewLogin(gw *Gateway) *Login {
 	cfg.AuthDir = gw.authDir
 	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, gw.coreAuth)
 	login := newLogin(gw.AddAccount, gw.authDir, map[string]loginFlow{
-		policyProvider("claude"):         {upstream: "anthropic", start: h.RequestAnthropicToken},
-		policyProvider(codexProviderKey): {upstream: codexProviderKey, start: h.RequestCodexToken},
+		PolicyProvider("claude"):         {upstream: "anthropic", start: h.RequestAnthropicToken},
+		PolicyProvider(CodexProviderKey): {upstream: CodexProviderKey, start: h.RequestCodexToken},
 	})
 	h.SetPostAuthHook(login.deliver)
 

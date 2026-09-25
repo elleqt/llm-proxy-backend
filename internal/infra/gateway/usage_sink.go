@@ -61,7 +61,7 @@ const (
 // goroutine.
 //
 // Every provider the sink records — ledger rows, metric labels, quota signals —
-// is the policy-facing name (policyProvider), never the upstream key.
+// is the policy-facing name (PolicyProvider), never the upstream key.
 type UsageSink struct {
 	events   app.UsageRepo
 	tokens   app.TokenRepo
@@ -237,7 +237,7 @@ func partitionDetail(ev *app.UsageEvent, providerKey string, detail cliproxyusag
 // a protocol it does not recognise.
 func detailSemantics(providerKey string) (bool, bool, bool) {
 	key := strings.ToLower(strings.TrimSpace(providerKey))
-	if key == openAICompatibilityKey || strings.HasPrefix(key, openAICompatiblePrefix) {
+	if key == OpenAICompatibilityKey || strings.HasPrefix(key, OpenAICompatiblePrefix) {
 		return true, true, true
 	}
 
@@ -251,7 +251,7 @@ func detailSemantics(providerKey string) (bool, bool, bool) {
 		}
 	}
 
-	for _, marker := range [...]string{"openai", codexProviderKey, xaiProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
+	for _, marker := range [...]string{"openai", CodexProviderKey, XAIProviderKey, "grok", "kimi", "qwen", "deepseek", "openrouter"} {
 		if strings.Contains(key, marker) {
 			return true, true, true
 		}
@@ -404,7 +404,7 @@ func (s *UsageSink) process(records []cliproxyusage.Record) {
 	for _, record := range records {
 		s.guard(func(p any) {
 			s.log.Warn("recovered a panic handling a usage record",
-				slog.String("provider", policyProvider(record.Provider)), slog.String("model", record.Model), slog.Any("panic", p))
+				slog.String("provider", PolicyProvider(record.Provider)), slog.String("model", record.Model), slog.Any("panic", p))
 		}, func() {
 			ev := s.eventOf(record)
 			events = append(events, ev)
@@ -458,7 +458,7 @@ func (s *UsageSink) observe(record cliproxyusage.Record, ev app.UsageEvent) {
 func (s *UsageSink) eventOf(record cliproxyusage.Record) app.UsageEvent {
 	ev := app.UsageEvent{
 		At:              record.RequestedAt,
-		Provider:        policyProvider(record.Provider),
+		Provider:        PolicyProvider(record.Provider),
 		Model:           record.Model,
 		Alias:           record.Alias,
 		Stream:          record.Stream,
@@ -590,7 +590,7 @@ func (s *UsageSink) observeQuota(record cliproxyusage.Record, provider string, o
 			reset, _ := parseEpochOrRFC3339(headers.Get(prefix + "Reset"))
 			add(window, ratio, reset)
 		}
-	case codexProviderKey:
+	case CodexProviderKey:
 		for _, pos := range [...]struct{ name, fallback string }{{"Primary", "5h"}, {"Secondary", "7d"}} {
 			prefix := "X-Codex-" + pos.name + "-"
 

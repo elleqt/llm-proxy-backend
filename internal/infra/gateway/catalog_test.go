@@ -110,7 +110,7 @@ func TestPolicyProviderNames(t *testing.T) {
 		// provider it stands for is still checked.
 		"openai-compatible-": "openai-compatible-",
 	} {
-		assert.Equal(t, want, policyProvider(key), "policyProvider(%q)", key)
+		assert.Equal(t, want, PolicyProvider(key), "PolicyProvider(%q)", key)
 	}
 }
 

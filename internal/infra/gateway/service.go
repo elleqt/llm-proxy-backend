@@ -741,7 +741,7 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 func vendorAccount(auth *coreauth.Auth) app.VendorAccount {
 	account := app.VendorAccount{
 		ID:              auth.ID,
-		Provider:        policyProvider(auth.Provider),
+		Provider:        PolicyProvider(auth.Provider),
 		Label:           auth.Label,
 		Status:          string(auth.Status),
 		Disabled:        auth.Disabled,
@@ -793,6 +793,14 @@ func storeHolds(auth *coreauth.Auth) bool {
 // Catalog is the model catalogue the policy gate decides by, for the admin
 // screens (app.ModelCatalog) to read the same source.
 func (g *Gateway) Catalog() *Catalog { return g.catalog }
+
+// AuthDir is the boot configuration's auth directory made absolute, for
+// gateway/login's upstream handler.
+func (g *Gateway) AuthDir() string { return g.authDir }
+
+// CoreAuthManager is the manager account changes act on; gateway/login hands
+// it to upstream's login handler. Accounts still change only through Gateway.
+func (g *Gateway) CoreAuthManager() *coreauth.Manager { return g.coreAuth }
 
 // CurrentConfig returns the most recently pushed configuration.
 func (g *Gateway) CurrentConfig() *cliproxyconfig.Config {
