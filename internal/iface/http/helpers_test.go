@@ -139,7 +139,7 @@ type envOption func(*testEnv)
 // withOIDC turns federated sign-in on, with the identity provider a mock.
 func withOIDC(env *testEnv) {
 	svc, err := auth.NewOIDC(env.users, env.idents, env.sessions, env.idp, env.audit, env.clock, auth.OIDCConfig{AllowSignUp: false})
-	require.NoError(env.t, err, "NewOIDCService")
+	require.NoError(env.t, err, "NewOIDC")
 
 	env.deps.OIDC = svc
 	env.deps.OIDCDisplayName = "Example SSO"

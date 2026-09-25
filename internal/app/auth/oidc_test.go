@@ -33,7 +33,7 @@ func newOIDC(t *testing.T, users app.UserRepo, idents app.IdentityRepo, sessions
 	t.Helper()
 
 	svc, err := auth.NewOIDC(users, idents, sessions, idp, nopAudit{}, systemClock{}, cfg)
-	require.NoError(t, err, "NewOIDCService")
+	require.NoError(t, err, "NewOIDC")
 
 	return svc
 }
@@ -337,7 +337,7 @@ func TestUserWithNoMappedGroupGetsAnEmptyPolicy(t *testing.T) {
 
 // A typo in the mapping or the default policy is the operator's problem at
 // startup, not a user's at login, and the error names the rule.
-func TestNewOIDCServiceRejectsAMalformedRule(t *testing.T) {
+func TestNewOIDCRejectsAMalformedRule(t *testing.T) {
 	for name, cfg := range map[string]auth.OIDCConfig{
 		"group policy":   {GroupPolicy: map[string][]string{"/team-a": {"claude:*", "no-colon"}}},
 		"default policy": {DefaultPolicy: []string{"claude:*", "no-colon"}},
@@ -412,7 +412,7 @@ func TestOIDCSignInOpensASessionAndAuditsTheMethod(t *testing.T) {
 		Run(func(_ context.Context, e app.AuditEvent) { recorded = e }).Return(nil)
 
 	svc, err := auth.NewOIDC(users, idents, sessions, idp, audit, fixedClock{now: now}, auth.OIDCConfig{})
-	require.NoError(t, err, "NewOIDCService")
+	require.NoError(t, err, "NewOIDC")
 
 	got, err := svc.Complete(context.Background(), "code", loginChallenge.State, loginChallenge,
 		app.SessionMeta{IP: "198.51.100.7", UserAgent: "a browser"})
