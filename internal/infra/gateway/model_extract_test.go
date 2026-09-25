@@ -11,7 +11,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/klauspost/compress/zstd"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,10 +28,10 @@ func extractOn(t *testing.T, source modelSource, pattern string, req *http.Reque
 	engine := gin.New()
 	engine.Handle(req.Method, pattern, func(ginCtx *gin.Context) {
 		raw, err := io.ReadAll(ginCtx.Request.Body)
-		if assert.NoError(t, err, "read body") {
-			ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
-			model, ok = source(ginCtx, raw)
-		}
+		require.NoError(t, err, "read body")
+
+		ginCtx.Request.Body = io.NopCloser(bytes.NewReader(raw))
+		model, ok = source(ginCtx, raw)
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -197,11 +196,9 @@ func TestImageEditFormModel(t *testing.T) {
 		model, ok = imageEditModel(ginCtx, nil)
 
 		form, err := ginCtx.MultipartForm()
-		if assert.NoError(t, err, "the handler's form after extraction") {
-			assert.Len(t, form.File["image"], 1, "the handler's form after extraction, want the image")
-		}
-
-		assert.Equal(t, "a cat", ginCtx.PostForm("prompt"), "the handler's form after extraction, want the prompt")
+		require.NoError(t, err, "the handler's form after extraction")
+		require.Len(t, form.File["image"], 1, "the handler's form after extraction, want the image")
+		require.Equal(t, "a cat", ginCtx.PostForm("prompt"), "the handler's form after extraction, want the prompt")
 	})
 	engine.ServeHTTP(httptest.NewRecorder(), req)
 

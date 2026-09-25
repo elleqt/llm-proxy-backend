@@ -281,7 +281,18 @@ func TestDeclaredLengthsReserveNoBudget(t *testing.T) {
 
 	reading, stop := make(chan struct{}), make(chan struct{})
 
-	var wg sync.WaitGroup
+	var (
+		wg       sync.WaitGroup
+		stopOnce sync.Once
+	)
+	// release lets the idle senders give up and waits for them. It also runs as a
+	// cleanup, so a failed assertion below does not leave them blocked for good.
+	release := func() {
+		stopOnce.Do(func() { close(stop) })
+		wg.Wait()
+	}
+	t.Cleanup(release)
+
 	for i := range idle {
 		wg.Go(func() {
 			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/chat/completions", &idleBody{reading: reading, stop: stop})
@@ -300,15 +311,13 @@ func TestDeclaredLengthsReserveNoBudget(t *testing.T) {
 	}
 
 	const room = budget - idle*initialBodyBuffer
-	if assert.True(t, bodyBudget.TryAcquire(room), "%d requests that sent nothing hold more than their initial buffers", idle) {
-		bodyBudget.Release(room)
-	}
+	require.True(t, bodyBudget.TryAcquire(room), "%d requests that sent nothing hold more than their initial buffers", idle)
+	bodyBudget.Release(room)
 
 	rec := sendBody(engine, "/v1/chat/completions", "application/json", jsonBodyOf(32<<20))
-	assert.Equal(t, http.StatusOK, rec.Code, "beside %d idle senders a 32 MiB request: %s", idle, rec.Body)
+	require.Equal(t, http.StatusOK, rec.Code, "beside %d idle senders a 32 MiB request: %s", idle, rec.Body)
 
-	close(stop)
-	wg.Wait()
+	release()
 
 	require.True(t, bodyBudget.TryAcquire(budget), "after the idle requests gave up the budget is not whole again")
 

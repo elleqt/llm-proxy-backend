@@ -306,9 +306,7 @@ func TestGateResolvesTheTokenOnce(t *testing.T) {
 		// err is a *sdkaccess.AuthError: a nil one is no refusal, though as an
 		// error interface it would not be nil.
 		res, err := NewAccessProvider(resolver).Authenticate(c.Request.Context(), c.Request)
-		if !assert.Nil(t, err, "access provider refused a request the gate admitted") {
-			return
-		}
+		require.Nil(t, err, "access provider refused a request the gate admitted")
 
 		admitted = res.Principal
 	})

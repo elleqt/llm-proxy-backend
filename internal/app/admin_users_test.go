@@ -13,7 +13,6 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
@@ -375,9 +374,8 @@ func TestBlockingAUserDeletesTheirSessions(t *testing.T) {
 	var calls []string
 
 	fixture.users.EXPECT().UpdateAdminState(mock.Anything, target.ID, mock.Anything).RunAndReturn(func(_ context.Context, _ uuid.UUID, ch app.AdminChange) error {
-		if assert.NotNil(t, ch.Status, "no status written") {
-			assert.Equal(t, identity.StatusBlocked, *ch.Status, "written status")
-		}
+		require.NotNil(t, ch.Status, "no status written")
+		require.Equal(t, identity.StatusBlocked, *ch.Status, "written status")
 
 		calls = append(calls, "write")
 
