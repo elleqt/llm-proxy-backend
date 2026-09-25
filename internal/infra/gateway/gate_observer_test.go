@@ -11,6 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -20,7 +21,7 @@ import (
 type observed struct {
 	authFailed   string
 	owner, model string
-	reason       DenyReason
+	reason       gate.DenyReason
 	denied       bool
 }
 
@@ -37,7 +38,7 @@ func (o *recordingObserver) AuthFailed(reason string) {
 	o.all = append(o.all, observed{authFailed: reason})
 }
 
-func (o *recordingObserver) Denied(owner, model string, reason DenyReason) {
+func (o *recordingObserver) Denied(owner, model string, reason gate.DenyReason) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -100,11 +101,11 @@ func TestGateReportsEveryRefusal(t *testing.T) {
 	}
 
 	want := []observed{
-		{authFailed: AuthMissing},
-		{authFailed: AuthInvalid},
-		{owner: "alice@example.com", model: wire.alias, reason: DenyModelNotAllowed, denied: true},
-		{owner: "alice@example.com", model: "Client-Invented-Model", reason: DenyUnknownModel, denied: true},
-		{reason: DenyRouteNotAllowed, denied: true},
+		{authFailed: gate.AuthMissing},
+		{authFailed: gate.AuthInvalid},
+		{owner: "alice@example.com", model: wire.alias, reason: gate.DenyModelNotAllowed, denied: true},
+		{owner: "alice@example.com", model: "Client-Invented-Model", reason: gate.DenyUnknownModel, denied: true},
+		{reason: gate.DenyRouteNotAllowed, denied: true},
 	}
 	require.Equal(t, want, observer.seen(), "observed refusals")
 }

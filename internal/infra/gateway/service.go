@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -80,7 +81,7 @@ type Params struct {
 	// provider that can admit a request, and the policy gate.
 	Resolver Resolver
 	// Observer is told what the policy gate refuses. Nil observes nothing.
-	Observer GateObserver
+	Observer gate.Observer
 	// Log receives the policy gate's own failures. Nil discards them.
 	Log *slog.Logger
 }

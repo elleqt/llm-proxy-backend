@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
@@ -17,14 +17,14 @@ import (
 func TestGateRefusalsReachTheMetricsUnderTheirReasons(t *testing.T) {
 	meters := metrics.New(prometheus.NewRegistry(),
 		metrics.WithKnownModel(func(model string) (string, bool) { return model, model == "served-model" }))
-	gate := gateMetrics{meters}
+	observer := gateMetrics{meters}
 
-	gate.AuthFailed(gateway.AuthMissing)
-	gate.AuthFailed(gateway.AuthInvalid)
-	gate.Denied("alice@example.com", "served-model", gateway.DenyModelNotAllowed)
-	gate.Denied("alice@example.com", "Client-Invented-Model", gateway.DenyUnknownModel)
-	gate.Denied("", "", gateway.DenyRouteNotAllowed)
-	gate.Denied("alice@example.com", "served-model", gateway.DenyReason(200))
+	observer.AuthFailed(gate.AuthMissing)
+	observer.AuthFailed(gate.AuthInvalid)
+	observer.Denied("alice@example.com", "served-model", gate.DenyModelNotAllowed)
+	observer.Denied("alice@example.com", "Client-Invented-Model", gate.DenyUnknownModel)
+	observer.Denied("", "", gate.DenyRouteNotAllowed)
+	observer.Denied("alice@example.com", "served-model", gate.DenyReason(200))
 
 	rec := httptest.NewRecorder()
 	meters.Handler().ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/metrics", http.NoBody))

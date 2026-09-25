@@ -1,4 +1,7 @@
-package gateway
+// Package gate names what the gateway's policy gate refuses and the observer it
+// reports refusals to. The composition root adapts the observer to the metrics
+// collector; neither this package nor the gateway knows anything of metrics.
+package gate
 
 // Why the gate refused a request's credentials: a closed set, never derived
 // from what the request presented.
@@ -25,9 +28,9 @@ const (
 	DenyRouteNotAllowed
 )
 
-// GateObserver is told what the policy gate refuses. The composition root adapts
-// it to the metrics collector; this package knows nothing of metrics.
-type GateObserver interface {
+// Observer is told what the policy gate refuses. The composition root adapts
+// it to the metrics collector; the gateway knows nothing of metrics.
+type Observer interface {
 	// AuthFailed reports a request refused 401; reason is AuthMissing or
 	// AuthInvalid.
 	AuthFailed(reason string)
@@ -38,8 +41,11 @@ type GateObserver interface {
 	Denied(owner, model string, reason DenyReason)
 }
 
-// noGateObserver observes nothing.
-type noGateObserver struct{}
+// NopObserver observes nothing: the gate's default when no observer is given.
+type NopObserver struct{}
 
-func (noGateObserver) AuthFailed(string)                 {}
-func (noGateObserver) Denied(string, string, DenyReason) {}
+// AuthFailed discards the refusal.
+func (NopObserver) AuthFailed(string) {}
+
+// Denied discards the refusal.
+func (NopObserver) Denied(string, string, DenyReason) {}
