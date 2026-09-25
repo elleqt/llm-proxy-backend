@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
@@ -245,8 +246,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		LocalLogin:      cfg.Web.LocalLogin,
 		Usage:           app.NewUsageService(usage),
 		Models:          app.NewModelsService(gw.Catalog()),
-		AdminUsers: app.NewAdminUsers(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
-			tokenService, hasher, audit, clock, gw.Catalog(), app.AdminUsersConfig{
+		AdminUsers: adminusers.New(users, passwords, idents, sessions, postgres.NewActivityRepo(pool),
+			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,
 				GroupMappingConfigured: len(cfg.OIDC.GroupPolicy) > 0,
 			}),

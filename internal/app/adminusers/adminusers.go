@@ -1,4 +1,4 @@
-package app
+package adminusers
 
 import (
 	"cmp"
@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -32,9 +33,9 @@ const (
 	fieldSignIn      = "signIn"
 )
 
-// AdminUsersConfig is the deployment's federated sign-in, as far as administration
+// Config is the deployment's federated sign-in, as far as administration
 // needs to know it.
-type AdminUsersConfig struct {
+type Config struct {
 	// OIDCIssuer is the issuer invitations are written for, byte for byte what the
 	// identity provider puts in its tokens. Empty means OIDC sign-in is off.
 	OIDCIssuer string
@@ -42,7 +43,7 @@ type AdminUsersConfig struct {
 	GroupMappingConfigured bool
 }
 
-// AdminUsers is the administrator's view of accounts: people, service accounts,
+// Service is the administrator's view of accounts: people, service accounts,
 // their policies, passwords, tokens and history.
 //
 // Every method requires an active administrator with a full session as actor, and
@@ -50,33 +51,33 @@ type AdminUsersConfig struct {
 // creation commits the account, its credential and its audit record together; any
 // other change that landed but whose audit record did not is reported as an error,
 // and a secret it created is withheld: an unaudited credential is not handed out.
-type AdminUsers struct {
-	users     UserRepo
-	passwords PasswordRepo
-	idents    IdentityRepo
-	sessions  SessionRepo
-	activity  ActivityRepo
-	tokens    *TokenService
-	hasher    *PasswordHasher
-	audit     AuditSink
-	clock     Clock
-	catalog   ModelCatalog
-	cfg       AdminUsersConfig
+type Service struct {
+	users     app.UserRepo
+	passwords app.PasswordRepo
+	idents    app.IdentityRepo
+	sessions  app.SessionRepo
+	activity  app.ActivityRepo
+	tokens    *app.TokenService
+	hasher    *app.PasswordHasher
+	audit     app.AuditSink
+	clock     app.Clock
+	catalog   app.ModelCatalog
+	cfg       Config
 }
 
-func NewAdminUsers(
-	users UserRepo, passwords PasswordRepo, idents IdentityRepo, sessions SessionRepo, activity ActivityRepo,
-	tokens *TokenService, hasher *PasswordHasher, audit AuditSink, clock Clock, catalog ModelCatalog, cfg AdminUsersConfig,
-) *AdminUsers {
-	return &AdminUsers{
+func New(
+	users app.UserRepo, passwords app.PasswordRepo, idents app.IdentityRepo, sessions app.SessionRepo, activity app.ActivityRepo,
+	tokens *app.TokenService, hasher *app.PasswordHasher, audit app.AuditSink, clock app.Clock, catalog app.ModelCatalog, cfg Config,
+) *Service {
+	return &Service{
 		users: users, passwords: passwords, idents: idents, sessions: sessions, activity: activity,
 		tokens: tokens, hasher: hasher, audit: audit, clock: clock, catalog: catalog, cfg: cfg,
 	}
 }
 
 // ListUsers returns every account, oldest first.
-func (s *AdminUsers) ListUsers(ctx context.Context, actor identity.User) ([]UserView, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) ListUsers(ctx context.Context, actor identity.User) ([]app.UserView, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
 
@@ -88,9 +89,9 @@ func (s *AdminUsers) ListUsers(ctx context.Context, actor identity.User) ([]User
 	return views, nil
 }
 
-func (s *AdminUsers) GetUser(ctx context.Context, actor identity.User, id uuid.UUID) (UserView, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return UserView{}, err
+func (s *Service) GetUser(ctx context.Context, actor identity.User, id uuid.UUID) (app.UserView, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return app.UserView{}, err
 	}
 
 	return s.view(ctx, id)
@@ -103,14 +104,14 @@ type NewUser struct {
 	DisplayName string
 	Role        identity.Role // empty means RoleUser; a service account is always RoleUser
 	Policy      []string
-	SignIn      SignInMethod // a human's first way in; ignored for a service account
+	SignIn      app.SignInMethod // a human's first way in; ignored for a service account
 }
 
 // CreatedUser is the new account and, for a human with a local password, the
 // temporary password. Nothing else ever returns that password again.
 type CreatedUser struct {
-	User              UserView
-	TemporaryPassword *TemporaryPassword
+	User              app.UserView
+	TemporaryPassword *app.TemporaryPassword
 }
 
 // CreateUser provisions an account under a fresh random id; the caller cannot pick
@@ -127,8 +128,8 @@ type CreatedUser struct {
 // The account, its credential and the user.create audit record are one write: a
 // failure anywhere leaves nothing behind, so the administrator simply retries. An
 // address already taken, compared case-insensitively, is ErrConflict.
-func (s *AdminUsers) CreateUser(ctx context.Context, actor identity.User, in NewUser) (CreatedUser, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) CreateUser(ctx context.Context, actor identity.User, in NewUser) (CreatedUser, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return CreatedUser{}, err
 	}
 
@@ -139,18 +140,18 @@ func (s *AdminUsers) CreateUser(ctx context.Context, actor identity.User, in New
 
 	name := strings.TrimSpace(in.DisplayName)
 	if name == "" {
-		return CreatedUser{}, &InvalidInputError{Field: fieldDisplayName}
+		return CreatedUser{}, &app.InvalidInputError{Field: fieldDisplayName}
 	}
 
 	role := cmp.Or(in.Role, identity.RoleUser)
 	if !validRole(role) {
-		return CreatedUser{}, &InvalidInputError{Field: fieldRole}
+		return CreatedUser{}, &app.InvalidInputError{Field: fieldRole}
 	}
 
 	now := s.clock.Now().UTC()
 
 	var (
-		acct NewAccount
+		acct app.NewAccount
 		out  CreatedUser
 	)
 
@@ -160,14 +161,14 @@ func (s *AdminUsers) CreateUser(ctx context.Context, actor identity.User, in New
 	case identity.KindHuman:
 		acct, out, err = s.newHumanAccount(ctx, in, name, role, policy, now)
 	default:
-		err = &InvalidInputError{Field: "kind"}
+		err = &app.InvalidInputError{Field: "kind"}
 	}
 
 	if err != nil {
 		return CreatedUser{}, err
 	}
 
-	acct.Audit = AuditEvent{
+	acct.Audit = app.AuditEvent{
 		At:      now,
 		ActorID: actor.ID,
 		Action:  "user.create",
@@ -185,23 +186,23 @@ func (s *AdminUsers) CreateUser(ctx context.Context, actor identity.User, in New
 
 // newServiceAccount is CreateUser's account for a service account: no address, no
 // sign-in, and never more than RoleUser.
-func newServiceAccount(in NewUser, name string, role identity.Role, policy access.Policy, now time.Time) (NewAccount, CreatedUser, error) {
+func newServiceAccount(in NewUser, name string, role identity.Role, policy access.Policy, now time.Time) (app.NewAccount, CreatedUser, error) {
 	if in.Email != "" {
-		return NewAccount{}, CreatedUser{}, &InvalidInputError{Field: fieldEmail}
+		return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldEmail}
 	}
 	// A service account cannot sign in, so an admin role would grant nothing
 	// but a misleading line in the user list.
 	if role != identity.RoleUser {
-		return NewAccount{}, CreatedUser{}, &InvalidInputError{Field: fieldRole}
+		return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldRole}
 	}
 
-	acct := NewAccount{User: identity.NewService(uuid.New(), name, policy)}
+	acct := app.NewAccount{User: identity.NewService(uuid.New(), name, policy)}
 	acct.User.CreatedAt = now
 
-	return acct, CreatedUser{User: UserView{SignIn: []SignInMethod{}}}, nil
+	return acct, CreatedUser{User: app.UserView{SignIn: []app.SignInMethod{}}}, nil
 }
 
-func createDetail(user identity.User, signIn SignInMethod) map[string]any {
+func createDetail(user identity.User, signIn app.SignInMethod) map[string]any {
 	detail := map[string]any{
 		"kind":   string(user.Kind),
 		"role":   string(user.Role),
@@ -236,20 +237,20 @@ type UserChanges struct {
 //     a pause that an unblock within the session window would undo. Its tokens need
 //     nothing: CanUseAPI refuses them from the next request.
 //   - An administrator blocking or demoting themselves is ErrSelfLockout.
-func (s *AdminUsers) UpdateUser(ctx context.Context, actor identity.User, id uuid.UUID, ch UserChanges) (UserView, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return UserView{}, err
+func (s *Service) UpdateUser(ctx context.Context, actor identity.User, id uuid.UUID, ch UserChanges) (app.UserView, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return app.UserView{}, err
 	}
 
 	change, detail, err := s.adminChange(ch)
 	if err != nil {
-		return UserView{}, err
+		return app.UserView{}, err
 	}
 
 	if id == actor.ID &&
 		((ch.Status != nil && *ch.Status == identity.StatusBlocked) ||
 			(ch.Role != nil && *ch.Role != identity.RoleAdmin)) {
-		return UserView{}, ErrSelfLockout
+		return app.UserView{}, app.ErrSelfLockout
 	}
 
 	if len(detail) == 0 {
@@ -258,34 +259,34 @@ func (s *AdminUsers) UpdateUser(ctx context.Context, actor identity.User, id uui
 
 	user, err := s.users.ByID(ctx, id)
 	if err != nil {
-		return UserView{}, fmt.Errorf("app: update user: %w", err)
+		return app.UserView{}, fmt.Errorf("app: update user: %w", err)
 	}
 
 	if ch.Role != nil && user.Kind == identity.KindService && *ch.Role != identity.RoleUser {
-		return UserView{}, &InvalidInputError{Field: fieldRole}
+		return app.UserView{}, &app.InvalidInputError{Field: fieldRole}
 	}
 
 	if ch.Policy != nil && !user.PolicyEditableByAdmin() {
 		if s.cfg.GroupMappingConfigured {
-			return UserView{}, ErrPolicyManagedByIDP
+			return app.UserView{}, app.ErrPolicyManagedByIDP
 		}
 
 		detail["policy_source"] = string(identity.PolicyLocal)
 	}
 
 	if err := s.users.UpdateAdminState(ctx, id, change); err != nil {
-		return UserView{}, fmt.Errorf("app: update user: %w", err)
+		return app.UserView{}, fmt.Errorf("app: update user: %w", err)
 	}
 	// After the write, not before: from here on no new session can open, so nothing
 	// opened between the delete and the block survives it.
 	if ch.Status != nil && *ch.Status == identity.StatusBlocked {
 		if err := s.sessions.DeleteByUser(ctx, id); err != nil {
-			return UserView{}, fmt.Errorf("app: user %s blocked but sessions not ended: %w", id, err)
+			return app.UserView{}, fmt.Errorf("app: user %s blocked but sessions not ended: %w", id, err)
 		}
 	}
 
 	if err := s.record(ctx, actor, "user.update", id, s.clock.Now().UTC(), detail); err != nil {
-		return UserView{}, err
+		return app.UserView{}, err
 	}
 
 	return s.view(ctx, id)
@@ -297,13 +298,13 @@ func (s *AdminUsers) UpdateUser(ctx context.Context, actor identity.User, id uui
 // An account already linked is ErrAlreadyLinked; one nobody could redeem an
 // invitation for (a service account, no address, OIDC not configured) is
 // ErrNotInvitable.
-func (s *AdminUsers) RenewInvitation(ctx context.Context, actor identity.User, id uuid.UUID) error {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) RenewInvitation(ctx context.Context, actor identity.User, id uuid.UUID) error {
+	if err := app.RequireAdmin(actor); err != nil {
 		return err
 	}
 
 	if s.cfg.OIDCIssuer == "" {
-		return ErrNotInvitable
+		return app.ErrNotInvitable
 	}
 
 	user, err := s.users.ByID(ctx, id)
@@ -312,48 +313,48 @@ func (s *AdminUsers) RenewInvitation(ctx context.Context, actor identity.User, i
 	}
 
 	if user.Kind != identity.KindHuman || user.Email == "" {
-		return ErrNotInvitable
+		return app.ErrNotInvitable
 	}
 
 	now := s.clock.Now().UTC()
 
-	inv := Invitation{Issuer: s.cfg.OIDCIssuer, Email: user.Email, ExpiresAt: now.Add(InvitationTTL)}
+	inv := app.Invitation{Issuer: s.cfg.OIDCIssuer, Email: user.Email, ExpiresAt: now.Add(InvitationTTL)}
 	if err := s.idents.Invite(ctx, id, inv); err != nil {
 		return fmt.Errorf("app: renew invitation: %w", err)
 	}
 
 	return s.record(ctx, actor, "user.invitation.renew", id, now,
-		map[string]any{"email": user.Email, AuditExpiresAt: inv.ExpiresAt.Format(time.RFC3339)})
+		map[string]any{"email": user.Email, app.AuditExpiresAt: inv.ExpiresAt.Format(time.RFC3339)})
 }
 
 // ResetPassword issues a new temporary password (TemporaryPasswordTTL) that must be
 // changed at the next sign-in, and ends every session of the account: whoever held
 // the old password is out. A service account cannot hold a password (ErrNotLocal).
 // A human who signs in only through the identity provider gains a local password.
-func (s *AdminUsers) ResetPassword(ctx context.Context, actor identity.User, id uuid.UUID) (TemporaryPassword, error) {
-	if err := RequireAdmin(actor); err != nil {
-		return TemporaryPassword{}, err
+func (s *Service) ResetPassword(ctx context.Context, actor identity.User, id uuid.UUID) (app.TemporaryPassword, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return app.TemporaryPassword{}, err
 	}
 
 	user, err := s.users.ByID(ctx, id)
 	if err != nil {
-		return TemporaryPassword{}, fmt.Errorf("app: reset password: %w", err)
+		return app.TemporaryPassword{}, fmt.Errorf("app: reset password: %w", err)
 	}
 
 	if user.Kind != identity.KindHuman {
-		return TemporaryPassword{}, ErrNotLocal
+		return app.TemporaryPassword{}, app.ErrNotLocal
 	}
 
 	now := s.clock.Now().UTC()
 
-	temp, err := ResetPassword(ctx, s.users, s.passwords, s.sessions, s.hasher, user.ID, now)
+	temp, err := app.ResetPassword(ctx, s.users, s.passwords, s.sessions, s.hasher, user.ID, now)
 	if err != nil {
-		return TemporaryPassword{}, err
+		return app.TemporaryPassword{}, err
 	}
 
 	if err := s.record(ctx, actor, "user.password_reset", user.ID, now,
-		map[string]any{AuditExpiresAt: temp.ExpiresAt.Format(time.RFC3339)}); err != nil {
-		return TemporaryPassword{}, err
+		map[string]any{app.AuditExpiresAt: temp.ExpiresAt.Format(time.RFC3339)}); err != nil {
+		return app.TemporaryPassword{}, err
 	}
 
 	return temp, nil
@@ -361,8 +362,8 @@ func (s *AdminUsers) ResetPassword(ctx context.Context, actor identity.User, id 
 
 // ListTokens returns an account's tokens. An unknown account is ErrNotFound rather
 // than an empty list.
-func (s *AdminUsers) ListTokens(ctx context.Context, actor identity.User, userID uuid.UUID) ([]credentials.Token, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) ListTokens(ctx context.Context, actor identity.User, userID uuid.UUID) ([]credentials.Token, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
 
@@ -375,10 +376,10 @@ func (s *AdminUsers) ListTokens(ctx context.Context, actor identity.User, userID
 
 // IssueToken issues a token on behalf of an account — the only way a service
 // account gets one. The secret is returned here and never again.
-func (s *AdminUsers) IssueToken(
+func (s *Service) IssueToken(
 	ctx context.Context, actor identity.User, userID uuid.UUID, label string,
 ) (credentials.Token, string, error) {
-	if err := RequireAdmin(actor); err != nil {
+	if err := app.RequireAdmin(actor); err != nil {
 		return credentials.Token{}, "", err
 	}
 
@@ -388,8 +389,8 @@ func (s *AdminUsers) IssueToken(
 // RevokeToken revokes one of userID's tokens. A token that exists but belongs to
 // another account is ErrNotFound: the address names userID's token, and that one
 // does not exist.
-func (s *AdminUsers) RevokeToken(ctx context.Context, actor identity.User, userID, tokenID uuid.UUID) error {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) RevokeToken(ctx context.Context, actor identity.User, userID, tokenID uuid.UUID) error {
+	if err := app.RequireAdmin(actor); err != nil {
 		return err
 	}
 
@@ -399,7 +400,7 @@ func (s *AdminUsers) RevokeToken(ctx context.Context, actor identity.User, userI
 	}
 
 	if !slices.ContainsFunc(owned, func(t credentials.Token) bool { return t.ID == tokenID }) {
-		return ErrNotFound
+		return app.ErrNotFound
 	}
 
 	return s.tokens.Revoke(ctx, actor, tokenID)
@@ -407,15 +408,15 @@ func (s *AdminUsers) RevokeToken(ctx context.Context, actor identity.User, userI
 
 // Activity is one account's recent history, newest first.
 type Activity struct {
-	Requests []UsageEvent
-	Audit    []AuditEvent
+	Requests []app.UsageEvent
+	Audit    []app.AuditEvent
 }
 
 // Activity returns up to limit recent requests and up to limit recent audit events.
 // A limit outside 1..MaxActivityLimit is DefaultActivityLimit below the range and
 // MaxActivityLimit above it.
-func (s *AdminUsers) Activity(ctx context.Context, actor identity.User, userID uuid.UUID, limit int) (Activity, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) Activity(ctx context.Context, actor identity.User, userID uuid.UUID, limit int) (Activity, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return Activity{}, err
 	}
 
@@ -445,21 +446,21 @@ func (s *AdminUsers) Activity(ctx context.Context, actor identity.User, userID u
 
 // Catalog returns the live catalogue for the policy editor, providers and models
 // sorted by name.
-func (s *AdminUsers) Catalog(actor identity.User) ([]CatalogProvider, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) Catalog(actor identity.User) ([]app.CatalogProvider, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
 
 	served := s.catalog.Models()
 
-	out := make([]CatalogProvider, 0, len(served))
+	out := make([]app.CatalogProvider, 0, len(served))
 	for name, models := range served {
 		sorted := slices.Clone(models)
 		slices.Sort(sorted)
-		out = append(out, CatalogProvider{Name: name, Models: sorted})
+		out = append(out, app.CatalogProvider{Name: name, Models: sorted})
 	}
 
-	slices.SortFunc(out, func(a, b CatalogProvider) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortFunc(out, func(a, b app.CatalogProvider) int { return strings.Compare(a.Name, b.Name) })
 
 	return out, nil
 }
@@ -483,8 +484,8 @@ type PolicyPreview struct {
 
 // PolicyPreview evaluates rules against today's catalogue. A wildcard also covers
 // models published later; the preview can only show today's.
-func (s *AdminUsers) PolicyPreview(actor identity.User, rules []string) (PolicyPreview, error) {
-	if err := RequireAdmin(actor); err != nil {
+func (s *Service) PolicyPreview(actor identity.User, rules []string) (PolicyPreview, error) {
+	if err := app.RequireAdmin(actor); err != nil {
 		return PolicyPreview{}, err
 	}
 
@@ -527,15 +528,15 @@ func (s *AdminUsers) PolicyPreview(actor identity.User, rules []string) (PolicyP
 
 // newHumanAccount is CreateUser's account for a person, with the credential of the
 // first way in they were given: a temporary password or an invitation.
-func (s *AdminUsers) newHumanAccount(
+func (s *Service) newHumanAccount(
 	ctx context.Context, in NewUser, name string, role identity.Role, policy access.Policy, now time.Time,
-) (NewAccount, CreatedUser, error) {
+) (app.NewAccount, CreatedUser, error) {
 	email := strings.TrimSpace(in.Email)
 	if local, domain, ok := strings.Cut(email, "@"); !ok || local == "" || domain == "" {
-		return NewAccount{}, CreatedUser{}, &InvalidInputError{Field: fieldEmail}
+		return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldEmail}
 	}
 
-	acct := NewAccount{User: identity.User{
+	acct := app.NewAccount{User: identity.User{
 		ID:           uuid.New(),
 		Kind:         identity.KindHuman,
 		Email:        email,
@@ -550,27 +551,27 @@ func (s *AdminUsers) newHumanAccount(
 	var out CreatedUser
 
 	switch in.SignIn {
-	case SignInPassword:
+	case app.SignInPassword:
 		// Derived before anything is written: a derivation that fails or is
 		// cancelled costs nothing to retry.
-		temp, hash, err := DrawTemporaryPassword(ctx, s.hasher, now)
+		temp, hash, err := app.DrawTemporaryPassword(ctx, s.hasher, now)
 		if err != nil {
-			return NewAccount{}, CreatedUser{}, err
+			return app.NewAccount{}, CreatedUser{}, err
 		}
 
 		acct.User.MustChangePassword = true
-		acct.Password = &StoredPassword{Hash: hash, ExpiresAt: &temp.ExpiresAt}
+		acct.Password = &app.StoredPassword{Hash: hash, ExpiresAt: &temp.ExpiresAt}
 		out.TemporaryPassword = &temp
-		out.User = UserView{SignIn: []SignInMethod{SignInPassword}}
-	case SignInOIDC:
+		out.User = app.UserView{SignIn: []app.SignInMethod{app.SignInPassword}}
+	case app.SignInOIDC:
 		if s.cfg.OIDCIssuer == "" {
-			return NewAccount{}, CreatedUser{}, &InvalidInputError{Field: fieldSignIn}
+			return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldSignIn}
 		}
 
-		acct.Invitation = &Invitation{Issuer: s.cfg.OIDCIssuer, Email: email, ExpiresAt: now.Add(InvitationTTL)}
-		out.User = UserView{SignIn: []SignInMethod{}, InvitationExpiresAt: &acct.Invitation.ExpiresAt}
+		acct.Invitation = &app.Invitation{Issuer: s.cfg.OIDCIssuer, Email: email, ExpiresAt: now.Add(InvitationTTL)}
+		out.User = app.UserView{SignIn: []app.SignInMethod{}, InvitationExpiresAt: &acct.Invitation.ExpiresAt}
 	default:
-		return NewAccount{}, CreatedUser{}, &InvalidInputError{Field: fieldSignIn}
+		return app.NewAccount{}, CreatedUser{}, &app.InvalidInputError{Field: fieldSignIn}
 	}
 
 	return acct, out, nil
@@ -578,14 +579,14 @@ func (s *AdminUsers) newHumanAccount(
 
 // adminChange validates an edit and turns it into the write and its audit detail.
 // The detail is empty when the edit sets nothing.
-func (s *AdminUsers) adminChange(ch UserChanges) (AdminChange, map[string]any, error) {
-	change := AdminChange{Role: ch.Role, Status: ch.Status, RefuseIDPPolicy: s.cfg.GroupMappingConfigured}
+func (s *Service) adminChange(ch UserChanges) (app.AdminChange, map[string]any, error) {
+	change := app.AdminChange{Role: ch.Role, Status: ch.Status, RefuseIDPPolicy: s.cfg.GroupMappingConfigured}
 	detail := map[string]any{}
 
 	if ch.DisplayName != nil {
 		name := strings.TrimSpace(*ch.DisplayName)
 		if name == "" {
-			return AdminChange{}, nil, &InvalidInputError{Field: fieldDisplayName}
+			return app.AdminChange{}, nil, &app.InvalidInputError{Field: fieldDisplayName}
 		}
 
 		change.DisplayName = &name
@@ -594,7 +595,7 @@ func (s *AdminUsers) adminChange(ch UserChanges) (AdminChange, map[string]any, e
 
 	if ch.Role != nil {
 		if !validRole(*ch.Role) {
-			return AdminChange{}, nil, &InvalidInputError{Field: fieldRole}
+			return app.AdminChange{}, nil, &app.InvalidInputError{Field: fieldRole}
 		}
 
 		detail["role"] = string(*ch.Role)
@@ -602,7 +603,7 @@ func (s *AdminUsers) adminChange(ch UserChanges) (AdminChange, map[string]any, e
 
 	if ch.Status != nil {
 		if *ch.Status != identity.StatusActive && *ch.Status != identity.StatusBlocked {
-			return AdminChange{}, nil, &InvalidInputError{Field: "status"}
+			return app.AdminChange{}, nil, &app.InvalidInputError{Field: "status"}
 		}
 
 		detail["status"] = string(*ch.Status)
@@ -611,7 +612,7 @@ func (s *AdminUsers) adminChange(ch UserChanges) (AdminChange, map[string]any, e
 	if ch.Policy != nil {
 		policy, err := parsePolicy(*ch.Policy)
 		if err != nil {
-			return AdminChange{}, nil, err
+			return app.AdminChange{}, nil, err
 		}
 
 		change.Policy = &policy
@@ -622,10 +623,10 @@ func (s *AdminUsers) adminChange(ch UserChanges) (AdminChange, map[string]any, e
 }
 
 // view is one account as the administrator sees it.
-func (s *AdminUsers) view(ctx context.Context, id uuid.UUID) (UserView, error) {
+func (s *Service) view(ctx context.Context, id uuid.UUID) (app.UserView, error) {
 	view, err := s.users.View(ctx, id)
 	if err != nil {
-		return UserView{}, fmt.Errorf("app: get user: %w", err)
+		return app.UserView{}, fmt.Errorf("app: get user: %w", err)
 	}
 
 	return view, nil
@@ -634,10 +635,10 @@ func (s *AdminUsers) view(ctx context.Context, id uuid.UUID) (UserView, error) {
 // record writes an administrator's action to the audit log. The change it
 // describes is already durable, so a failure here is reported as the change not
 // being audited; the caller withholds any secret the change produced.
-func (s *AdminUsers) record(
+func (s *Service) record(
 	ctx context.Context, actor identity.User, action string, target uuid.UUID, at time.Time, detail map[string]any,
 ) error {
-	if err := s.audit.Record(ctx, AuditEvent{
+	if err := s.audit.Record(ctx, app.AuditEvent{
 		At:      at,
 		ActorID: actor.ID,
 		Action:  action,
@@ -656,7 +657,7 @@ func parsePolicy(rules []string) (access.Policy, error) {
 	for _, raw := range rules {
 		rule, err := access.ParseRule(raw)
 		if err != nil {
-			return nil, &InvalidRuleError{Rule: raw}
+			return nil, &app.InvalidRuleError{Rule: raw}
 		}
 
 		policy = append(policy, rule)

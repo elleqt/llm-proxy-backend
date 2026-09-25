@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 )
 
 // Deps is what the web API is built from.
@@ -27,7 +28,7 @@ type Deps struct {
 	Models *app.ModelsService
 
 	// The administration API's services.
-	AdminUsers *app.AdminUsers
+	AdminUsers *adminusers.Service
 	Settings   *app.Settings
 	Prices     *app.Prices
 	Providers  *app.Providers

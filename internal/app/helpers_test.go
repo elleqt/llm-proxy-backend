@@ -5,6 +5,7 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -68,3 +70,31 @@ var (
 	_ app.Clock      = systemClock{}
 	_ app.InfoLogger = discardLogger{}
 )
+
+// assertNoSecret fails if any audit detail carries one of the secrets.
+func assertNoSecret(t *testing.T, events []app.AuditEvent, secrets ...string) {
+	t.Helper()
+
+	for _, event := range events {
+		raw, err := json.Marshal(event.Detail)
+		require.NoError(t, err, "marshal detail")
+
+		for _, s := range secrets {
+			if s != "" {
+				require.NotContains(t, string(raw)+event.Target, s, "audit event %s carries a secret", event.Action)
+			}
+		}
+	}
+}
+
+func newAdmin() identity.User {
+	return identity.User{ID: uuid.New(), Kind: identity.KindHuman, Role: identity.RoleAdmin, Status: identity.StatusActive}
+}
+
+func newPerson() identity.User {
+	return identity.User{
+		ID: uuid.New(), Kind: identity.KindHuman, Email: "person@example.com",
+		DisplayName: "Person", Role: identity.RoleUser, Status: identity.StatusActive,
+		PolicySource: identity.PolicyLocal,
+	}
+}

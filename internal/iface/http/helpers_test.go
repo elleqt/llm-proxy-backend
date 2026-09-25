@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
@@ -121,7 +122,7 @@ type testEnv struct {
 	quota          *mocks.VendorQuota
 	acctMet        *mocks.AccountMetrics
 	// adminCfg is the federated sign-in the administration API is built with.
-	adminCfg app.AdminUsersConfig
+	adminCfg adminusers.Config
 	deps     Deps
 	handler  http.Handler
 }
@@ -145,7 +146,7 @@ func withInsecureCookies(e *testEnv) { e.deps.CookieSecure = false }
 // withoutPriceCatalog configures no price catalog source.
 func withoutPriceCatalog(e *testEnv) { e.noPriceCatalog = true }
 
-func withAdminConfig(cfg app.AdminUsersConfig) envOption {
+func withAdminConfig(cfg adminusers.Config) envOption {
 	return func(e *testEnv) { e.adminCfg = cfg }
 }
 
@@ -206,7 +207,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		o(env)
 	}
 
-	env.deps.AdminUsers = app.NewAdminUsers(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
+	env.deps.AdminUsers = adminusers.New(env.users, env.pwds, env.idents, env.sessions, env.activity, env.deps.Tokens,
 		cheapHasher(), env.audit, env.clock, env.catalog, env.adminCfg)
 	env.deps.Settings = app.NewSettings(env.settings, env.gateway, env.audit, env.clock)
 
