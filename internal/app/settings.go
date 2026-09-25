@@ -345,11 +345,35 @@ func LoadBootConfig(ctx context.Context, repo SettingsRepo, owned *sdkconfig.Con
 	return cfg, nil
 }
 
-// storedDocument is the stored document, or the empty one when none was saved.
+// defaultDocument is the upstream settings document a deployment starts with
+// before an administrator saves one: Claude's dated model IDs aliased to their
+// short names, forked so both stay listed and routable, and the deprecated or
+// retired Claude models hidden. A saved document replaces it entirely.
+const defaultDocument = `oauth-model-alias:
+  claude:
+    - name: claude-haiku-4-5-20251001
+      alias: claude-haiku-4-5
+      fork: true
+    - name: claude-sonnet-4-5-20250929
+      alias: claude-sonnet-4-5
+      fork: true
+    - name: claude-opus-4-5-20251101
+      alias: claude-opus-4-5
+      fork: true
+oauth-excluded-models:
+  claude:
+    - claude-opus-4-1-20250805
+    - claude-opus-4-20250514
+    - claude-sonnet-4-20250514
+    - claude-3-7-sonnet-20250219
+    - claude-3-5-haiku-20241022
+`
+
+// storedDocument is the stored document, or the default one when none was saved.
 func storedDocument(ctx context.Context, repo SettingsRepo) (string, error) {
 	doc, err := repo.UpstreamDocument(ctx)
 	if errors.Is(err, ErrNotFound) {
-		return "", nil
+		return defaultDocument, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("app: read settings: %w", err)
