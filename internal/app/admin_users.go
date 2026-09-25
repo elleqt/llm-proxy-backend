@@ -3,10 +3,8 @@ package app
 import (
 	"cmp"
 	"context"
-	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,39 +37,6 @@ const (
 
 // auditExpiresAt is the audit detail key for when an issued credential lapses.
 const auditExpiresAt = "expires_at"
-
-var (
-	// ErrPolicyManagedByIDP refuses a policy edit the next IdP login would undo.
-	ErrPolicyManagedByIDP = errors.New("app: policy is managed by the identity provider")
-	// ErrSelfLockout refuses an administrator blocking or demoting themselves.
-	ErrSelfLockout = errors.New("app: an administrator cannot block or demote themselves")
-	// ErrNotLocal refuses a password for an account that cannot hold one.
-	ErrNotLocal = errors.New("app: account cannot hold a password")
-	// ErrInvalidRule is what an *InvalidRuleError unwraps to.
-	ErrInvalidRule = errors.New("app: invalid policy rule")
-	// ErrInvalidInput is what an *InvalidInputError unwraps to.
-	ErrInvalidInput = errors.New("app: invalid input")
-	// ErrAlreadyLinked refuses an invitation to an account that already signs in
-	// through the identity provider.
-	ErrAlreadyLinked = errors.New("app: account already has an identity provider link")
-	// ErrNotInvitable refuses an invitation nobody could redeem: a service account,
-	// an account without an address, or OIDC sign-in not configured.
-	ErrNotInvitable = errors.New("app: account cannot be invited")
-)
-
-// InvalidRuleError names the first policy rule that does not parse.
-type InvalidRuleError struct{ Rule string }
-
-func (e *InvalidRuleError) Error() string {
-	return ErrInvalidRule.Error() + ": " + strconv.Quote(e.Rule)
-}
-func (e *InvalidRuleError) Unwrap() error { return ErrInvalidRule }
-
-// InvalidInputError names the request field that is missing or not acceptable.
-type InvalidInputError struct{ Field string }
-
-func (e *InvalidInputError) Error() string { return ErrInvalidInput.Error() + ": " + e.Field }
-func (e *InvalidInputError) Unwrap() error { return ErrInvalidInput }
 
 // AdminUsersConfig is the deployment's federated sign-in, as far as administration
 // needs to know it.

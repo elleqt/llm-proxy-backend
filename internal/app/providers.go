@@ -160,7 +160,7 @@ func (s *Providers) Remove(ctx context.Context, actor identity.User, id string) 
 // the audit error. If the removal fails too, the account is live and
 // unaudited: that is logged for an operator, who has to remove it by hand.
 func (s *Providers) withdraw(ctx context.Context, account VendorAccount, cause error) error {
-	cctx, cancel := compensationContext(ctx)
+	cctx, cancel := CompensationContext(ctx)
 	defer cancel()
 
 	if err := s.accounts.RemoveAccount(cctx, account.ID); err != nil {

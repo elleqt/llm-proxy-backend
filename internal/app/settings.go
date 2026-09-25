@@ -19,47 +19,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
-	// ErrForbiddenSetting is what a *SettingError about a gateway-owned field
-	// unwraps to.
-	ErrForbiddenSetting = errors.New("app: setting is owned by the gateway")
-	// ErrInvalidSettings is what a *SettingError about a malformed document or
-	// field unwraps to.
-	ErrInvalidSettings = errors.New("app: invalid settings")
-	// ErrNoRunningConfig reports a gateway that holds no configuration yet, so
-	// there is nothing to diff against or apply over.
-	ErrNoRunningConfig = errors.New("app: the gateway has no running configuration")
-)
-
-// SettingError names the request field or top-level YAML key a settings update is
-// refused for. It unwraps to ErrForbiddenSetting or ErrInvalidSettings.
-type SettingError struct {
-	Field  string
-	Reason string
-	kind   error
-}
-
-func (e *SettingError) Error() string {
-	msg := e.kind.Error()
-	if e.Field != "" {
-		msg += ": " + e.Field
-	}
-
-	if e.Reason != "" {
-		msg += ": " + e.Reason
-	}
-
-	return msg
-}
-
-func (e *SettingError) Unwrap() error { return e.kind }
-
 func forbidden(field string) error {
-	return &SettingError{Field: field, Reason: "owned by the gateway", kind: ErrForbiddenSetting}
+	return &SettingError{Field: field, Reason: "owned by the gateway", Kind: ErrForbiddenSetting}
 }
 
 func invalid(field, reason string) error {
-	return &SettingError{Field: field, Reason: reason, kind: ErrInvalidSettings}
+	return &SettingError{Field: field, Reason: reason, Kind: ErrInvalidSettings}
 }
 
 // ownedKeys are the top-level keys of the upstream configuration the gateway owns.

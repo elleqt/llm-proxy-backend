@@ -157,14 +157,14 @@ func (s *TokenService) List(ctx context.Context, actor identity.User, owner uuid
 // credential in the security log is worse than a phantom row, because operators trust
 // the log and cannot correct it.
 //
-// The save runs on a detached context (compensationContext): the audit most likely
+// The save runs on a detached context (CompensationContext): the audit most likely
 // failed because the client hung up, and that must not also skip the retraction.
 func (s *TokenService) retract(ctx context.Context, tok credentials.Token, by uuid.UUID, now time.Time, cause error) error {
 	if err := tok.Revoke(by, now); err != nil {
 		return s.stranded(tok, cause, err, "compensating revoke refused")
 	}
 
-	cctx, cancel := compensationContext(ctx)
+	cctx, cancel := CompensationContext(ctx)
 	defer cancel()
 
 	if err := s.tokens.Save(cctx, tok); err != nil {

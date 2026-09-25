@@ -6,21 +6,6 @@ import (
 	"time"
 )
 
-// LockedOutError is a sign-in refused because its address is locked. It satisfies
-// errors.Is(err, ErrLockedOut) and carries the instant the lock lapses, so the
-// transport can tell the client when to come back (Retry-After).
-//
-// The lockout is visible on purpose and is not an existence oracle: every address is
-// charged the same, whether an account stands behind it or not, so "locked" says
-// only that this address took maxFailures attempts — which the prober made.
-type LockedOutError struct {
-	Until time.Time
-}
-
-func (e *LockedOutError) Error() string { return ErrLockedOut.Error() }
-
-func (e *LockedOutError) Unwrap() error { return ErrLockedOut }
-
 // Throttle limits password guessing per address: maxFailures attempts per window of
 // lockFor, and an address that reaches the limit is locked for lockFor.
 //

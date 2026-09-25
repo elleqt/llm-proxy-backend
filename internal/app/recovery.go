@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -10,20 +9,6 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
 )
-
-// ErrBlocked is what a *BlockedError unwraps to.
-var ErrBlocked = errors.New("app: account is blocked")
-
-// BlockedError refuses a recovery for a blocked account: a new password would not let
-// it in, and unblocking is an administrator's decision.
-type BlockedError struct {
-	// CanUnblock reports that the recovery may unblock the account when asked to: it
-	// is an administrator and no other active administrator exists who could.
-	CanUnblock bool
-}
-
-func (e *BlockedError) Error() string { return ErrBlocked.Error() }
-func (e *BlockedError) Unwrap() error { return ErrBlocked }
 
 // Recovery is the way back into an installation from the shell of the host it runs
 // on, when nobody can sign in to reset a password on the web interface: the sole

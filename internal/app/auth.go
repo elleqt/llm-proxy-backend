@@ -231,7 +231,7 @@ func (o sessionOpener) open(ctx context.Context, user identity.User, action stri
 		// user retries against a database that is either working or honestly down.
 		// Detached: the audit most likely failed because the client hung up, and
 		// the request context is cancelled for exactly that reason.
-		cctx, cancel := compensationContext(ctx)
+		cctx, cancel := CompensationContext(ctx)
 		defer cancel()
 
 		if derr := o.sessions.Delete(cctx, stored.IDHash); derr != nil {
@@ -407,7 +407,7 @@ func checkNewPassword(plain string) error {
 // the record is missing so an operator learns of the gap. The delete runs on a
 // detached context: a client that hangs up mid-sign-out must not keep its session.
 func (s *AuthService) SignOut(ctx context.Context, sess Session) error {
-	dctx, cancel := compensationContext(ctx)
+	dctx, cancel := CompensationContext(ctx)
 	defer cancel()
 
 	if err := s.sessions.Delete(dctx, sess.IDHash); err != nil {
