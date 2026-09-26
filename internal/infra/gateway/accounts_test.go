@@ -201,13 +201,15 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 }
 
 // faultyStore is the production token store with Save and Delete failing on
-// demand. The manager keeps persisting to the real store it was built on; only
-// the gateway's own calls go through this one.
+// demand, and List leaving out every credential on demand, as a store that
+// does not load back what it saved. The manager keeps persisting to the real
+// store it was built on; only the gateway's own calls go through this one.
 type faultyStore struct {
 	coreauth.Store
 
 	refuseSave   atomic.Bool
 	refuseDelete atomic.Bool
+	dropListed   atomic.Bool
 }
 
 var (
@@ -229,6 +231,14 @@ func (s *faultyStore) Delete(ctx context.Context, id string) error {
 	}
 
 	return s.Store.Delete(ctx, id)
+}
+
+func (s *faultyStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if s.dropListed.Load() {
+		return nil, nil
+	}
+
+	return s.Store.List(ctx)
 }
 
 // TestSetAccountDisabledReportsAnUnsavedFlag: the manager discards its save
@@ -400,6 +410,36 @@ func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 
 	_, err = srv.gateway.AddAccount(context.Background(), grant)
 	require.NoError(t, err, "retried AddAccount")
+}
+
+// TestAddAccountWithdrawsACredentialItCannotLoadBack: when the save succeeds
+// but the store does not list the saved credential back, AddAccount fails,
+// holds nothing, and deletes the credential it wrote — keyed by its file name,
+// not its id — so no orphan row comes back on the next start.
+func TestAddAccountWithdrawsACredentialItCannotLoadBack(t *testing.T) {
+	params := productionParams(t)
+	store := &faultyStore{Store: params.Store}
+	params.Store = store
+	srv := startBooted(t, params)
+
+	grant := claudeGrant(t)
+	grant.FileName = "renamed-" + grant.ID
+	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(grant.FileName) })
+
+	store.dropListed.Store(true)
+
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.ErrorIs(t, err, errCredentialNotLoaded, "AddAccount whose credential is not listed back")
+	require.ErrorContains(t, err, "its credential was withdrawn", "AddAccount error does not say the credential was withdrawn")
+
+	store.dropListed.Store(false)
+
+	for _, id := range []string{grant.ID, grant.FileName} {
+		_, ok := params.CoreAuth.GetByID(id)
+		require.False(t, ok, "the account whose credential was not loaded back is held as %q", id)
+	}
+
+	require.False(t, storeLists(t, params.Store, grant.FileName), "the withdrawn credential is still stored: a restart would load it")
 }
 
 // TestAddAccountKeepsADisabledAccountAcrossARestart: upstream's file store
