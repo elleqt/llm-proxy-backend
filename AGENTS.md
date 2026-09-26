@@ -72,6 +72,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build  
 To run locally:
 
 - Set `LLMPROXY_DATABASE_URL`.
+- Set `LLMPROXY_CREDENTIALS_KEY` (at least 32 bytes, e.g. `openssl rand -hex 32`).
 - Set either `LLMPROXY_PUBLIC_API_URL` or `LLMPROXY_WEB_ADDR=off`.
 - Point `LLMPROXY_RUNTIME_DIR` and `LLMPROXY_AUTH_DIR` at writable directories.
 - Go does not read `.env`.

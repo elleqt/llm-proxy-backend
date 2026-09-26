@@ -160,6 +160,9 @@ services:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
       PGPASSWORD: change-me-db-password
+      # CHANGE ME (openssl rand -hex 32): at least 32 bytes. It encrypts the vendor
+      # accounts in the database; without it they must be signed in again.
+      LLMPROXY_CREDENTIALS_KEY: change-me-credentials-key-at-least-32-bytes
       LLMPROXY_WEB_ADDR: ":8081"
       LLMPROXY_PUBLIC_API_URL: http://localhost:8080
       LLMPROXY_COOKIE_SECURE: "false"
@@ -663,6 +666,7 @@ All settings are environment variables, set in the backend's `environment` in th
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_DATABASE_URL` | — (required) | PostgreSQL connection URL. The compose files write the user and database into it and pass the password separately as `PGPASSWORD` |
+| `LLMPROXY_CREDENTIALS_KEY` | — (required) | Encrypts the vendor accounts' OAuth credentials in the database (AES-256-GCM). At least 32 bytes (`openssl rand -hex 32`). Keep it apart from database backups: without it every vendor account must be signed in again |
 
 **Auth and sessions**
 
