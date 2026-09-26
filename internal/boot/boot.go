@@ -30,6 +30,7 @@ import (
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
@@ -49,6 +50,7 @@ import (
 	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
 	pgusage "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
 	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
+	pgvendorcreds "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/vendorcreds"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -99,9 +101,9 @@ const (
 // Boot order: configuration and the process log, migrations, the pool,
 // repositories and the one password hasher, the bootstrap administrator, the
 // upstream boot configuration from the database, metrics, the price list and the
-// usage sink, the gateway, then the three listeners and the price catalog's
-// checks, and once the gateway runs, the model catalogue updaters unless
-// LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// usage sink, the vendor credential store, the gateway, then the three listeners
+// and the price catalog's checks, and once the gateway runs, the model catalogue
+// updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
@@ -211,13 +213,29 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("prices: %w", err)
 	}
 
-	// Until the credential store takes over, the token store is upstream's
-	// process-wide file store, based at bootCfg.AuthDir: the directory the
-	// gateway also resolves its auth directory from.
-	store := sdkauth.GetTokenStore()
-	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
-		setter.SetBaseDir(bootCfg.AuthDir)
+	// The vendor accounts' credentials live in the database, sealed under
+	// LLMPROXY_CREDENTIALS_KEY. The store is registered process-wide before the
+	// gateway exists, so upstream code that asks sdkauth.GetTokenStore gets it,
+	// never a file store it would create on the spot. It provides no cooldown
+	// store: cooldown stays in memory.
+	sealer, err := credentials.NewSealer([]byte(cfg.CredentialsKey))
+	if err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
 	}
+
+	vendorCredentials := pgvendorcreds.New(pool)
+
+	store, err := gateway.NewCredentialStore(vendorCredentials, sealer, clock, "")
+	if err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	// COMPAT(credentials-import): the one-shot import of the previous release's credential files; remove next release (RELEASING.md).
+	if err := gateway.ImportFileCredentials(ctx, bootCfg.AuthDir, vendorCredentials, sealer, clock, logs); err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	sdkauth.RegisterTokenStore(store)
 
 	manager, cooldown := gateway.NewCoreAuthManager(bootCfg, store)
 

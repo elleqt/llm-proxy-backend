@@ -69,11 +69,21 @@ func runChild(t *testing.T) ([]byte, error) {
 	t.Helper()
 	t.Parallel()
 
+	return runChildWith(t)
+}
+
+// runChildWith runs the calling test alone in a new process whose environment
+// adds env ("KEY=value") and returns what it printed and how it ended. It does
+// not make the test parallel, so a test may run several children one after
+// the other.
+func runChildWith(t *testing.T, env ...string) ([]byte, error) {
+	t.Helper()
+
 	args := []string{"-test.run=^" + t.Name() + "$", "-test.count=1", "-test.v"}
 
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
 
-	cmd.Env = append(os.Environ(), childEnv+"=1")
+	cmd.Env = append(append(os.Environ(), childEnv+"=1"), env...)
 
 	return cmd.CombinedOutput()
 }
@@ -141,15 +151,26 @@ type process struct {
 // bootstrapBanner finds the temporary password in the process's output.
 var bootstrapBanner = regexp.MustCompile(`temporary password: (\S+)`)
 
-// startProcess stores settingsDoc (unless empty) as the administrator's upstream
-// settings, then boots the process as cmd/gateway does, configured through the
-// environment, with two fake vendors in its boot configuration (boot-only vendors):
-// A behind two keys, B slow. env overrides the environment it sets. It returns
-// once all three listeners serve.
+// startProcess is startProcessOn a fresh database, which gives the process a
+// bootstrap administrator: it reads that administrator's temporary password.
 func startProcess(t *testing.T, settingsDoc string, env map[string]string) *process {
 	t.Helper()
 
-	pool := pgtest.NewTestPool(t)
+	proc := startProcessOn(t, pgtest.NewTestPool(t), settingsDoc, env)
+	proc.readBootstrapPassword(t)
+
+	return proc
+}
+
+// startProcessOn stores settingsDoc (unless empty) as the administrator's
+// upstream settings in pool's database, then boots the process on that
+// database as cmd/gateway does, configured through the environment, with two
+// fake vendors in its boot configuration (boot-only vendors): A behind two
+// keys, B slow. env overrides the environment it sets. It returns once all
+// three listeners serve.
+func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env map[string]string) *process {
+	t.Helper()
+
 	if settingsDoc != "" {
 		err := settings.New(pool).SetUpstreamDocument(context.Background(), settingsDoc, uuid.Nil, time.Now())
 		require.NoError(t, err, "store settings")
@@ -254,17 +275,24 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 		require.Fail(t, "upstream never finished starting: no file watcher")
 	}
 
-	m := bootstrapBanner.FindStringSubmatch(proc.out.String())
-	require.NotNil(t, m, "the process printed no bootstrap password")
-
-	proc.adminPassword = m[1]
-
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)
 
 	proc.browser = &http.Client{Jar: jar, Timeout: 30 * time.Second}
 
 	return proc
+}
+
+// readBootstrapPassword finds the bootstrap administrator's temporary password
+// in the process's output: a process booted on a database without an
+// administrator printed it while booting.
+func (p *process) readBootstrapPassword(t *testing.T) {
+	t.Helper()
+
+	m := bootstrapBanner.FindStringSubmatch(p.out.String())
+	require.NotNil(t, m, "the process printed no bootstrap password")
+
+	p.adminPassword = m[1]
 }
 
 // logSeen is a logrus hook that closes seen the first time a message containing
