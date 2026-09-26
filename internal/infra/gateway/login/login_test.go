@@ -3,11 +3,14 @@ package login
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -275,18 +278,20 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 
 	require.NotZero(t, registeredModels(grant.ID), "the completed login's account has no registered models: it is not routable")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
-	require.NoError(t, err, "the completed login's credential was not persisted")
+	_, ok = storedCredential(t, params.Store, grant.FileName)
+	require.True(t, ok, "the token store lists no credential for the completed login")
 }
 
 // claudeTokenFile is a login record's token storage, as upstream's
 // ClaudeTokenStorage is: the tokens live only here, not in the record's
 // Metadata, and SaveTokenToFile writes them with the metadata the store
 // injects. The token is valid for two days, so nothing tries to refresh it.
-// fail, when set, is what the write returns instead.
+// fail, when set, is what the write returns instead; panicAfterWrite makes it
+// panic once the file is written.
 type claudeTokenFile struct {
 	accessToken, refreshToken, email string
 	fail                             error
+	panicAfterWrite                  bool
 	metadata                         map[string]any
 }
 
@@ -311,7 +316,15 @@ func (s *claudeTokenFile) SaveTokenToFile(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, raw, 0o600)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return err
+	}
+
+	if s.panicAfterWrite {
+		panic("token file writer panicked after writing (test)")
+	}
+
+	return nil
 }
 
 // storageGrant is the record upstream's Claude exchange hands the post-auth
@@ -330,9 +343,10 @@ func storageGrant(t *testing.T, storage *claudeTokenFile) *coreauth.Auth {
 // TestLoginHoldsTheAccountWithItsTokens: the executors read an account's
 // token from its Metadata, but a login record carries its tokens only in
 // Storage. The account a completed login leaves in the manager must be the
-// one a restart loads from its file: tokens in Metadata, the file's path, and
-// active — or every request goes upstream without a credential until the
-// next restart.
+// one a restart loads from the token store: tokens in Metadata, and active —
+// or every request goes upstream without a credential until the next
+// restart. The stored credential carries the tokens too, so a restart does
+// not lose them.
 func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
 	params := productionParams(t)
 	r := startBooted(t, params)
@@ -355,16 +369,20 @@ func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
 	assert.Equal(t, storage.accessToken, held.Metadata["access_token"],
 		"held account's Metadata[access_token]: want the login's token, requests would carry no credential")
 	assert.Equal(t, storage.refreshToken, held.Metadata["refresh_token"], "held account's Metadata[refresh_token]")
-	assert.Equal(t, filepath.Join(params.Config.AuthDir, grant.FileName), held.Attributes[coreauth.AttributePath],
-		"held account's path attribute: want its credential")
 	assert.Equal(t, coreauth.StatusActive, held.Status, "held account status")
 	assert.False(t, held.Disabled, "held account is disabled")
 	assert.NotZero(t, registeredModels(account.ID), "the completed login's account has no registered models: it is not routable")
+
+	persisted, ok := storedCredential(t, params.Store, account.ID)
+	require.True(t, ok, "the token store lists no credential for the completed login")
+	assert.Equal(t, storage.accessToken, persisted.Metadata["access_token"],
+		"stored credential's access_token: a restart would load the account without its token")
+	assert.Equal(t, storage.refreshToken, persisted.Metadata["refresh_token"], "stored credential's refresh_token")
 }
 
 // TestLoginWithAnUnsavedCredentialAddsNothing: when the token store cannot
 // write the login's credential, the login fails and nothing is held,
-// routable or on disk, so no account serves traffic that a restart drops.
+// routable or stored, so no account serves traffic that a restart drops.
 func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
 	params := productionParams(t)
 	r := startBooted(t, params)
@@ -384,8 +402,8 @@ func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
 
 	require.Zero(t, registeredModels(grant.ID), "the unsaved login's account has registered models")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
-	require.ErrorIs(t, err, os.ErrNotExist, "the unsaved login's credential is in the auth directory")
+	_, ok = storedCredential(t, params.Store, grant.FileName)
+	require.False(t, ok, "the token store lists the unsaved login's credential")
 }
 
 // listeningSockets returns the inodes of this process's listening TCP
@@ -434,7 +452,8 @@ func listeningSockets(t *testing.T) map[string]bool {
 // the logins are pending. Providers go by their policy names.
 func TestLoginStartsWithoutAListener(t *testing.T) {
 	r := startProduction(t)
-	login := New(r.gateway)
+	login, err := New(r.gateway)
+	require.NoError(t, err, "New")
 
 	t.Cleanup(func() { endLogins(login) })
 
@@ -458,7 +477,7 @@ func TestLoginStartsWithoutAListener(t *testing.T) {
 		require.True(t, before[inode], "a listening socket (inode %s) appeared while logins were pending", inode)
 	}
 
-	_, err := login.StartLogin(context.Background(), "codex")
+	_, err = login.StartLogin(context.Background(), "codex")
 	require.ErrorIs(t, err, app.ErrUnsupportedProvider, "StartLogin(codex): the wizard speaks policy names")
 }
 
@@ -470,7 +489,8 @@ func TestLoginHandsTheCallbackToUpstream(t *testing.T) {
 	params := productionParams(t)
 	params.Config.ProxyURL = "http://" + net127(freePort(t))
 	r := startWith(t, params)
-	login := New(r.gateway)
+	login, err := New(r.gateway)
+	require.NoError(t, err, "New")
 
 	t.Cleanup(func() { endLogins(login) })
 
@@ -486,13 +506,123 @@ func TestLoginHandsTheCallbackToUpstream(t *testing.T) {
 	require.NotContains(t, err.Error(), "vendor-code", "the error carries the code")
 	require.NotContains(t, err.Error(), state, "the error carries the state")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, ".oauth-codex-"+state+".oauth"))
-	require.ErrorIs(t, err, os.ErrNotExist, "the callback file is still in the auth directory: upstream did not read it")
+	_, err = os.Stat(filepath.Join(params.Config.AuthDir, handoffDir, ".oauth-codex-"+state+".oauth"))
+	require.ErrorIs(t, err, os.ErrNotExist, "the callback file is still in the hand-off directory: upstream did not read it")
 
 	require.Empty(t, params.CoreAuth.List(), "a failed login left accounts")
 }
 
 func net127(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
+
+// answerCodexExchange makes upstream's Codex code exchange — the one step of
+// upstream's real flow that needs the vendor — succeed with fresh tokens for
+// email. Upstream's exchange client leaves its transport nil when no proxy is
+// configured (internal/util/proxy.go SetProxy), so its token request goes
+// through http.DefaultTransport. For the rest of the test that is a clone whose
+// TLS dial to auth.openai.com reaches a local plain-HTTP server instead, and
+// which refuses every other TLS dial. Call it before the gateway starts: the
+// swap then happens before any goroutine of the test reads the variable, and
+// the restore, run after the gateway's own cleanup, after they have stopped.
+func answerCodexExchange(t *testing.T, email, accessToken string) {
+	t.Helper()
+
+	claims, err := json.Marshal(map[string]any{"email": email})
+	require.NoError(t, err)
+
+	vendor := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost || req.URL.Path != "/oauth/token" {
+			http.NotFound(resp, req)
+
+			return
+		}
+
+		resp.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(resp).Encode(map[string]any{
+			"access_token":  accessToken,
+			"refresh_token": "fresh-refresh-token",
+			"id_token":      "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".c2ln",
+			"token_type":    "Bearer",
+			"expires_in":    int((48 * time.Hour).Seconds()),
+		})
+	}))
+	t.Cleanup(vendor.Close)
+
+	original, ok := http.DefaultTransport.(*http.Transport)
+	require.True(t, ok, "http.DefaultTransport is a %T", http.DefaultTransport)
+
+	transport := original.Clone()
+	transport.Proxy = nil
+	transport.DialTLSContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		if addr != "auth.openai.com:443" {
+			return nil, fmt.Errorf("test transport: no TLS route to %s", addr)
+		}
+
+		// A connection that is no *tls.Conn is used as it is: plain HTTP.
+		return (&net.Dialer{}).DialContext(ctx, "tcp", vendor.Listener.Addr().String())
+	}
+
+	http.DefaultTransport = transport
+
+	t.Cleanup(func() { http.DefaultTransport = original })
+}
+
+// TestReloginKeepsTheHeldStateOverAStaleCredentialFile: in this release the
+// auth directory is still the grants volume, holding each account's file as
+// it was before the upgrade. Upstream's login handler merges the non-token
+// keys of the file named like the new record from its auth directory
+// (mergeExistingAuthFileMetadata) and falls back to the account the manager
+// holds only when there is no such file. Signing an account in again must
+// keep the state the gateway holds — enabled, as it was since the upgrade —
+// not revive the stale file's "disabled" or its other keys.
+func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
+	const email = "relogin@example.com"
+
+	id := "codex-" + email + ".json"
+
+	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(id) })
+
+	params := grantsVolumeParams(t)
+	stale, err := json.Marshal(map[string]any{
+		"type": "codex", "email": email, "access_token": "stale-access-token",
+		"disabled": true, "stale_marker": "from the grants volume",
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(params.Config.AuthDir, id), stale, 0o600))
+	answerCodexExchange(t, email, "fresh-access-token")
+
+	srv := startBooted(t, params)
+	_, err = srv.gateway.AddAccount(context.Background(), &coreauth.Auth{
+		ID: id, FileName: id, Provider: "codex", Status: coreauth.StatusActive,
+		Metadata: map[string]any{
+			"type": "codex", "email": email, "access_token": "held-access-token",
+			"expired": time.Now().Add(48 * time.Hour).Format(time.RFC3339),
+		},
+	})
+	require.NoError(t, err, "AddAccount: the held account")
+
+	login, err := New(srv.gateway)
+	require.NoError(t, err, "New")
+	t.Cleanup(func() { endLogins(login) })
+
+	session, err := login.StartLogin(context.Background(), "chatgpt")
+	require.NoError(t, err, "StartLogin")
+
+	account, err := login.CompleteLogin(context.Background(), session.SessionID,
+		"http://localhost:1455/auth/callback?code=vendor-code&state="+stateOf(t, session.AuthURL))
+	require.NoError(t, err, "CompleteLogin")
+	require.Equal(t, id, account.ID, "CompleteLogin account")
+
+	held, ok := params.CoreAuth.GetByID(id)
+	require.True(t, ok, "the signed-in account is not held")
+	assert.False(t, held.Disabled, "the signed-in account came back disabled: the stale file's state won over the held one")
+	assert.NotContains(t, held.Metadata, "stale_marker", "the signed-in account carries a key of the stale file")
+	assert.Equal(t, "fresh-access-token", held.Metadata["access_token"], "the signed-in account's token")
+
+	stored, ok := storedCredential(t, params.Store, id)
+	require.True(t, ok, "the token store lists no credential for the signed-in account")
+	assert.False(t, stored.Disabled, "the stored credential is disabled: a restart would load the stale file's state")
+	assert.NotContains(t, stored.Metadata, "stale_marker", "the stored credential carries a key of the stale file")
+}
 
 // TestLoginRefusesACallbackForAnotherSignIn: a pasted URL whose state is not
 // the session's is login_failed, reaches no exchange and adds nothing, and

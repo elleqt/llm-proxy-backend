@@ -331,6 +331,30 @@ func TestControlPanelIsNotServed(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, code, "GET /management.html after a push re-enabling it (%q)", body)
 }
 
+// TestAdmitForcesCooldownFilesAndRequestLogOff: with save-cooldown-status on,
+// upstream persists cooldown state to files in the auth directory unless the
+// token store provides its own cooldown store; with request-log on, its
+// handlers buffer every failed request's details in memory for a request
+// logger the gateway does not install. Neither setting survives admission,
+// at boot or on a push.
+func TestAdmitForcesCooldownFilesAndRequestLogOff(t *testing.T) {
+	srv := start(t, &cliproxyconfig.Config{SaveCooldownStatus: true, RequestLog: true})
+
+	booted := srv.gateway.CurrentConfig()
+	assert.False(t, booted.SaveCooldownStatus, "boot configuration: save-cooldown-status survived admission")
+	assert.False(t, booted.RequestLog, "boot configuration: request-log survived admission")
+
+	pushed := srv.emptyPush()
+
+	pushed.SaveCooldownStatus = true
+	pushed.RequestLog = true
+	require.NoError(t, srv.gateway.PushConfig(pushed), "PushConfig")
+
+	current := srv.gateway.CurrentConfig()
+	assert.False(t, current.SaveCooldownStatus, "pushed configuration: save-cooldown-status survived admission")
+	assert.False(t, current.RequestLog, "pushed configuration: request-log survived admission")
+}
+
 // fakeVendor wires the fake executor into a real upstream auth manager, for
 // conductor-level tests only. No HTTP request reaches this path: a request
 // resolves its provider from the global model registry by model name, and every
@@ -517,32 +541,6 @@ func TestMiddlewareIsAppliedToRequests(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	require.Equal(t, "applied", resp.Header.Get("X-Gateway-Middleware"), "X-Gateway-Middleware")
-}
-
-// TestNewCoreAuthManagerUsesTheAuthDirectory proves the manager it returns
-// persists credentials into the supplied directory, which is what the upstream
-// builder's default path arranges via SetBaseDir. The cooldown store is nil
-// here because the default file token store does not implement
-// coreauth.CooldownStateStoreProvider — the upstream default path gets nil too.
-func TestNewCoreAuthManagerUsesTheAuthDirectory(t *testing.T) {
-	authDir := t.TempDir()
-
-	m, _, _ := NewCoreAuthManager(&cliproxyconfig.Config{AuthDir: authDir})
-	require.NotNil(t, m, "NewCoreAuthManager returned no manager")
-
-	_, err := m.Register(context.Background(), &coreauth.Auth{
-		ID:       "persisted-credential.json",
-		Provider: "fake-vendor",
-		Status:   coreauth.StatusActive,
-		FileName: "persisted-credential.json",
-		Metadata: map[string]any{"access_token": "fake-token"},
-	})
-	require.NoError(t, err, "register")
-
-	entries, err := os.ReadDir(authDir)
-	require.NoError(t, err, "read auth dir")
-
-	require.NotEmpty(t, entries, "no credential was written to %q; the auth directory was not applied", authDir)
 }
 
 // TestPushConfigCannotEnableManagement: a remote-management secret key is what

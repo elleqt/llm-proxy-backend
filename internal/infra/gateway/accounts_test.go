@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -79,11 +77,11 @@ func startProduction(t *testing.T) (*running, *coreauth.Manager) {
 // lock, and reports nowhere when it is done. An account change re-applies the
 // configuration under the lock and would race it, and an account registered
 // meanwhile would get its models from boot instead of from the change (see
-// WaitReload). So the auth directory holds one credential before boot, which
+// WaitReload). So the token store holds one credential before boot, which
 // only that last step registers models for — the manager loads it without
 // any, unlike a config-derived account — and startBooted returns once its
 // models are in the registry. The credential is an account like any other,
-// in the directory, the manager and Accounts.
+// in the store, the manager and Accounts.
 func startBooted(t *testing.T, params Params) *running {
 	t.Helper()
 
@@ -166,15 +164,15 @@ func TestRemoveAccountUnregistersModels(t *testing.T) {
 }
 
 // TestRemoveAccountDeletesTheCredentialAcrossARestart: a removed account must
-// stay removed when a fresh gateway starts on the same auth directory. The kept
-// account shows the fresh gateway does load what the directory holds, so the
+// stay removed when a fresh gateway starts on the same token store. The kept
+// account shows the fresh gateway does load what the store holds, so the
 // removed one's absence is not an empty boot. The removed account's file name
-// differs from the id it was added with; it is held, as a restart loads it,
-// under its file name.
+// differs from the id it was added with; it is stored and held, as a restart
+// loads it, under its file name.
 func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
-	p := productionParams(t)
-	authDir := p.Config.AuthDir
-	srv := startBooted(t, p)
+	params := productionParams(t)
+	authDir := params.Config.AuthDir
+	srv := startBooted(t, params)
 	kept := claudeGrantNamed(t, t.Name()+"-kept")
 	removed := claudeGrantNamed(t, t.Name()+"-removed")
 
@@ -183,15 +181,11 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 		stored, err := srv.gateway.AddAccount(context.Background(), grant)
 		require.NoError(t, err, "AddAccount(%s)", grant.ID)
 		require.Equal(t, grant.FileName, stored.ID, "AddAccount(%s) must hold the id a restart gives it, its file name", grant.ID)
-
-		_, err = os.Stat(filepath.Join(authDir, grant.FileName))
-		require.NoError(t, err, "the added account's credential was not persisted")
+		require.True(t, storeLists(t, params.Store, grant.FileName), "the token store lists no credential for the added account %q", grant.FileName)
 	}
 
 	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), removed.FileName), "RemoveAccount")
-
-	_, err := os.Stat(filepath.Join(authDir, removed.FileName))
-	require.True(t, os.IsNotExist(err), "the removed account's credential is still in the auth directory (stat: %v)", err)
+	require.False(t, storeLists(t, params.Store, removed.FileName), "the token store still lists the removed account's credential")
 	require.ErrorIs(t, srv.stop(), context.Canceled, "stop: Run must return context.Canceled")
 
 	fresh := productionParamsIn(authDir)
@@ -199,133 +193,23 @@ func TestRemoveAccountDeletesTheCredentialAcrossARestart(t *testing.T) {
 
 	_, ok := fresh.CoreAuth.GetByID(kept.ID)
 	require.True(t, ok, "a fresh gateway did not load the kept account: the restart proves nothing")
-	// A credential loaded from the directory takes its file name as its id.
+	// A credential loaded from the store takes its key, the file name, as its id.
 	for _, id := range []string{removed.ID, removed.FileName} {
 		_, ok := fresh.CoreAuth.GetByID(id)
 		require.False(t, ok, "a fresh gateway resurrected the removed account as %q", id)
 	}
 }
 
-// TestRemoveAccountDeletesACredentialInASubdirectory: a file name with a
-// separator — upstream puts the raw account email into Claude file names —
-// is saved under the auth directory. The file store's Delete would resolve
-// such a key against the working directory and report the missing file as
-// success, and the store lists subdirectories, so a fresh gateway would load
-// the account again. The name climbs with ".." but stays inside, so AddAccount
-// must accept it: the containment check is on the resolved path, not the text.
-func TestRemoveAccountDeletesACredentialInASubdirectory(t *testing.T) {
-	p := productionParams(t)
-	authDir := p.Config.AuthDir
-	srv := startBooted(t, p)
-	grant := claudeGrant(t)
-	grant.FileName = "team/sub/../" + grant.ID
-
-	stored, err := srv.gateway.AddAccount(context.Background(), grant)
-	require.NoError(t, err, "AddAccount")
-
-	inTeam := filepath.Join("team", grant.ID)
-
-	onDisk := filepath.Join(authDir, inTeam)
-	_, err = os.Stat(onDisk)
-	require.NoError(t, err, "the added account's credential was not persisted under the auth directory")
-	require.NoError(t, srv.gateway.RemoveAccount(context.Background(), stored.ID), "RemoveAccount")
-
-	_, err = os.Stat(onDisk)
-	require.True(t, os.IsNotExist(err), "the removed account's credential is still at %s (stat: %v)", onDisk, err)
-	require.ErrorIs(t, srv.stop(), context.Canceled, "stop: Run must return context.Canceled")
-
-	fresh := productionParamsIn(authDir)
-	startWith(t, fresh)
-
-	for _, id := range []string{grant.ID, inTeam} {
-		_, ok := fresh.CoreAuth.GetByID(id)
-		require.False(t, ok, "a fresh gateway resurrected the removed account as %q", id)
-	}
-}
-
-// TestRemoveAccountRefusesACredentialOutsideTheAuthDirectory: a credential
-// that lies outside the auth directory is refused before anything changes, and
-// the file it names is not touched. AddAccount refuses such an account, so it
-// is registered straight into the manager, which persists it where the name
-// points.
-func TestRemoveAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
-	parent := t.TempDir()
-	params := productionParamsIn(filepath.Join(parent, "auths"))
-	srv := startWith(t, params)
-	grant := claudeGrant(t)
-
-	grant.FileName = filepath.Join("..", grant.ID)
-	_, err := params.CoreAuth.Register(context.Background(), grant)
-	require.NoError(t, err, "Register")
-
-	outside := filepath.Join(parent, grant.ID)
-	_, err = os.Stat(outside)
-	require.NoError(t, err, "upstream did not write the escaping credential where the test expects it")
-
-	err = srv.gateway.RemoveAccount(context.Background(), grant.ID)
-	require.ErrorIs(t, err, ErrCredentialPath, "RemoveAccount of a credential outside the auth directory")
-
-	_, err = os.Stat(outside)
-	require.NoError(t, err, "the refused removal touched the file outside the auth directory")
-
-	got, ok := params.CoreAuth.GetByID(grant.ID)
-	require.True(t, ok, "a refused removal dropped the account")
-	require.False(t, got.Disabled, "a refused removal disabled the account")
-}
-
-// TestAddAccountRefusesACredentialOutsideTheAuthDirectory: Save writes to the
-// first of the path attribute, the file name and the id that is set, so each
-// one that escapes is refused before anything is saved — including one Save
-// would not use now, which a later save without the path attribute would fall
-// back to. Nothing is written and nothing is held.
-func TestAddAccountRefusesACredentialOutsideTheAuthDirectory(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		escape func(grant *coreauth.Auth, parent string)
-	}{
-		{"file name", func(grant *coreauth.Auth, _ string) {
-			grant.FileName = "team/../../" + grant.ID
-		}},
-		{"id", func(grant *coreauth.Auth, _ string) {
-			grant.ID = "../" + grant.ID
-		}},
-		{"path attribute", func(grant *coreauth.Auth, parent string) {
-			grant.Attributes = map[string]string{coreauth.AttributePath: filepath.Join(parent, grant.FileName)}
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			parent := t.TempDir()
-			authDir := filepath.Join(parent, "auths")
-			params := productionParamsIn(authDir)
-			r := startWith(t, params)
-			grant := claudeGrantNamed(t, strings.ReplaceAll(t.Name(), "/", "-"))
-			tc.escape(grant, parent)
-
-			_, err := r.gateway.AddAccount(context.Background(), grant)
-
-			assert.Empty(t, params.CoreAuth.List(), "manager holds accounts after a refused AddAccount")
-			assert.Zero(t, registeredModels(grant.ID), "a refused account has registered models")
-
-			_ = filepath.WalkDir(parent, func(path string, d os.DirEntry, err error) error {
-				require.NoError(t, err, "walk %s", path)
-				assert.True(t, d.IsDir(), "a refused AddAccount left %s on disk", path)
-
-				return nil
-			})
-
-			require.ErrorIs(t, err, ErrCredentialPath, "AddAccount of a credential outside the auth directory")
-		})
-	}
-}
-
 // faultyStore is the production token store with Save and Delete failing on
-// demand. The manager keeps persisting to the real store it was built on; only
-// the gateway's own calls go through this one.
+// demand, and List leaving out every credential on demand, as a store that
+// does not load back what it saved. The manager keeps persisting to the real
+// store it was built on; only the gateway's own calls go through this one.
 type faultyStore struct {
 	coreauth.Store
 
 	refuseSave   atomic.Bool
 	refuseDelete atomic.Bool
+	dropListed   atomic.Bool
 }
 
 var (
@@ -347,6 +231,14 @@ func (s *faultyStore) Delete(ctx context.Context, id string) error {
 	}
 
 	return s.Store.Delete(ctx, id)
+}
+
+func (s *faultyStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	if s.dropListed.Load() {
+		return nil, nil
+	}
+
+	return s.Store.List(ctx)
 }
 
 // TestSetAccountDisabledReportsAnUnsavedFlag: the manager discards its save
@@ -411,8 +303,7 @@ func TestRemoveAccountReportsAnUndeletedCredential(t *testing.T) {
 	_, ok = params.CoreAuth.GetByID(grant.ID)
 	require.False(t, ok, "manager still holds the account after the retry")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.ID))
-	require.True(t, os.IsNotExist(err), "the credential survived the retry (stat: %v)", err)
+	require.False(t, storeLists(t, params.Store, grant.ID), "the token store still lists the credential after the retry")
 }
 
 // TestRemoveAccountReportsAnUnsavedDisable: when the delete fails, the
@@ -513,13 +404,43 @@ func TestAddAccountWithdrawsAnUnsavedCredential(t *testing.T) {
 	require.False(t, ok, "the unsaved account is still held")
 	require.Zero(t, registeredModels(grant.ID), "the unsaved account still has registered models")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
-	require.True(t, os.IsNotExist(err), "the unsaved account's credential is in the auth directory (stat: %v)", err)
+	require.False(t, storeLists(t, params.Store, grant.FileName), "the token store lists the unsaved account's credential")
 
 	store.refuseSave.Store(false)
 
 	_, err = srv.gateway.AddAccount(context.Background(), grant)
 	require.NoError(t, err, "retried AddAccount")
+}
+
+// TestAddAccountWithdrawsACredentialItCannotLoadBack: when the save succeeds
+// but the store does not list the saved credential back, AddAccount fails,
+// holds nothing, and deletes the credential it wrote — keyed by its file name,
+// not its id — so no orphan row comes back on the next start.
+func TestAddAccountWithdrawsACredentialItCannotLoadBack(t *testing.T) {
+	params := productionParams(t)
+	store := &faultyStore{Store: params.Store}
+	params.Store = store
+	srv := startBooted(t, params)
+
+	grant := claudeGrant(t)
+	grant.FileName = "renamed-" + grant.ID
+
+	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(grant.FileName) })
+
+	store.dropListed.Store(true)
+
+	_, err := srv.gateway.AddAccount(context.Background(), grant)
+	require.ErrorIs(t, err, errCredentialNotLoaded, "AddAccount whose credential is not listed back")
+	require.ErrorContains(t, err, "its credential was withdrawn", "AddAccount error does not say the credential was withdrawn")
+
+	store.dropListed.Store(false)
+
+	for _, id := range []string{grant.ID, grant.FileName} {
+		_, ok := params.CoreAuth.GetByID(id)
+		require.False(t, ok, "the account whose credential was not loaded back is held as %q", id)
+	}
+
+	require.False(t, storeLists(t, params.Store, grant.FileName), "the withdrawn credential is still stored: a restart would load it")
 }
 
 // TestAddAccountKeepsADisabledAccountAcrossARestart: upstream's file store

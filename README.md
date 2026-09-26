@@ -95,7 +95,7 @@ In both compose files only the gateway (host port `8080`) and the frontend (host
 
 ## Quick start
 
-Ready-made images for `linux/amd64` and `linux/arm64` are published on Docker Hub; nothing is built on your machine. You need Docker with the Compose v2 plugin, and openssl for the database password.
+Ready-made images for `linux/amd64` and `linux/arm64` are published on Docker Hub; nothing is built on your machine. You need Docker with the Compose v2 plugin, and openssl for the database password and the credentials key.
 
 ### 1. Install Docker
 
@@ -160,11 +160,16 @@ services:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
       PGPASSWORD: change-me-db-password
+      # CHANGE ME (openssl rand -hex 32): at least 32 bytes. It encrypts the vendor
+      # accounts in the database; without it they must be signed in again.
+      LLMPROXY_CREDENTIALS_KEY: change-me-credentials-key-at-least-32-bytes
       LLMPROXY_WEB_ADDR: ":8081"
       LLMPROXY_PUBLIC_API_URL: http://localhost:8080
       LLMPROXY_COOKIE_SECURE: "false"
       LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
     volumes:
+      # COMPAT(credentials-import): an earlier release's vendor account files,
+      # imported into the database once; the next release removes this mount.
       - grants:/var/lib/llmproxy/auths
     ports:
       - "8080:8080"
@@ -179,6 +184,7 @@ services:
 
 volumes:
   pgdata:
+  # COMPAT(credentials-import): removed with the mount above in the next release.
   grants:
 ```
 
@@ -188,23 +194,25 @@ volumes:
 curl -fsSLO https://raw.githubusercontent.com/elleqt/llm-proxy-backend/main/docker-compose.yml
 ```
 
-No `.env` file is needed with either: every value is in the compose file, and you change a setting by editing it there. `CHANGE ME` marks what must change. Both files use the same volume, user and database names, so you can switch from the minimal file to the full one later and keep your data: put the database password you already use into the new file instead of a new one.
+No `.env` file is needed with either: every value is in the compose file, and you change a setting by editing it there. `CHANGE ME` marks what must change. Both files use the same volume, user and database names, so you can switch from the minimal file to the full one later and keep your data: put the database password and the credentials key you already use into the new file instead of new ones.
 
-### 4. Set the database password
+### 4. Set the database password and the credentials key
 
-Replace the placeholder `change-me-db-password` (it appears twice: Postgres and the backend) with a random password:
+Replace the placeholders `change-me-db-password` (it appears twice: Postgres and the backend) and `change-me-credentials-key-at-least-32-bytes` with random values:
 
 ```sh
-sed -i "s/change-me-db-password/$(openssl rand -hex 24)/g" docker-compose.yml
+sed -i -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
+  -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
 ```
 
 On macOS:
 
 ```sh
-sed -i '' "s/change-me-db-password/$(openssl rand -hex 24)/g" docker-compose.yml
+sed -i '' -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
+  -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
 ```
 
-Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database.
+Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database. The backend refuses to start while the credentials key is still the placeholder. The credentials key encrypts the vendor accounts stored in the database: keep a copy with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
 
 ### 5. Start
 
@@ -233,7 +241,7 @@ Open **http://localhost:8081**, sign in with that email and password, and choose
 3. At the end, the browser goes to a `localhost` URL that **does not load**. This is expected. The vendor's OAuth client is registered for CLI tools, which run a small listener on your own machine to catch that redirect. llm-proxy runs on a server and opens no such listener. The authorization code is in the URL itself.
 4. Copy the **whole URL** from the address bar, paste it into the wizard, and click **Finish adding**.
 
-The link is valid for 5 minutes. If the pasted URL is wrong, the sign-in stays open and you can paste again. The vendor grant is stored in the `grants` volume.
+The link is valid for 5 minutes. If the pasted URL is wrong, the sign-in stays open and you can paste again. The vendor account's OAuth credentials are stored in Postgres, encrypted with `LLMPROXY_CREDENTIALS_KEY`.
 
 ### 8. Issue a key and test it
 
@@ -331,7 +339,27 @@ With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from 
    docker compose pull && docker compose up -d
    ```
 
-If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer compose file is not required for an upgrade unless the release notes say so.
+If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer compose file is not required for an upgrade unless the release notes say so. This release is one of those: it needs `LLMPROXY_CREDENTIALS_KEY` set, or the backend does not start (see [Vendor accounts move into the database](#vendor-accounts-move-into-the-database)). <!-- COMPAT(credentials-import): drop the "This release" sentence next release. -->
+
+### Vendor accounts move into the database
+
+<!-- COMPAT(credentials-import): this entry describes the one-shot import; the next release replaces it (RELEASING.md, "Next release: remove the credentials import"). -->
+From this release the vendor accounts' OAuth credentials are stored in Postgres, encrypted, instead of as files in the `grants` volume, and CLIProxyAPI writes no request or error log files. Upgrading from an earlier release:
+
+1. Add `LLMPROXY_CREDENTIALS_KEY` to the backend's `environment` (at least 32 bytes, e.g. `openssl rand -hex 32`) and store it with your other secrets. **The backend does not start without it.** Losing it means signing every vendor account in again.
+2. Keep the `grants` volume mounted for this upgrade (the shipped compose files do). On the first start the accounts are imported into the database once; the files are not changed. If the backend stops at start naming a file in that volume, the file could not be read: fix or remove it and start again. If the first start ran without the volume, nothing was imported and the import does not run again by itself. Provided no vendor account has been added since, delete the import's marker and restart with the volume mounted, which imports the files (an account added since under the name of one of the files makes the import fail at start and roll back):
+
+   ```sh
+   docker compose exec postgres psql -U llmproxy llmproxy -c "DELETE FROM settings WHERE key = 'vendor_credentials_import';"
+   docker compose up -d
+   ```
+
+3. If the log warns that `save-cooldown-status`, `request-log` or `error-logs-max-files` is ignored, remove it from the settings document in the admin panel (**Admin → Settings**).
+4. The `runtime` volume is no longer used: remove the `runtime` mount and volume from your `docker-compose.yml` (the full file had them), run `docker compose up -d`, then `docker volume rm <project>_runtime`.
+
+**Do not skip this release.** It is the only one that imports the account files; the next release removes the import and the `grants` volume (the list of what it removes is in [RELEASING.md](RELEASING.md#next-release-remove-the-credentials-import)). An installation on an earlier release must upgrade to this one and start it once (the log reports `imported the vendor credential files into the database` with the count) before upgrading further. Upgrading past it leaves the accounts unimported, and removing the `grants` volume then deletes their only copy.
+
+**Going back to an earlier release** reads the account files in the `grants` volume, which this release leaves as they were at the upgrade: accounts added since then are missing, and accounts removed since then come back. Upgrading again does not import a second time (the import runs once), so accounts added or signed in again while on the earlier release are lost and must be signed in again.
 
 ## Images
 
@@ -367,7 +395,7 @@ cd backend
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password stays the file's placeholder, which is enough for a local build: Postgres is not published. To update: `git pull` in both checkouts and run the same `up -d --build`.
+The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password can stay the file's placeholder for a local build, since Postgres is not published; the credentials key cannot, so replace `change-me-credentials-key-at-least-32-bytes` first (see [step 4](#4-set-the-database-password-and-the-credentials-key)). To update: `git pull` in both checkouts and run the same `up -d --build`.
 
 ## Connecting clients
 
@@ -527,9 +555,17 @@ Checklist:
 - **Never expose the web API or metrics listeners.** In compose they have no published port. Keep it that way.
 - **Expose the gateway only through the reverse proxy.** Its server has no header or idle timeouts, so slow-client protection comes from the proxy. Allow long responses on the API host: streams can last minutes.
 - **Pin the version:** keep both image tags at a release (`X.Y.Z`), never `edge`.
-- **Backups:**
-  - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file).
-  - The **`grants` volume** holds the vendor OAuth grants. They are files, not database rows. If you lose it, every vendor account must be signed in again. Back it up with your usual volume backup (e.g. `docker run --rm -v <project>_grants:/data -v "$PWD":/backup alpine tar czf /backup/grants.tgz -C /data .`, where `<project>` is the compose project name, by default the directory's name).
+- **Backups:** a database dump and `LLMPROXY_CREDENTIALS_KEY` are the whole backup; the backend keeps nothing else on disk.
+  - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file). The dump includes the vendor accounts' OAuth credentials, encrypted.
+  - **`LLMPROXY_CREDENTIALS_KEY`**: keep it with your other secrets, not next to the dumps. A dump restored without it has everything but the vendor accounts, which must then be signed in again.
+  - **Lost or changed key:** the backend does not start while the database holds accounts the key cannot open; its log names the account. Put the new key in the compose file, delete the stored accounts, start the backend, and sign each account in again (**Admin → Providers → Add account**):
+
+    ```sh
+    docker compose exec postgres psql -U llmproxy llmproxy -c 'DELETE FROM vendor_credentials;'
+    docker compose up -d
+    ```
+
+  - The `grants` volume is not part of the backup: after the first start of this release its account files are never read again (a vendor sign-in only passes a short-lived hand-off file through its `.login` subdirectory). <!-- COMPAT(credentials-import): delete this item next release (RELEASING.md). -->
 - **Upgrades:** see [Upgrading](#upgrading).
 - **Shutdown:** on stop the backend lets in-flight requests finish for up to 30 s. Compose gives it 45 s (`stop_grace_period`).
 
@@ -558,6 +594,7 @@ Checklist:
 
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
 - The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel.
+- **`save-cooldown-status`, `request-log` and `error-logs-max-files`** have no effect: cooldowns stay in memory and CLIProxyAPI writes no request or error log files. A document may not add one of them or change its value. A document saved by an earlier release that still sets one keeps working, and the backend logs a warning for each at start: remove them when you next edit the settings. <!-- COMPAT(credentials-import): the next release refuses these keys in any document, like the owned keys above. -->
 
 ### Prices
 
@@ -645,8 +682,8 @@ All settings are environment variables, set in the backend's `environment` in th
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_PUBLIC_API_URL` | — (required while the web listener is on) | Absolute http(s) URL clients reach the API at; shown on the Connect page. Compose files: `http://localhost:8080` |
-| `LLMPROXY_RUNTIME_DIR` | `/var/lib/llmproxy/runtime` | CLIProxyAPI's working directory (its request logs). No config file is read from it |
-| `LLMPROXY_AUTH_DIR` | `/var/lib/llmproxy/auths` | Vendor OAuth grants. Must be persistent (`grants` volume) |
+| `LLMPROXY_RUNTIME_DIR` | `/var/lib/llmproxy/runtime` | A working directory CLIProxyAPI requires. Nothing is written to it and no config file is read from it; it needs no volume |
+| `LLMPROXY_AUTH_DIR` | `/var/lib/llmproxy/auths` | Scratch directory of the vendor sign-in (a hand-off file that lives about a second); it needs no volume. The vendor accounts are in Postgres. This release also imports, once, the account files an earlier release kept here (the `grants` volume) <!-- COMPAT(credentials-import): keep only "scratch directory" next release. --> |
 | `LLMPROXY_PASSWORD_HASH_CONCURRENCY` | CPU count | How many argon2 password hashes (about 19 MiB each) may run at once |
 | `LLMPROXY_LOG_FORMAT` | `text` | Process log format (on stderr): `text` (one `key=value` line per record) or `json` (one JSON object per record). Every record carries `version` and `component` (`llmproxy`, or `cliproxyapi` for CLIProxyAPI's own lines, which also carry `cliproxy_version`) |
 
@@ -663,6 +700,7 @@ All settings are environment variables, set in the backend's `environment` in th
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_DATABASE_URL` | — (required) | PostgreSQL connection URL. The compose files write the user and database into it and pass the password separately as `PGPASSWORD` |
+| `LLMPROXY_CREDENTIALS_KEY` | — (required) | Encrypts the vendor accounts' OAuth credentials in the database (AES-256-GCM). At least 32 bytes (`openssl rand -hex 32`). Keep it apart from database backups: without it every vendor account must be signed in again |
 
 **Auth and sessions**
 
@@ -722,6 +760,7 @@ All settings are environment variables, set in the backend's `environment` in th
 
 - **API keys** have the form `sk-…`. Only their SHA-256 hash and a display prefix are stored. A key is shown once, at issue, and cannot be recovered. Revocation and blocking apply from the next request; nothing is cached.
 - **Passwords** are hashed with argon2id. Temporary passwords are shown once, expire after 72 h (bootstrap: no expiry), and restrict the session to changing the password.
+- **Vendor accounts' OAuth credentials** are stored in Postgres encrypted with AES-256-GCM, under a key derived from `LLMPROXY_CREDENTIALS_KEY`; the database never holds them in clear. Each row is bound to its account id, so a row copied to another account does not open.
 - **Sessions** are server-side, last 12 hours, and are sent as a cookie (`Secure` unless turned off). Blocking a user deletes their sessions.
 - **Sign-in throttling:** 5 failed attempts on one email lock password sign-in for that email for 15 minutes. A per-client rate limit also applies. Anyone who knows an email can trigger this lock on purpose; OIDC sign-in is not affected by it.
 - **CLIProxyAPI's management API is disabled.** No management routes are served, and the backend refuses to start if `MANAGEMENT_PASSWORD` is set. Routes the policy gate cannot decide on (websocket relay, realtime and live sessions, and others) are refused.
@@ -730,7 +769,8 @@ All settings are environment variables, set in the backend's `environment` in th
   - The usage ledger (Postgres) records per request: user, key, provider, model, token counts, latency, status and vendor account. It does not record prompts or responses.
   - The audit log records admin and auth actions.
   - The process log never contains passwords, keys, session ids or configuration secrets. The bootstrap password bypasses the logger.
-  - CLIProxyAPI's debug logging is forced off. Its own request logging, if you turn it on in settings, writes to `LLMPROXY_RUNTIME_DIR`.
+  - CLIProxyAPI's debug logging is forced off, and so are its request and error log files: nothing is written to `LLMPROXY_RUNTIME_DIR`. Vendor errors show in the metrics, the usage ledger and the process log.
+  - Every vendor sign-in prints `Saving credentials to /tmp/llmproxy-credential-…/credential.json` on standard output. CLIProxyAPI prints it; it names only the temporary file the fresh credential passes through on its way into the database (removed at once) and carries no secret.
 - The web API and metrics listeners have no protection of their own against the outside world. Keep them private (see [Production deployment](#production-deployment)).
 
 ## Development

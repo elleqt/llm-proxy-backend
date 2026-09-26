@@ -32,6 +32,7 @@ var expectedTables = []string{
 	"user_passwords",
 	"users",
 	"usage_events",
+	"vendor_credentials",
 }
 
 // expectedIndexes are the lookup paths the read-heavy queries depend on. Losing one

@@ -23,10 +23,13 @@ packages:
       IdentityRepo:
       LoginAttemptRepo:
       Logger:
+      # COMPAT(credentials-import): only the import tests use this mock; drop it next release unless something else does (RELEASING.md).
+      InfoLogger:
       Clock:
       ActivityRepo:
       ModelCatalog:
       SettingsRepo:
+      VendorCredentialRepo:
       ConfigPusher:
       PriceRepo:
       PriceSink:

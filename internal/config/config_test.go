@@ -12,11 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadRequiresDatabaseURL(t *testing.T) {
+// A process started with no configuration at all names the database URL, not the
+// credentials key: the CI image smoke test pins that first message.
+func TestLoadRequiresDatabaseURLFirst(t *testing.T) {
 	t.Setenv("LLMPROXY_DATABASE_URL", "")
+	t.Setenv("LLMPROXY_CREDENTIALS_KEY", "")
 
 	_, err := Load()
-	require.Error(t, err, "expected error when LLMPROXY_DATABASE_URL is empty")
+	require.EqualError(t, err, "config: LLMPROXY_DATABASE_URL is required")
 }
 
 func TestLoadDefaults(t *testing.T) {
@@ -79,11 +82,13 @@ func TestLoadRejectsANonPositiveHashConcurrency(t *testing.T) {
 }
 
 // gateway reset-password is how an operator gets back in when something is wrong,
-// so a setting only the server reads — here an incomplete OIDC configuration and a
-// malformed listener — must not stop it, while the two it uses are read as Load
-// reads them.
+// so a setting only the server reads — here an incomplete OIDC configuration, a
+// malformed listener and no credentials key — must not stop it, while the two it
+// uses are read as Load reads them.
 func TestLoadDatabaseReadsOnlyWhatTheDatabaseNeeds(t *testing.T) {
-	setOIDCEnv(t, map[string]string{"LLMPROXY_OIDC_CLIENT_SECRET": "", "LLMPROXY_LISTEN_ADDR": "8080"})
+	setOIDCEnv(t, map[string]string{
+		"LLMPROXY_OIDC_CLIENT_SECRET": "", "LLMPROXY_LISTEN_ADDR": "8080", "LLMPROXY_CREDENTIALS_KEY": "",
+	})
 
 	_, err := Load()
 	require.Error(t, err, "Load accepted the broken server settings this test relies on")
@@ -336,26 +341,75 @@ func TestOIDCErrorsNeverQuoteTheSecret(t *testing.T) {
 // testSessionKey is 40 bytes: a valid LLMPROXY_SESSION_KEY. No assertion may print it.
 const testSessionKey = "k3y-material-that-must-never-be-printed!"
 
-// setWebEnv sets a complete, valid web listener configuration and then applies
-// overrides; an override of "" unsets that variable for the test.
+// testCredentialsKey is 39 bytes: a valid LLMPROXY_CREDENTIALS_KEY. No assertion may
+// print it.
+const testCredentialsKey = "credentials-key-material-never-to-print"
+
+// setWebEnv sets a complete, valid web listener configuration, with the required
+// credentials key, and then applies overrides; an override of "" unsets that
+// variable for the test.
 func setWebEnv(t *testing.T, overrides map[string]string) {
 	t.Helper()
 
 	env := map[string]string{
-		"LLMPROXY_DATABASE_URL":   "postgres://u:p@localhost:5432/db",
-		"LLMPROXY_WEB_ADDR":       "",
-		"LLMPROXY_LISTEN_ADDR":    "",
-		"LLMPROXY_METRICS_ADDR":   "",
-		"LLMPROXY_PUBLIC_API_URL": "https://api.example.com",
-		"LLMPROXY_COOKIE_SECURE":  "",
-		"LLMPROXY_SESSION_KEY":    testSessionKey,
-		"LLMPROXY_LOCAL_LOGIN":    "",
+		"LLMPROXY_DATABASE_URL":    "postgres://u:p@localhost:5432/db",
+		"LLMPROXY_CREDENTIALS_KEY": testCredentialsKey,
+		"LLMPROXY_WEB_ADDR":        "",
+		"LLMPROXY_LISTEN_ADDR":     "",
+		"LLMPROXY_METRICS_ADDR":    "",
+		"LLMPROXY_PUBLIC_API_URL":  "https://api.example.com",
+		"LLMPROXY_COOKIE_SECURE":   "",
+		"LLMPROXY_SESSION_KEY":     testSessionKey,
+		"LLMPROXY_LOCAL_LOGIN":     "",
 	}
 	maps.Copy(env, overrides)
 
 	for k, v := range env {
 		t.Setenv(k, v)
 	}
+}
+
+// The key opens every vendor credential in the database, so the server does not
+// start without one or with one too short to be a key. Neither error repeats what
+// was set; an accepted key reaches Config unchanged.
+func TestCredentialsKeyIsRequiredAndNeverQuoted(t *testing.T) {
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": ""})
+
+	_, err := Load()
+	require.EqualError(t, err, "config: LLMPROXY_CREDENTIALS_KEY is required")
+
+	short := testCredentialsKey[:MinCredentialsKeyLen-1]
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": short})
+
+	_, err = Load()
+	require.ErrorContains(t, err, "LLMPROXY_CREDENTIALS_KEY must be at least 32 bytes")
+	// Not NotContains: its failure message would print the key.
+	quoted := strings.Contains(err.Error(), short)
+	require.False(t, quoted, "the error quotes the key")
+
+	exact := testCredentialsKey[:MinCredentialsKeyLen]
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": exact})
+
+	cfg, err := Load()
+	require.NoError(t, err, "Load")
+	// Not Equal: its failure message would print the key.
+	require.True(t, bytes.Equal([]byte(exact), cfg.CredentialsKey), "CredentialsKey is not the configured key")
+}
+
+// The compose files ship a placeholder key long enough to pass the length check.
+// It is public, so a server started with it would encrypt the vendor accounts under
+// a key anyone has: refused, with a hint to generate one and without the value.
+func TestCredentialsKeyRefusesTheComposePlaceholder(t *testing.T) {
+	const placeholder = "change-me-credentials-key-at-least-32-bytes"
+
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": placeholder})
+
+	_, err := Load()
+	require.ErrorContains(t, err, "LLMPROXY_CREDENTIALS_KEY")
+	require.ErrorContains(t, err, "openssl rand -hex 32")
+
+	quoted := strings.Contains(err.Error(), placeholder)
+	require.False(t, quoted, "the error quotes the key")
 }
 
 func TestWebDefaultsToALoopbackListenerWithSecureCookies(t *testing.T) {
@@ -461,17 +515,21 @@ func TestWebSessionKeyIsRequiredForOIDCAndNeverQuoted(t *testing.T) {
 	require.True(t, bytes.Equal([]byte(testSessionKey), cfg.Web.SessionKey), "SessionKey is not the configured key")
 }
 
-// Config is the kind of value that ends up in a startup log line or a panic. The
-// session key must not come with it, however it is formatted.
-func TestFormattingTheConfigNeverPrintsTheSessionKey(t *testing.T) {
+// Config is the kind of value that ends up in a startup log line or a panic. No key
+// may come with it, however it is formatted.
+func TestFormattingTheConfigNeverPrintsAKey(t *testing.T) {
 	setWebEnv(t, nil)
 
 	cfg, err := Load()
 	require.NoError(t, err, "Load")
 
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
-		// Not NotContains: its failure message would print the key.
-		printed := strings.Contains(fmt.Sprintf(verb, cfg), testSessionKey)
-		require.False(t, printed, "formatting the config with %s prints the session key", verb)
+		printed := fmt.Sprintf(verb, cfg)
+		// Not NotContains: its failure message would print the keys.
+		session := strings.Contains(printed, testSessionKey)
+		require.False(t, session, "formatting the config with %s prints the session key", verb)
+
+		credentials := strings.Contains(printed, testCredentialsKey)
+		require.False(t, credentials, "formatting the config with %s prints the credentials key", verb)
 	}
 }

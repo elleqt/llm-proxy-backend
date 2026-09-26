@@ -39,16 +39,18 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 
 - Startup: `config.Load()` → goose migrations (on every boot) → pgx pool → `build()` → `serve()`.
 - `build()` also bootstraps the first admin and loads the upstream config document from the `settings` table.
+- Vendor accounts' OAuth credentials live in Postgres (`vendor_credentials`), sealed with AES-256-GCM under `LLMPROXY_CREDENTIALS_KEY` (`credentials.Sealer`). `build()` wires `gateway.CredentialStore` (upstream's token store over `postgres/vendorcreds`), registers it process-wide, and lists it once so a wrong key stops the boot. Plaintext exists only in memory and, during a sign-in, in a `llmproxy-credential-*` scratch dir under `os.TempDir()`.
+- Between creating the store and listing it, `build()` runs `gateway.ImportFileCredentials`: a one-shot import of the credential files an earlier release kept in `LLMPROXY_AUTH_DIR`. It is temporary, tagged `COMPAT(credentials-import)` like every other upgrade-only site, and goes next release (`RELEASING.md`). <!-- COMPAT(credentials-import): drop this item next release. -->
 - Shutdown order: listeners → gateway drain → usage sink drain → pool.
 - Admin settings changes reach the live gateway through `app.ConfigPusher`.
 
 ## Key Directories
 
 - `cmd/gateway/`: entry point. `gateway` serves; `gateway reset-password <email> [--unblock]` recovers an account offline.
-- `internal/domain/{access,identity,credentials}`: policy rules, argon2id hashes, `sk-` token generation and hashing.
+- `internal/domain/{access,identity,credentials}`: policy rules, argon2id hashes, `sk-` token generation and hashing, and the `Sealer` that encrypts vendor credentials (HKDF-SHA256 key, AES-256-GCM, account id as AAD).
 - `internal/app/`: ports and shared kernels in the root, one subpackage per service. `mocks/` is generated.
 - `internal/infra/gateway/`: the CLIProxyAPI embedding and request-path core; leaf subpackages `gate` (refusal observer), `usage` (usage sink) and `login` (vendor sign-ins). `faketest/` holds behavioural vendor fakes.
-- `internal/infra/postgres/`: the pool, `migrations/` and shared SQL helpers in the root, one subpackage per repository (`users`, `tokens`, …), and the `pgtest/` container helper.
+- `internal/infra/postgres/`: the pool, `migrations/` and shared SQL helpers in the root, one subpackage per repository (`users`, `tokens`, `vendorcreds` for the sealed vendor credentials, …), and the `pgtest/` container helper.
 - `internal/iface/http/`: web API handlers. `api/api.gen.go` is generated.
 - `api/openapi.yaml`: web API contract and source of truth. It covers `/api/*` only, not the proxied API.
 - `test/e2e/`: full-process tests across all listeners.
@@ -72,6 +74,7 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build  
 To run locally:
 
 - Set `LLMPROXY_DATABASE_URL`.
+- Set `LLMPROXY_CREDENTIALS_KEY` (at least 32 bytes, e.g. `openssl rand -hex 32`).
 - Set either `LLMPROXY_PUBLIC_API_URL` or `LLMPROXY_WEB_ADDR=off`.
 - Point `LLMPROXY_RUNTIME_DIR` and `LLMPROXY_AUTH_DIR` at writable directories.
 - Go does not read `.env`.
@@ -140,7 +143,7 @@ The full variable reference is in `internal/config/config.go` and the README.
   - `gateway` and `http` tests are white-box.
 - **Database tests:** `pgtest.NewTestPool(t)` starts a fresh migrated `postgres:17-alpine` container on every call. There is no DSN override and no skip path.
 - **`internal/infra/gateway` and its subpackages:** never call `t.Parallel()`, because tests mutate process-global state.
-- **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process.
+- **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process. A test that needs several boots (a restart on the same database) branches on `if !isChild()` instead: the parent creates the shared database and calls `runChildWith` once per boot, passing what the boot needs in the environment; the child connects to that database and calls `startProcessOn`. Each boot still gets its own process.
 - **Timestamps:** use a frozen `mocks.NewClock(t)` for exact timestamps.
 - **Coverage expectations:** every behaviour needs an automated test; checking by hand with curl isn't acceptance. There is no coverage threshold.
 - **CI** runs `go vet`, `go test -race`, the codegen drift check, the README/compose sync check, `docker compose config -q` for every compose combination, and a multi-arch image build with a smoke test. The `lint` job runs golangci-lint on new issues only (pull requests and pushes to `main`).

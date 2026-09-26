@@ -2,9 +2,11 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/stretchr/testify/require"
 )
@@ -75,8 +79,8 @@ func startOnTheWireWith(t *testing.T, vendor *faketest.Vendor, params Params) *o
 }
 
 // productionParams builds Params the way the production entry point does: the
-// core auth manager, its token store and cooldown store come from
-// NewCoreAuthManager over the same auth directory the configuration names.
+// core auth manager and its cooldown store come from NewCoreAuthManager over
+// the token store the gateway is given.
 func productionParams(t *testing.T) Params {
 	t.Helper()
 
@@ -86,8 +90,18 @@ func productionParams(t *testing.T) Params {
 // productionParamsIn is productionParams over an existing auth directory, for
 // a gateway that restarts on what an earlier one persisted.
 func productionParamsIn(authDir string) Params {
-	cfg := &cliproxyconfig.Config{AuthDir: authDir}
-	manager, store, cooldown := NewCoreAuthManager(cfg)
+	return productionParamsFor(&cliproxyconfig.Config{AuthDir: authDir})
+}
+
+// productionParamsFor is productionParams for the boot configuration cfg. The
+// token store is upstream's file store over cfg.AuthDir: a real coreauth.Store
+// whose credentials outlive the gateway, as production's do, and which the
+// tests read back through List (storeLists), never from the directory.
+func productionParamsFor(cfg *cliproxyconfig.Config) Params {
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(cfg.AuthDir)
+
+	manager, cooldown := NewCoreAuthManager(cfg, store)
 
 	return Params{
 		Config:   cfg,
@@ -95,6 +109,23 @@ func productionParamsIn(authDir string) Params {
 		Store:    store,
 		Cooldown: cooldown,
 	}
+}
+
+// storeLists reports whether store lists a credential under id: whether a
+// restart would load that account.
+func storeLists(t *testing.T, store coreauth.Store, id string) bool {
+	t.Helper()
+
+	listed, err := store.List(context.Background())
+	require.NoError(t, err, "list the token store")
+
+	for _, auth := range listed {
+		if auth.ID == id {
+			return true
+		}
+	}
+
+	return false
 }
 
 // postMessages sends an Anthropic Messages request, so that reaching an
@@ -267,6 +298,39 @@ func TestVendorFailureReachesTheClient(t *testing.T) {
 	require.Contains(t, string(body), "vendor refused the prompt", "response does not carry the vendor's error")
 }
 
+// TestVendorFailureLeavesNoLogFile: upstream's request logger writes every
+// failed request — URL, headers, body, the vendor's answer — to an
+// error-*.log file even with request-log off
+// (internal/api/middleware/response_writer.go Finalize: forceLog), in the
+// directory internal/logging ResolveLogDirectory picks: $WRITABLE_PATH/logs;
+// else "logs" resolved against the config file's directory, when the working
+// directory has a writable "logs"; else <auth dir>/logs. With WRITABLE_PATH
+// cleared and no "logs" in the package directory, that is the auth
+// directory's. The gateway installs no request logger, so neither directory
+// gets one. Shutdown drains the request first: the drain is the outermost
+// middleware, so upstream's logging middleware has finished with it.
+func TestVendorFailureLeavesNoLogFile(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	wire := startOnTheWire(t, &faketest.Vendor{
+		FailStatus: http.StatusBadRequest,
+		FailBody:   []byte(`{"error":{"message":"vendor refused the prompt","type":"invalid_request_error"}}`),
+	})
+
+	status, _, body := wire.postMessages(t, wireSecret, false)
+	require.Equal(t, http.StatusBadRequest, status, "POST /v1/messages (%s), want the vendor's failure", body)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, wire.gateway.Shutdown(ctx), "Shutdown: the failed request did not drain")
+
+	for _, dir := range []string{wire.gateway.AuthDir(), filepath.Dir(wire.configPath)} {
+		require.NoDirExists(t, filepath.Join(dir, "logs"), "upstream wrote request logs under %s", dir)
+	}
+}
+
 func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
 	wire := startOnTheWire(t, &faketest.Vendor{
 		Chunks: [][]byte{[]byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"m",` +
@@ -283,8 +347,8 @@ func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {
 
 // TestRequestThroughProductionWiringReachesVendor sends a request through a
 // gateway built exactly as production builds it — NewCoreAuthManager over the
-// configured auth directory, passed with its cooldown store — so the manager on
-// the request path is the one production hands in, not upstream's default.
+// token store, passed with its cooldown store — so the manager on the request
+// path is the one production hands in, not upstream's default.
 func TestRequestThroughProductionWiringReachesVendor(t *testing.T) {
 	params := productionParams(t)
 	wire := startOnTheWireWith(t, &faketest.Vendor{
@@ -423,9 +487,8 @@ func TestBootRoutingStrategyPicksTheCredential(t *testing.T) {
 			entry.APIKeyEntries = append(entry.APIKeyEntries, cliproxyconfig.OpenAICompatibilityAPIKey{APIKey: "vendor-key-2"})
 			cfg := &cliproxyconfig.Config{AuthDir: t.TempDir(), OpenAICompatibility: []cliproxyconfig.OpenAICompatibility{entry}}
 			cfg.Routing.Strategy = tc.strategy
-			manager, store, cooldown := NewCoreAuthManager(cfg)
 			wire := &onTheWire{
-				running: startWith(t, Params{Config: cfg, CoreAuth: manager, Store: store, Cooldown: cooldown}),
+				running: startWith(t, productionParamsFor(cfg)),
 				vendor:  vendor, alias: "alias-" + name, model: "upstream-" + name,
 			}
 			awaitProviders(t, wire.gateway.catalog, wire.alias, []string{"fakevendor"})

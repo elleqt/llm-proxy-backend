@@ -42,6 +42,10 @@ services:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
       PGPASSWORD: change-me-db-password
+      # CHANGE ME (openssl rand -hex 32): at least 32 bytes. It encrypts the vendor
+      # accounts' OAuth credentials in the database; keep it apart from database
+      # backups. Without it every vendor account must be signed in again.
+      LLMPROXY_CREDENTIALS_KEY: change-me-credentials-key-at-least-32-bytes
       # The proxied LLM API: the one backend listener published.
       LLMPROXY_LISTEN_ADDR: ":8080"
       # The web API (/api/*) on the `web` network only, /metrics on the `metrics`
@@ -49,7 +53,11 @@ services:
       # `metrics` and scrape http://backend-metrics:9090/metrics.
       LLMPROXY_WEB_ADDR: "backend-web:8081"
       LLMPROXY_METRICS_ADDR: "backend-metrics:9090"
-      # Upstream's working directory (its request logs) and the vendors' OAuth grants.
+      # Paths upstream requires. Nothing is written under LLMPROXY_RUNTIME_DIR, and
+      # LLMPROXY_AUTH_DIR holds only a vendor sign-in's hand-off file, for about a
+      # second: the vendor accounts are in Postgres.
+      # COMPAT(credentials-import): this release also imports, once, the account
+      # files an earlier release kept in LLMPROXY_AUTH_DIR (the grants volume below).
       LLMPROXY_RUNTIME_DIR: /var/lib/llmproxy/runtime
       LLMPROXY_AUTH_DIR: /var/lib/llmproxy/auths
       # The first administrator's login. While no administrator exists, the backend
@@ -106,8 +114,10 @@ services:
       metrics:
         aliases: [backend-metrics]
     volumes:
+      # COMPAT(credentials-import): the vendor accounts an earlier release kept as
+      # files. The first start imports them into Postgres once and leaves the files
+      # alone; the next release removes this mount.
       - grants:/var/lib/llmproxy/auths
-      - runtime:/var/lib/llmproxy/runtime
     ports:
       # Host port of the proxied API. Behind a reverse proxy on the same host:
       # - "127.0.0.1:8080:8080"
@@ -154,7 +164,6 @@ networks:
 
 volumes:
   pgdata:
-  # The vendors' OAuth grants: losing this volume means signing every vendor
-  # account in again.
+  # COMPAT(credentials-import): read once by the import (see the backend's
+  # volumes); the next release removes it. The vendor accounts are in pgdata.
   grants:
-  runtime:

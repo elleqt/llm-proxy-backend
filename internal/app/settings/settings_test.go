@@ -3,6 +3,7 @@ package settings_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -44,13 +45,23 @@ func ownedDefaults() *sdkconfig.Config {
 
 // newSettingsFixture boots a running configuration from runningDoc the way the
 // composition root does, and hands it to the service as the gateway's current one.
+// The boot warnings about inert keys are TestLoadBootConfigWarnsAboutInertKeys's
+// concern, so the fixture's boot tolerates them.
 func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 	t.Helper()
 	boot := mocks.NewSettingsRepo(t)
 	boot.EXPECT().UpstreamDocument(mock.Anything).Return(runningDoc, nil).Once()
 
-	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults())
+	// COMPAT(credentials-import): the tolerated boot warnings and the logger parameter; next release boot
+	// takes no logger and this mock goes (RELEASING.md).
+	bootLog := mocks.NewLogger(t)
+	bootLog.EXPECT().Warn(mock.Anything, mock.Anything).Maybe()
+
+	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults(), bootLog)
 	require.NoError(t, err, "LoadBootConfig")
+	// gateway.admit forces both off on every boot and push, so the gateway's
+	// current configuration never reports them set, whatever runningDoc says.
+	running.RequestLog, running.SaveCooldownStatus = false, false
 
 	fixture := &settingsFixture{
 		repo:    mocks.NewSettingsRepo(t),
@@ -75,6 +86,21 @@ func wantSettingError(t *testing.T, err, kind error, field string) {
 	require.ErrorIs(t, err, kind)
 	require.ErrorAs(t, err, &se, "want a *SettingError")
 	require.Equal(t, field, se.Field, "field of %v", err)
+}
+
+// COMPAT(credentials-import): inertKeyWarning and keyAttr serve only the boot warning's test; remove next
+// release (RELEASING.md).
+//
+// inertKeyWarning is the boot warning about an inert key, as an operator reads it.
+const inertKeyWarning = "settings: key has no effect and is ignored; remove it from the settings document"
+
+// keyAttr matches the attributes of a warning about key: exactly key=<key>.
+func keyAttr(key string) any {
+	want := slog.String("key", key)
+
+	return mock.MatchedBy(func(attrs []slog.Attr) bool {
+		return len(attrs) == 1 && attrs[0].Equal(want)
+	})
 }
 
 func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
@@ -120,7 +146,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 	t.Run("stored document at boot", func(t *testing.T) {
 		repo := mocks.NewSettingsRepo(t)
 		repo.EXPECT().UpstreamDocument(mock.Anything).Return("api-keys: [master]\n", nil)
-		_, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
+		_, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), mocks.NewLogger(t))
 		wantSettingError(t, err, app.ErrForbiddenSetting, "api-keys")
 	})
 }
@@ -141,6 +167,68 @@ func TestSettingsRefusesSmuggledOwnedFields(t *testing.T) {
 			f := newSettingsFixture(t, "")
 			_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate(tc.doc, true))
 			wantSettingError(t, err, app.ErrForbiddenSetting, tc.field)
+		})
+	}
+}
+
+// TestSettingsRefusesAddingOrChangingInertKeys: a whole document may not add an
+// inert key or change its value; the refusal is the one an owned key gets.
+func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
+	for key, values := range map[string][2]string{
+		"save-cooldown-status": {"true", "false"},
+		"request-log":          {"true", "false"},
+		"error-logs-max-files": {"5", "20"},
+	} {
+		t.Run(key+" added", func(t *testing.T) {
+			f := newSettingsFixture(t, "request-retry: 1\n")
+			// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
+			// No gateway, persist or audit expectation: touching any fails the test.
+			_, err := f.svc.Update(context.Background(), newAdmin(),
+				yamlUpdate("request-retry: 2\n"+key+": "+values[0]+"\n", false))
+			wantSettingError(t, err, app.ErrForbiddenSetting, key)
+		})
+
+		t.Run(key+" changed", func(t *testing.T) {
+			stored := key + ": " + values[0] + "\nrequest-retry: 1\n"
+			f := newSettingsFixture(t, stored)
+			// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
+			_, err := f.svc.Update(context.Background(), newAdmin(),
+				yamlUpdate(key+": "+values[1]+"\nrequest-retry: 1\n", false))
+			wantSettingError(t, err, app.ErrForbiddenSetting, key)
+		})
+	}
+
+	t.Run("added to the default document", func(t *testing.T) {
+		f := newSettingsFixture(t, "")
+		// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+		f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound).Once()
+		_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-log: false\n", true))
+		wantSettingError(t, err, app.ErrForbiddenSetting, "request-log")
+	})
+}
+
+// TestSettingsAcceptsInertKeysKeptOrRemoved: a legacy inert key carried over
+// unchanged does not block other edits, and removing one is accepted.
+//
+// COMPAT(credentials-import): tests the tolerance of legacy inert keys; remove next release (RELEASING.md).
+func TestSettingsAcceptsInertKeysKeptOrRemoved(t *testing.T) {
+	stored := "save-cooldown-status: true\nrequest-log: true\nerror-logs-max-files: 5\nrequest-retry: 1\n"
+
+	for name, doc := range map[string]string{
+		"kept unchanged": "save-cooldown-status: true\nrequest-log: true # legacy\nerror-logs-max-files: 5\nrequest-retry: 3\n",
+		"one removed":    "save-cooldown-status: true\nerror-logs-max-files: 5\nrequest-retry: 3\n",
+		"all removed":    "request-retry: 3\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSettingsFixture(t, stored)
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+			f.gateway.EXPECT().CurrentConfig().Return(f.running)
+
+			res, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc, true))
+			require.NoError(t, err, "Update")
+			require.Equal(t, 3, res.Settings.Fields.RequestRetry, "proposed requestRetry")
 		})
 	}
 }
@@ -180,6 +268,8 @@ func TestSettingsYAMLAndFieldsAreMutuallyExclusive(t *testing.T) {
 
 func TestSettingsDryRunAppliesAndPersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "request-retry: 1\n")
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	// No PushConfig, SetUpstreamDocument or Record expectation: a call fails the test.
 
@@ -202,6 +292,8 @@ func TestSettingsApplyPushesThenPersists(t *testing.T) {
 		pushed *sdkconfig.Config
 	)
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
 		steps, pushed = append(steps, "push"), c
@@ -243,6 +335,8 @@ func TestSettingsPushFailurePersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "")
 	refused := errors.New("gateway: not running")
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(refused).Once()
 	// No SetUpstreamDocument and no Record expectation.
@@ -257,6 +351,8 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 
 	var pushes []*sdkconfig.Config
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
 		pushes = append(pushes, c)
@@ -272,7 +368,10 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 }
 
 func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
-	fixture := newSettingsFixture(t, "proxy-url: http://olduser:oldpass@proxy.old.test:3128/?token=OLDQUERY\n")
+	stored := "proxy-url: http://olduser:oldpass@proxy.old.test:3128/?token=OLDQUERY\n"
+	fixture := newSettingsFixture(t, stored)
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
 	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -314,8 +413,12 @@ func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
 	require.Equal(t, "socks5://alice:s3cret@proxy.new.test:1080/p4thsecret?token=QS3CRET", res.Settings.Fields.ProxyURL, "settings proxyURL")
 }
 
+// TestSettingsFieldPatchKeepsTheRestOfTheDocument: a field patch keeps every other
+// key and its comments, including inert keys a document saved by an earlier
+// release still sets.
 func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
-	stored := "# operator notes\nrequest-log: true # keep\nproxy-url: http://proxy.test:3128\nrequest-retry: 1\n"
+	stored := "# operator notes\nrequest-log: true # keep\nsave-cooldown-status: true\nerror-logs-max-files: 5\n" +
+		"proxy-url: http://proxy.test:3128\nrequest-retry: 1\n"
 	fixture := newSettingsFixture(t, stored)
 	admin := newAdmin()
 	retry, interval := 5, 20
@@ -338,12 +441,112 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 	})
 	require.NoError(t, err, "Update")
 
-	for _, want := range []string{"# operator notes", "request-log: true # keep", "proxy-url: http://proxy.test:3128", "request-retry: 5", "max-retry-interval: 20"} {
+	for _, want := range []string{
+		"# operator notes", "request-log: true # keep", "save-cooldown-status: true", "error-logs-max-files: 5",
+		"proxy-url: http://proxy.test:3128", "request-retry: 5", "max-retry-interval: 20",
+	} {
 		assert.Contains(t, persisted, want, "persisted document")
 	}
 
 	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
 	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
+}
+
+// TestSettingsDiffOmitsUnchangedInertKeys: the running configuration reports
+// request-log and save-cooldown-status off (gateway.admit) even when the stored
+// document sets them. An update that keeps them unchanged — a field patch, or a
+// whole document carrying them over — shows no change to either in its diff or
+// audit record (a key may still appear as an unchanged context line).
+//
+// COMPAT(credentials-import): tests asStored; remove next release (RELEASING.md).
+func TestSettingsDiffOmitsUnchangedInertKeys(t *testing.T) {
+	stored := "request-log: true\nsave-cooldown-status: true\nrequest-retry: 1\n"
+	retry := 4
+
+	for name, req := range map[string]settings.Update{
+		"field patch":    {Fields: &settings.Patch{RequestRetry: &retry}},
+		"whole document": yamlUpdate("request-log: true\nsave-cooldown-status: true\nrequest-retry: 4\n", false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSettingsFixture(t, stored)
+			fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+			fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+			fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
+			fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+			var detail map[string]any
+
+			fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+				detail = e.Detail
+
+				return nil
+			})
+
+			res, err := fixture.svc.Update(context.Background(), newAdmin(), req)
+			require.NoError(t, err, "Update")
+			require.Contains(t, res.Diff, "+request-retry: 4\n", "diff does not show the patched field")
+
+			audited, _ := detail["diff"].(string)
+
+			for _, key := range []string{"request-log", "save-cooldown-status"} {
+				for _, change := range []string{"-" + key + ":", "+" + key + ":"} {
+					require.NotContains(t, res.Diff, change, "diff shows an unchanged inert key as changed")
+					require.NotContains(t, audited, change, "audit record shows an unchanged inert key as changed")
+				}
+			}
+		})
+	}
+}
+
+// TestSettingsRemovingAnInertKeyIsAChange: a whole document whose only change is
+// dropping a legacy inert key shows that as a change, so the admin panel can
+// apply it, and it is applied and audited: the stored document no longer sets it.
+//
+// COMPAT(credentials-import): tests asStored and the tolerance of legacy inert keys; remove next release
+// (RELEASING.md).
+func TestSettingsRemovingAnInertKeyIsAChange(t *testing.T) {
+	for key, tc := range map[string]struct{ stored, removed, added string }{
+		"request-log":          {"request-log: true\n", "-request-log: true\n", "+request-log: false\n"},
+		"save-cooldown-status": {"save-cooldown-status: true\n", "-save-cooldown-status: true\n", "+save-cooldown-status: false\n"},
+		"error-logs-max-files": {"error-logs-max-files: 5\n", "-error-logs-max-files: 5\n", "+error-logs-max-files: 10\n"},
+	} {
+		t.Run(key, func(t *testing.T) {
+			stored := tc.stored + "request-retry: 1\n"
+			fixture := newSettingsFixture(t, stored)
+
+			var persisted string
+
+			fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+			fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+			fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
+			fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+				func(_ context.Context, doc string, _ uuid.UUID, _ time.Time) error {
+					persisted = doc
+
+					return nil
+				})
+
+			var detail map[string]any
+
+			fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+				detail = e.Detail
+
+				return nil
+			})
+
+			res, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-retry: 1\n", false))
+			require.NoError(t, err, "Update")
+			require.True(t, res.Applied, "removal not applied")
+			require.NotContains(t, persisted, key, "persisted document still sets the key")
+
+			audited, _ := detail["diff"].(string)
+
+			for _, line := range []string{tc.removed, tc.added} {
+				require.Contains(t, res.Diff, line, "diff does not show the removal")
+				require.Contains(t, audited, line, "audit record does not show the removal")
+			}
+		})
+	}
 }
 
 func TestSettingsFieldPatchValidation(t *testing.T) {
@@ -379,7 +582,7 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	repo := mocks.NewSettingsRepo(t)
 	repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
 
-	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
+	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), mocks.NewLogger(t))
 	require.NoError(t, err, "LoadBootConfig")
 	require.Equal(t, 8317, cfg.Port, "boot config port")
 	require.Len(t, cfg.OpenAICompatibility, 1, "boot config openai-compatibility")
@@ -394,6 +597,27 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	excluded := cfg.OAuthExcludedModels["claude"]
 	require.Len(t, excluded, 5, "default exclusions")
 	require.Equal(t, "claude-3-7-sonnet-20250219", excluded[3], "default exclusion")
+}
+
+// TestLoadBootConfigWarnsAboutInertKeys: a document saved by an earlier release
+// that still sets an inert key boots, with exactly one warning per key present,
+// whatever its value.
+//
+// COMPAT(credentials-import): tests the boot warning; remove next release (RELEASING.md).
+func TestLoadBootConfigWarnsAboutInertKeys(t *testing.T) {
+	repo := mocks.NewSettingsRepo(t)
+	repo.EXPECT().UpstreamDocument(mock.Anything).Return(
+		"save-cooldown-status: false\nrequest-log: true\nerror-logs-max-files: 5\nrequest-retry: 2\n", nil)
+
+	logs := mocks.NewLogger(t)
+	for _, key := range []string{"save-cooldown-status", "request-log", "error-logs-max-files"} {
+		logs.EXPECT().Warn(inertKeyWarning, keyAttr(key)).Once()
+	}
+
+	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), logs)
+	require.NoError(t, err, "LoadBootConfig")
+	require.Equal(t, 2, cfg.RequestRetry, "boot config request-retry")
+	require.Equal(t, 8317, cfg.Port, "gateway-owned port not carried over")
 }
 
 func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {

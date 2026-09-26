@@ -16,6 +16,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
@@ -44,13 +45,36 @@ func (refuseAll) Resolve(context.Context, string) (app.Principal, access.Policy,
 }
 
 // productionParams builds Params the way the production entry point does: the
-// core auth manager, its token store and cooldown store come from
-// NewCoreAuthManager over the same auth directory the configuration names.
+// core auth manager and its cooldown store come from NewCoreAuthManager over
+// the token store the gateway is given. The store is upstream's file store
+// over the configured auth directory: a real coreauth.Store, which the tests
+// read back through List (storedCredential), never from the directory.
 func productionParams(t *testing.T) gateway.Params {
 	t.Helper()
 
-	cfg := &cliproxyconfig.Config{AuthDir: t.TempDir()}
-	manager, store, cooldown := gateway.NewCoreAuthManager(cfg)
+	authDir := t.TempDir()
+
+	return paramsOver(authDir, authDir)
+}
+
+// grantsVolumeParams is productionParams as this release runs: the token
+// store (the database in production) lives apart from the auth directory,
+// which is the grants volume still holding the previous release's credential
+// files.
+func grantsVolumeParams(t *testing.T) gateway.Params {
+	t.Helper()
+
+	return paramsOver(t.TempDir(), t.TempDir())
+}
+
+// paramsOver builds Params with authDir as the configured auth directory and
+// upstream's file store over storeDir as the token store.
+func paramsOver(authDir, storeDir string) gateway.Params {
+	cfg := &cliproxyconfig.Config{AuthDir: authDir}
+	store := sdkauth.NewFileTokenStore()
+	store.SetBaseDir(storeDir)
+
+	manager, cooldown := gateway.NewCoreAuthManager(cfg, store)
 
 	return gateway.Params{
 		Config:   cfg,
@@ -58,6 +82,23 @@ func productionParams(t *testing.T) gateway.Params {
 		Store:    store,
 		Cooldown: cooldown,
 	}
+}
+
+// storedCredential returns the credential store lists under id — the account
+// a restart would load — and whether it lists one.
+func storedCredential(t *testing.T, store coreauth.Store, id string) (*coreauth.Auth, bool) {
+	t.Helper()
+
+	listed, err := store.List(context.Background())
+	require.NoError(t, err, "list the token store")
+
+	for _, auth := range listed {
+		if auth.ID == id {
+			return auth, true
+		}
+	}
+
+	return nil, false
 }
 
 // startProduction starts a gateway wired as production wires it, once boot
@@ -71,9 +112,9 @@ func startProduction(t *testing.T) *running {
 // startBooted is startWith for a test that changes accounts straight after
 // the gateway starts. Upstream goes on booting after the watcher exists and
 // registers the models of every account the manager holds, reporting nowhere
-// when it is done; an account change meanwhile would race it. So the auth
-// directory holds one credential before boot, and startBooted returns once
-// its models are in the registry.
+// when it is done; an account change meanwhile would race it. So the token
+// store holds one credential before boot, and startBooted returns once its
+// models are in the registry.
 func startBooted(t *testing.T, params gateway.Params) *running {
 	t.Helper()
 

@@ -30,6 +30,7 @@ import (
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	webapi "github.com/elleqt/llm-proxy-backend/internal/iface/http"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
@@ -49,9 +50,11 @@ import (
 	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
 	pgusage "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
 	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
+	pgvendorcreds "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/vendorcreds"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -98,9 +101,9 @@ const (
 // Boot order: configuration and the process log, migrations, the pool,
 // repositories and the one password hasher, the bootstrap administrator, the
 // upstream boot configuration from the database, metrics, the price list and the
-// usage sink, the gateway, then the three listeners and the price catalog's
-// checks, and once the gateway runs, the model catalogue updaters unless
-// LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// usage sink, the vendor credential store, the gateway, then the three listeners
+// and the price catalog's checks, and once the gateway runs, the model catalogue
+// updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
@@ -159,6 +162,8 @@ type process struct {
 
 // build wires the services. version is the resolved build version, and logger
 // the process's own (component llmproxy).
+//
+//nolint:funlen // one linear wiring sequence in boot order; splitting it would only scatter that order
 func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) (*process, error) {
@@ -175,7 +180,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
+	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility), logs)
 	if err != nil {
 		return nil, fmt.Errorf("boot configuration: %w", err)
 	}
@@ -208,15 +213,44 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("prices: %w", err)
 	}
 
-	// The store's base directory and the gateway's auth directory are both
-	// bootCfg.AuthDir.
-	manager, store, cooldown := gateway.NewCoreAuthManager(bootCfg)
+	// The vendor accounts' credentials live in the database, sealed under
+	// LLMPROXY_CREDENTIALS_KEY. The store is registered process-wide before the
+	// gateway exists, so upstream code that asks sdkauth.GetTokenStore gets it,
+	// never a file store it would create on the spot. It provides no cooldown
+	// store: cooldown stays in memory.
+	sealer, err := credentials.NewSealer([]byte(cfg.CredentialsKey))
+	if err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	vendorCredentials := pgvendorcreds.New(pool)
+
+	store, err := gateway.NewCredentialStore(vendorCredentials, sealer, clock, "")
+	if err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	// COMPAT(credentials-import): the one-shot import of the previous release's credential files; remove next release (RELEASING.md).
+	if err := gateway.ImportFileCredentials(ctx, bootCfg.AuthDir, vendorCredentials, sealer, clock, logs); err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	sdkauth.RegisterTokenStore(store)
+
+	// Upstream loads the store itself but only warns when that fails, so a wrong
+	// LLMPROXY_CREDENTIALS_KEY would serve with no vendor accounts. One List here
+	// stops the boot instead, naming the account the key cannot open.
+	if _, err := store.List(ctx); err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
+	manager, cooldown := gateway.NewCoreAuthManager(bootCfg, store)
 
 	//nolint:contextcheck // handlers take each request's context; construction serves nothing yet
 	gw, err = gateway.New(gateway.Params{
 		Config: bootCfg,
-		// Required by upstream, which resolves its log directory from it; no
-		// file is created or read there.
+		// Required by upstream; no file is created or read there, and no log
+		// directory is resolved from it: the gateway installs no request logger.
 		ConfigPath:  filepath.Join(cfg.RuntimeDir, "config.yaml"),
 		UsagePlugin: sink,
 		CoreAuth:    manager,
@@ -254,6 +288,11 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	tokenService := apptokens.New(users, tokens, audit, clock, logs)
 
+	logins, err := login.New(gw)
+	if err != nil {
+		return nil, fmt.Errorf("vendor logins: %w", err)
+	}
+
 	router, err := webapi.NewRouter(webapi.Deps{
 		Auth: auth.New(users, passwords,
 			auth.NewThrottle(pgloginattempts.New(pool), signInFailures, signInLockout, clock),
@@ -273,7 +312,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (providers.Service.Remove).
-		Providers:    providers.New(gw, login.New(gw), sink, meters, audit, clock, logs),
+		Providers:    providers.New(gw, logins, sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,
