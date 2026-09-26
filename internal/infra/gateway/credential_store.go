@@ -69,6 +69,8 @@ type metadataSetter interface {
 	SetMetadata(metadata map[string]any)
 }
 
+var _ coreauth.Store = (*CredentialStore)(nil)
+
 // CredentialStore is upstream's token store over Postgres: each vendor
 // account is one app.VendorCredential row whose Sealed column is the
 // credential JSON FileTokenStore would have written to a file, sealed under
@@ -266,6 +268,44 @@ func (s *CredentialStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// List reads every stored account, as FileTokenStore.List reads the auth
+// directory. A row that does not open (sealed under another key, moved to
+// another id, tampered with) or does not parse fails List naming the
+// account: boot stops rather than drop an account silently. The digests
+// become exactly what was read.
+func (s *CredentialStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rows, err := s.repo.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: list vendor credentials: %w", err)
+	}
+
+	auths := make([]*coreauth.Auth, 0, len(rows))
+	digests := make(map[string][32]byte, len(rows))
+
+	for _, row := range rows {
+		plaintext, err := s.sealer.Open(row.ID, row.Sealed)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: account %q cannot be opened with LLMPROXY_CREDENTIALS_KEY "+
+				"(sealed under another key, or tampered with): %w", row.ID, err)
+		}
+
+		auth, err := authFromRow(row, plaintext)
+		if err != nil {
+			return nil, err
+		}
+
+		auths = append(auths, auth)
+		digests[row.ID] = sha256.Sum256(plaintext)
+	}
+
+	s.digests = digests
+
+	return auths, nil
+}
+
 // credentialFields returns the credential JSON Save writes, as fields: the
 // metadata of a stored account or, for a fresh login's record, whatever the
 // vendor's SaveTokenToFile writes after the metadata is handed to it, as
@@ -410,4 +450,83 @@ func stampCredential(auth *coreauth.Auth, key string) {
 
 	auth.Attributes[coreauth.AttributeSource] = key
 	auth.Attributes[coreauth.AttributeSourceBackend] = coreauth.AuthSourcePostgres
+}
+
+// authFromRow rebuilds a stored account as FileTokenStore.readAuthFiles
+// rebuilds one from its file (non-plugin branch, sdk/auth/filestore.go:312-361,
+// v7.3.18): the row's id where the file's relative path was, Postgres as the
+// source, the row's timestamps where the file's mtime was. No path
+// attribute: upstream reads it only as a cache key in executors this
+// gateway does not route to and in the file watcher, which is hollow here.
+func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, error) {
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(plaintext, &metadata); err != nil {
+		return nil, fmt.Errorf("gateway: account %q: the stored credential is not JSON: %w", row.ID, err)
+	}
+
+	coreauth.NormalizeCredentialMetadata(metadata)
+
+	if err := coreauth.ValidateAuthWeight(&coreauth.Auth{Metadata: metadata}); err != nil {
+		return nil, fmt.Errorf("gateway: account %q: %w", row.ID, err)
+	}
+
+	disabled, _ := metadata[metadataDisabled].(bool)
+	status := coreauth.StatusActive
+
+	if disabled {
+		status = coreauth.StatusDisabled
+	}
+
+	proxyURL, _ := metadata["proxy_url"].(string)
+
+	auth := &coreauth.Auth{
+		ID:       row.ID,
+		Provider: credentialProvider(metadata, "unknown"),
+		FileName: row.ID,
+		Label:    credentialLabel(metadata),
+		Prefix:   credentialPrefix(metadata),
+		ProxyURL: strings.TrimSpace(proxyURL),
+		Status:   status,
+		Disabled: disabled,
+		Attributes: map[string]string{
+			coreauth.AttributeSource:        row.ID,
+			coreauth.AttributeSourceBackend: coreauth.AuthSourcePostgres,
+		},
+		Metadata:  metadata,
+		CreatedAt: row.CreatedAt,
+		UpdatedAt: row.UpdatedAt,
+	}
+
+	if email, isString := metadata[metadataEmail].(string); isString && email != "" {
+		auth.Attributes[metadataEmail] = email
+	}
+
+	coreauth.ApplyCustomHeadersFromMetadata(auth)
+
+	return auth, nil
+}
+
+// credentialLabel is FileTokenStore.labelFor: the label, else the email,
+// else the project id.
+func credentialLabel(metadata map[string]any) string {
+	for _, key := range [...]string{"label", metadataEmail, "project_id"} {
+		if label, isString := metadata[key].(string); isString && label != "" {
+			return label
+		}
+	}
+
+	return ""
+}
+
+// credentialPrefix is the model prefix readAuthFiles accepts: trimmed of
+// spaces and slashes, and dropped when a slash remains inside it.
+func credentialPrefix(metadata map[string]any) string {
+	raw, _ := metadata["prefix"].(string)
+	prefix := strings.Trim(strings.TrimSpace(raw), "/")
+
+	if strings.Contains(prefix, "/") {
+		return ""
+	}
+
+	return prefix
 }

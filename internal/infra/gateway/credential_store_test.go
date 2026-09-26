@@ -234,3 +234,100 @@ func TestCredentialStoreRemovesLeftoverScratchDirs(t *testing.T) {
 	assert.DirExists(t, fresh, "NewCredentialStore removed another process's login in progress")
 	assert.DirExists(t, unrelated, "NewCredentialStore removed a directory that is not its own")
 }
+
+// sealedRow is a stored row of fields sealed by sealer under id, in the
+// canonical form Save writes.
+func sealedRow(t *testing.T, sealer *credentials.Sealer, id string, fields map[string]any, created time.Time) app.VendorCredential {
+	t.Helper()
+
+	plaintext, err := canonicalJSON(fields)
+	require.NoError(t, err)
+
+	sealed, err := sealer.Seal(id, plaintext)
+	require.NoError(t, err)
+
+	return app.VendorCredential{ID: id, Provider: "stored", Sealed: sealed, CreatedAt: created, UpdatedAt: storeNow}
+}
+
+// TestCredentialStoreListRebuildsTheAccounts: List rebuilds each account as
+// FileTokenStore rebuilds it from its file (label from label, else email,
+// else project_id; the prefix trimmed and refused when a slash remains; the
+// provider "unknown" without a type), with the row's id, Postgres as its
+// source and the row's timestamps. A listed account saved unchanged is not
+// written again (no Update is expected).
+func TestCredentialStoreListRebuildsTheAccounts(t *testing.T) {
+	fx := newStoreFixture(t)
+	team := map[string]any{
+		"type": "codex", "email": "team@example.com", "label": "Team account", "prefix": " /team/ ",
+		"proxy_url": " http://proxy.example.com:3128 ", "disabled": true,
+		"headers": map[string]any{"X-Tenant": "blue"}, "access_token": "at-team",
+	}
+	project := map[string]any{"project_id": "proj-1", "prefix": "a/b", "access_token": "at-project"}
+	mail := map[string]any{"type": "claude", "email": "mail@example.com", "access_token": "at-mail"}
+	teamCreated, projectCreated, mailCreated := storeNow.Add(-72*time.Hour), storeNow.Add(-48*time.Hour), storeNow.Add(-24*time.Hour)
+
+	fx.repo.EXPECT().List(mock.Anything).Return([]app.VendorCredential{
+		sealedRow(t, fx.sealer, "codex-team@example.com.json", team, teamCreated),
+		sealedRow(t, fx.sealer, "project.json", project, projectCreated),
+		sealedRow(t, fx.sealer, "claude-mail@example.com.json", mail, mailCreated),
+	}, nil).Once()
+
+	listed, err := fx.store.List(t.Context())
+	require.NoError(t, err)
+
+	assert.Equal(t, []*coreauth.Auth{
+		{
+			ID: "codex-team@example.com.json", Provider: "codex", FileName: "codex-team@example.com.json",
+			Label: "Team account", Prefix: "team", ProxyURL: "http://proxy.example.com:3128",
+			Status: coreauth.StatusDisabled, Disabled: true,
+			Attributes: map[string]string{
+				coreauth.AttributeSource:        "codex-team@example.com.json",
+				coreauth.AttributeSourceBackend: coreauth.AuthSourcePostgres,
+				"email":                         "team@example.com",
+				"header:X-Tenant":               "blue",
+			},
+			Metadata: team, CreatedAt: teamCreated, UpdatedAt: storeNow,
+		},
+		{
+			ID: "project.json", Provider: "unknown", FileName: "project.json", Label: "proj-1",
+			Status: coreauth.StatusActive,
+			Attributes: map[string]string{
+				coreauth.AttributeSource:        "project.json",
+				coreauth.AttributeSourceBackend: coreauth.AuthSourcePostgres,
+			},
+			Metadata: project, CreatedAt: projectCreated, UpdatedAt: storeNow,
+		},
+		{
+			ID: "claude-mail@example.com.json", Provider: "claude", FileName: "claude-mail@example.com.json",
+			Label: "mail@example.com", Status: coreauth.StatusActive,
+			Attributes: map[string]string{
+				coreauth.AttributeSource:        "claude-mail@example.com.json",
+				coreauth.AttributeSourceBackend: coreauth.AuthSourcePostgres,
+				"email":                         "mail@example.com",
+			},
+			Metadata: mail, CreatedAt: mailCreated, UpdatedAt: storeNow,
+		},
+	}, listed)
+
+	key, err := fx.store.Save(t.Context(), listed[0])
+	require.NoError(t, err, "a listed account saved unchanged")
+	require.Equal(t, "codex-team@example.com.json", key)
+}
+
+// TestCredentialStoreListRefusesARowSealedUnderAnotherKey: a row that does
+// not open under the configured key fails List, naming the account and the
+// variable, so boot stops instead of dropping the account silently.
+func TestCredentialStoreListRefusesARowSealedUnderAnotherKey(t *testing.T) {
+	fx := newStoreFixture(t)
+
+	const id = "claude-rekeyed@example.com.json"
+
+	fx.repo.EXPECT().List(mock.Anything).Return([]app.VendorCredential{
+		sealedRow(t, testSealer(t, 'o'), id, map[string]any{"type": "claude", "access_token": "at-rekeyed"}, storeNow),
+	}, nil).Once()
+
+	_, err := fx.store.List(t.Context())
+	require.ErrorIs(t, err, credentials.ErrUnsealable)
+	require.ErrorContains(t, err, id, "the error must name the account")
+	require.ErrorContains(t, err, "LLMPROXY_CREDENTIALS_KEY", "the error must name the key variable")
+}
