@@ -214,7 +214,19 @@ sed -i '' -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
   -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
 ```
 
-Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database. The credentials key encrypts the vendor accounts stored in the database, so replace it at the latest before adding the first vendor account: accounts added under one key must be signed in again after a change. With the placeholder anyone who gets a copy of the database can read them, and the backend logs a warning on every start while it is set. Keep a copy of your key with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
+Best do this before the first start: Postgres sets the password only when it creates the database in an empty volume, so changing it later in the file alone leaves the database on the old one, and the backend can no longer connect. The credentials key encrypts the vendor accounts stored in the database, so replace it at the latest before adding the first vendor account: accounts added under one key must be signed in again after a change. With the placeholder anyone who gets a copy of the database can read them, and the backend logs a warning on every start while it is set. Keep a copy of your key with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
+
+**Already started with the placeholders?** If there is nothing to keep, `docker compose down -v` deletes the stack and its data: replace the placeholders as above and start again. To keep the data, change the database password in Postgres first, then in the file, and restart (on macOS `sed -i ''`):
+
+```sh
+db_password="$(openssl rand -hex 24)"
+docker compose exec postgres psql -U llmproxy -c "ALTER USER llmproxy PASSWORD '$db_password'"
+sed -i -e "s/change-me-db-password/$db_password/g" \
+  -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
+docker compose up -d
+```
+
+Vendor accounts added under the placeholder key cannot be read under the new one: the backend stops at start and names the account. Delete them and sign them in again, as under *Lost or changed key* in [Backups](#production-deployment).
 
 ### 5. Start
 
