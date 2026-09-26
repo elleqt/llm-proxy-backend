@@ -49,15 +49,17 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdklogging "github.com/router-for-me/CLIProxyAPI/v7/sdk/logging"
 )
 
 // Params configures a Gateway.
 type Params struct {
 	// Config is the initial configuration. Required.
 	Config *cliproxyconfig.Config
-	// ConfigPath is required by the upstream builder and used by it to resolve
-	// the log directory. It is never read as configuration, because the watcher
-	// installed here owns config updates.
+	// ConfigPath is required by the upstream builder. It is never read as
+	// configuration, because the watcher installed here owns config updates,
+	// and nothing is written beside it: upstream resolved its request-log
+	// directory from it, and New installs no request logger (noRequestLogger).
 	ConfigPath string
 	// Middleware is prepended to the embedded server's Gin stack.
 	Middleware []gin.HandlerFunc
@@ -354,6 +356,7 @@ func New(params Params) (*Gateway, error) {
 		WithServerOptions(
 			sdkapi.WithEngineConfigurator(gw.configureEngine),
 			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, params.Observer, params.Log)),
+			sdkapi.WithRequestLoggerFactory(noRequestLogger),
 		)
 	if len(params.Middleware) > 0 {
 		builder = builder.WithServerOptions(sdkapi.WithMiddleware(params.Middleware...))
@@ -387,6 +390,18 @@ func New(params Params) (*Gateway, error) {
 
 	return gw, nil
 }
+
+// noRequestLogger is the request logger factory New installs. It returns no
+// logger, so upstream installs no request-logging middleware
+// (internal/api/server.go NewServer). Upstream's own logger writes every
+// request's URL, headers, body and vendor answer to files in its log
+// directory — every failed one even with request-log off
+// (internal/api/middleware/response_writer.go Finalize) — and no state of
+// this process lives in files. No logger of this package could replace it:
+// sdk/logging.RequestLogger aliases internal/logging's, whose LogRequest takes
+// a type only upstream's internal packages name. Vendor errors are seen
+// through the metrics, the usage ledger and the process log instead.
+func noRequestLogger(*cliproxyconfig.Config, string) sdklogging.RequestLogger { return nil }
 
 // NewCoreAuthManager builds the core auth manager for the boot configuration
 // cfg over store, the way the upstream builder builds its own

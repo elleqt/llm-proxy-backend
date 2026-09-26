@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -295,6 +296,39 @@ func TestVendorFailureReachesTheClient(t *testing.T) {
 	status, _, body := w.postMessages(t, wireSecret, false)
 	require.Equal(t, http.StatusBadRequest, status, "POST /v1/messages (%s), want the vendor's status", body)
 	require.Contains(t, string(body), "vendor refused the prompt", "response does not carry the vendor's error")
+}
+
+// TestVendorFailureLeavesNoLogFile: upstream's request logger writes every
+// failed request — URL, headers, body, the vendor's answer — to an
+// error-*.log file even with request-log off
+// (internal/api/middleware/response_writer.go Finalize: forceLog), in the
+// directory internal/logging ResolveLogDirectory picks: $WRITABLE_PATH/logs;
+// else "logs" resolved against the config file's directory, when the working
+// directory has a writable "logs"; else <auth dir>/logs. With WRITABLE_PATH
+// cleared and no "logs" in the package directory, that is the auth
+// directory's. The gateway installs no request logger, so neither directory
+// gets one. Shutdown drains the request first: the drain is the outermost
+// middleware, so upstream's logging middleware has finished with it.
+func TestVendorFailureLeavesNoLogFile(t *testing.T) {
+	t.Setenv("WRITABLE_PATH", "")
+	t.Setenv("writable_path", "")
+
+	wire := startOnTheWire(t, &faketest.Vendor{
+		FailStatus: http.StatusBadRequest,
+		FailBody:   []byte(`{"error":{"message":"vendor refused the prompt","type":"invalid_request_error"}}`),
+	})
+
+	status, _, body := wire.postMessages(t, wireSecret, false)
+	require.Equal(t, http.StatusBadRequest, status, "POST /v1/messages (%s), want the vendor's failure", body)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	require.NoError(t, wire.gateway.Shutdown(ctx), "Shutdown: the failed request did not drain")
+
+	for _, dir := range []string{wire.gateway.AuthDir(), filepath.Dir(wire.configPath)} {
+		require.NoDirExists(t, filepath.Join(dir, "logs"), "upstream wrote request logs under %s", dir)
+	}
 }
 
 func TestVendorDyingMidStreamTruncatesTheClientStream(t *testing.T) {

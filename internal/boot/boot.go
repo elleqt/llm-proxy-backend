@@ -224,8 +224,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 	//nolint:contextcheck // handlers take each request's context; construction serves nothing yet
 	gw, err = gateway.New(gateway.Params{
 		Config: bootCfg,
-		// Required by upstream, which resolves its log directory from it; no
-		// file is created or read there.
+		// Required by upstream; no file is created or read there, and no log
+		// directory is resolved from it: the gateway installs no request logger.
 		ConfigPath:  filepath.Join(cfg.RuntimeDir, "config.yaml"),
 		UsagePlugin: sink,
 		CoreAuth:    manager,
