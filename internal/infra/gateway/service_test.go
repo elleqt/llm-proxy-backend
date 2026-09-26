@@ -519,32 +519,6 @@ func TestMiddlewareIsAppliedToRequests(t *testing.T) {
 	require.Equal(t, "applied", resp.Header.Get("X-Gateway-Middleware"), "X-Gateway-Middleware")
 }
 
-// TestNewCoreAuthManagerUsesTheAuthDirectory proves the manager it returns
-// persists credentials into the supplied directory, which is what the upstream
-// builder's default path arranges via SetBaseDir. The cooldown store is nil
-// here because the default file token store does not implement
-// coreauth.CooldownStateStoreProvider — the upstream default path gets nil too.
-func TestNewCoreAuthManagerUsesTheAuthDirectory(t *testing.T) {
-	authDir := t.TempDir()
-
-	m, _, _ := NewCoreAuthManager(&cliproxyconfig.Config{AuthDir: authDir})
-	require.NotNil(t, m, "NewCoreAuthManager returned no manager")
-
-	_, err := m.Register(context.Background(), &coreauth.Auth{
-		ID:       "persisted-credential.json",
-		Provider: "fake-vendor",
-		Status:   coreauth.StatusActive,
-		FileName: "persisted-credential.json",
-		Metadata: map[string]any{"access_token": "fake-token"},
-	})
-	require.NoError(t, err, "register")
-
-	entries, err := os.ReadDir(authDir)
-	require.NoError(t, err, "read auth dir")
-
-	require.NotEmpty(t, entries, "no credential was written to %q; the auth directory was not applied", authDir)
-}
-
 // TestPushConfigCannotEnableManagement: a remote-management secret key is what
 // makes upstream register /v0/management on reload, and in later tasks the
 // pushed configuration is built from operator-editable rows.

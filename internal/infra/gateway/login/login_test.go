@@ -275,8 +275,8 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 
 	require.NotZero(t, registeredModels(grant.ID), "the completed login's account has no registered models: it is not routable")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
-	require.NoError(t, err, "the completed login's credential was not persisted")
+	_, ok = storedCredential(t, params.Store, grant.FileName)
+	require.True(t, ok, "the token store lists no credential for the completed login")
 }
 
 // claudeTokenFile is a login record's token storage, as upstream's
@@ -330,9 +330,10 @@ func storageGrant(t *testing.T, storage *claudeTokenFile) *coreauth.Auth {
 // TestLoginHoldsTheAccountWithItsTokens: the executors read an account's
 // token from its Metadata, but a login record carries its tokens only in
 // Storage. The account a completed login leaves in the manager must be the
-// one a restart loads from its file: tokens in Metadata, the file's path, and
-// active — or every request goes upstream without a credential until the
-// next restart.
+// one a restart loads from the token store: tokens in Metadata, and active —
+// or every request goes upstream without a credential until the next
+// restart. The stored credential carries the tokens too, so a restart does
+// not lose them.
 func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
 	params := productionParams(t)
 	r := startBooted(t, params)
@@ -355,16 +356,20 @@ func TestLoginHoldsTheAccountWithItsTokens(t *testing.T) {
 	assert.Equal(t, storage.accessToken, held.Metadata["access_token"],
 		"held account's Metadata[access_token]: want the login's token, requests would carry no credential")
 	assert.Equal(t, storage.refreshToken, held.Metadata["refresh_token"], "held account's Metadata[refresh_token]")
-	assert.Equal(t, filepath.Join(params.Config.AuthDir, grant.FileName), held.Attributes[coreauth.AttributePath],
-		"held account's path attribute: want its credential")
 	assert.Equal(t, coreauth.StatusActive, held.Status, "held account status")
 	assert.False(t, held.Disabled, "held account is disabled")
 	assert.NotZero(t, registeredModels(account.ID), "the completed login's account has no registered models: it is not routable")
+
+	persisted, ok := storedCredential(t, params.Store, account.ID)
+	require.True(t, ok, "the token store lists no credential for the completed login")
+	assert.Equal(t, storage.accessToken, persisted.Metadata["access_token"],
+		"stored credential's access_token: a restart would load the account without its token")
+	assert.Equal(t, storage.refreshToken, persisted.Metadata["refresh_token"], "stored credential's refresh_token")
 }
 
 // TestLoginWithAnUnsavedCredentialAddsNothing: when the token store cannot
 // write the login's credential, the login fails and nothing is held,
-// routable or on disk, so no account serves traffic that a restart drops.
+// routable or stored, so no account serves traffic that a restart drops.
 func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
 	params := productionParams(t)
 	r := startBooted(t, params)
@@ -384,8 +389,8 @@ func TestLoginWithAnUnsavedCredentialAddsNothing(t *testing.T) {
 
 	require.Zero(t, registeredModels(grant.ID), "the unsaved login's account has registered models")
 
-	_, err = os.Stat(filepath.Join(params.Config.AuthDir, grant.FileName))
-	require.ErrorIs(t, err, os.ErrNotExist, "the unsaved login's credential is in the auth directory")
+	_, ok = storedCredential(t, params.Store, grant.FileName)
+	require.False(t, ok, "the token store lists the unsaved login's credential")
 }
 
 // listeningSockets returns the inodes of this process's listening TCP

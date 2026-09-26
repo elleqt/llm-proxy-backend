@@ -52,6 +52,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
@@ -159,6 +160,8 @@ type process struct {
 
 // build wires the services. version is the resolved build version, and logger
 // the process's own (component llmproxy).
+//
+//nolint:funlen // one linear wiring sequence in boot order; splitting it would only scatter that order
 func build(ctx context.Context, cfg config.Config, opts Options, version string, pool *pgxpool.Pool,
 	logger *slog.Logger,
 ) (*process, error) {
@@ -208,9 +211,15 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("prices: %w", err)
 	}
 
-	// The store's base directory and the gateway's auth directory are both
-	// bootCfg.AuthDir.
-	manager, store, cooldown := gateway.NewCoreAuthManager(bootCfg)
+	// Until the credential store takes over, the token store is upstream's
+	// process-wide file store, based at bootCfg.AuthDir: the directory the
+	// gateway also resolves its auth directory from.
+	store := sdkauth.GetTokenStore()
+	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
+		setter.SetBaseDir(bootCfg.AuthDir)
+	}
+
+	manager, cooldown := gateway.NewCoreAuthManager(bootCfg, store)
 
 	//nolint:contextcheck // handlers take each request's context; construction serves nothing yet
 	gw, err = gateway.New(gateway.Params{

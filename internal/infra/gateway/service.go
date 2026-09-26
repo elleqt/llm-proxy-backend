@@ -45,7 +45,6 @@ import (
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
@@ -70,11 +69,11 @@ type Params struct {
 	// the account methods (AddAccount, SetAccountDisabled, RemoveAccount) act on
 	// this manager. Without it they return ErrNoCoreAuth.
 	CoreAuth *coreauth.Manager
-	// Store is the token store CoreAuth persists to, as NewCoreAuthManager
-	// returned it for Config.AuthDir. AddAccount saves the account through it
-	// and loads it back from it, SetAccountDisabled saves through it and
-	// RemoveAccount deletes the account's credential from it; without it they
-	// return ErrNoTokenStore.
+	// Store is the token store CoreAuth persists to, the one NewCoreAuthManager
+	// was given. AddAccount saves the account through it and loads it back
+	// from it, SetAccountDisabled saves through it and RemoveAccount deletes
+	// the account's credential from it; without it they return
+	// ErrNoTokenStore.
 	Store coreauth.Store
 	// Resolver authenticates the API tokens proxied requests present, and
 	// returns their owners' policies. Required: it backs the only access
@@ -101,8 +100,9 @@ type Gateway struct {
 	// server; tests walk its routes against the routes table.
 	engine atomic.Pointer[gin.Engine]
 	// authDir is the boot configuration's AuthDir made absolute: the directory
-	// the store lists on start. Upstream never re-points the store on reload,
-	// so a pushed AuthDir does not move it.
+	// gateway/login hands upstream's login handler for its callback files
+	// (AuthDir). Credentials are wherever Store keeps them; the gateway never
+	// resolves a path for one.
 	authDir string
 
 	// pushMu serialises configuration pushes and account changes, so current
@@ -149,11 +149,6 @@ var ErrUnknownAccount = fmt.Errorf("gateway: unknown account: %w", app.ErrNotFou
 // Params.Store: the change could not be made durable, so the account would
 // come back as it was on the next start.
 var ErrNoTokenStore = errors.New("gateway: no token store was supplied")
-
-// ErrCredentialPath reports an account whose credential path cannot be
-// resolved inside the auth directory, so the gateway will neither add nor
-// delete it.
-var ErrCredentialPath = errors.New("gateway: credential path is not inside the auth directory")
 
 // ErrNoResolver reports Params without a Resolver: no request could be
 // authenticated, and upstream admits every request when it has no provider.
@@ -393,30 +388,25 @@ func New(params Params) (*Gateway, error) {
 	return gw, nil
 }
 
-// NewCoreAuthManager builds the core auth manager for the boot configuration cfg
-// the way the upstream builder would, so a self-supplied manager keeps the auth
-// directory and cooldown persistence the default path sets up (upstream
-// sdk/cliproxy/builder.go:250-267). The store's base directory is cfg.AuthDir,
-// the same value New resolves the gateway's auth directory from. It returns the
-// token store the manager persists to; pass it as Params.Store, and cfg as
+// NewCoreAuthManager builds the core auth manager for the boot configuration
+// cfg over store, the way the upstream builder builds its own
+// (sdk/cliproxy/builder.go:253-266): when store provides a cooldown store
+// (coreauth.CooldownStateStoreProvider) it is returned, nil otherwise. The
+// caller points store at its backend; the manager only persists to it. Pass
+// store as Params.Store, the cooldown store as Params.Cooldown and cfg as
 // Params.Config.
 //
 // The manager routes by cfg's routing settings from the start. Upstream's
 // builder picks the selector from the configuration only for a manager it builds
 // itself; for a supplied one it records no routing state, so without this the
 // stored strategy would be inert until the first configuration push.
-func NewCoreAuthManager(cfg *cliproxyconfig.Config) (*coreauth.Manager, coreauth.Store, coreauth.CooldownStateStore) {
-	store := sdkauth.GetTokenStore()
-	if setter, ok := store.(interface{ SetBaseDir(string) }); ok {
-		setter.SetBaseDir(cfg.AuthDir)
-	}
-
+func NewCoreAuthManager(cfg *cliproxyconfig.Config, store coreauth.Store) (*coreauth.Manager, coreauth.CooldownStateStore) {
 	var cooldown coreauth.CooldownStateStore
 	if provider, ok := store.(coreauth.CooldownStateStoreProvider); ok {
 		cooldown = provider.CooldownStateStore()
 	}
 
-	return coreauth.NewManager(store, routingSelector(cfg), nil), store, cooldown
+	return coreauth.NewManager(store, routingSelector(cfg), nil), cooldown
 }
 
 // routingSelector is the selector upstream builds for cfg's routing settings
@@ -548,33 +538,34 @@ func (g *Gateway) PushConfig(cfg *cliproxyconfig.Config) error {
 // the other account changes a token store (ErrNoTokenStore).
 //
 // The account held is the one a restart would load: the store's List reads
-// the saved file the way boot does (sdk/auth/filestore.go readAuthFiles), so
-// its id is the file's, Metadata carries everything the file holds, and
-// Label, Status, Disabled and the path attributes are set as on load. A login
-// record keeps its tokens only in Storage, which Save writes into the file
+// the saved credential the way boot does, so its id is the credential's key,
+// Metadata carries everything the credential holds, and Label, Status,
+// Disabled and the source attributes are set as on load. A login record keeps
+// its tokens only in Storage, which Save serializes into the credential
 // (upstream/internal/api/handlers/management/auth_files_fields.go
 // saveTokenRecord does the same); the executors read them from Metadata, so
 // registering the record itself would send requests without a credential.
 // Accounts the store never holds — config-derived API keys, runtime-only and
 // plugin-virtual accounts — are registered as given.
 //
-// An account whose credential would be stored outside the auth directory is
-// refused (ErrCredentialPath) before anything is saved: RemoveAccount could
-// never remove it, and the store would not load it on start. An account with
-// no id, file name or path gets a UUID id, as Register would give it.
+// The credential's key is the account's file name, else its id
+// (credentialKey), so a re-login of the same account overwrites its
+// credential. An account with neither gets a UUID id, as Register would give
+// it.
 //
-// The save carries creation intent (coreauth.WithAuthCreationIntent):
-// upstream's file store writes nothing for a disabled account whose file does
-// not exist yet without it (sdk/auth/filestore.go Save), so an account added
-// already disabled would vanish on restart.
+// The save carries creation intent (coreauth.WithAuthCreationIntent): a token
+// store creates no credential for a save without it — the credential store
+// none at all (CredentialStore.Save), upstream's file store none for a
+// disabled account (sdk/auth/filestore.go Save) — so the account would vanish
+// on restart.
 //
 // An account is either added and durable or not routable. If the save fails,
 // nothing is registered and the manager is left as it was. If the saved
 // account cannot be loaded back or registered, the credential is withdrawn
-// again — deleted, and an account the manager already held under that id
-// withdrawn with it (RemoveAccount's steps), since its file is the one just
-// overwritten — and the error returned. If the withdrawal fails as well, the
-// error says so.
+// again — deleted, and an account the manager already held under that key
+// withdrawn with it (RemoveAccount's steps), since its credential is the one
+// just overwritten — and the error returned. If the withdrawal fails as well,
+// the error says so.
 func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
 	if auth == nil {
 		return nil, errNilAccount
@@ -589,11 +580,6 @@ func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreaut
 
 	if g.store == nil {
 		return nil, ErrNoTokenStore
-	}
-
-	path, err := g.credentialPath(auth)
-	if err != nil {
-		return nil, err
 	}
 
 	reload, err := g.reloadLocked()
@@ -616,25 +602,26 @@ func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreaut
 		return stored, nil
 	}
 
-	if path == "" {
+	key := credentialKey(auth)
+	if key == "" {
 		auth.ID = uuid.NewString()
-		path = filepath.Join(g.authDir, auth.ID)
+		key = auth.ID
 	}
 
 	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
 		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
 	}
 
-	stored, err := g.loadLocked(ctx, path)
+	stored, err := g.loadLocked(ctx, key)
 	if err == nil {
 		stored, err = g.coreAuth.Register(ctx, stored)
 	}
 
 	if err != nil {
-		if errWithdraw := g.withdrawLocked(ctx, reload, path); errWithdraw != nil {
+		if errWithdraw := g.withdrawLocked(ctx, reload, key); errWithdraw != nil {
 			return nil, fmt.Errorf("gateway: account %q was saved but not added, "+
 				"and its credential %q could not be withdrawn (retry RemoveAccount): %w",
-				auth.ID, path, errors.Join(err, errWithdraw))
+				auth.ID, key, errors.Join(err, errWithdraw))
 		}
 
 		return nil, fmt.Errorf("gateway: account %q was saved but not added, so its credential was withdrawn: %w", auth.ID, err)
@@ -655,10 +642,10 @@ func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreaut
 // nothing to save and come back from configuration.
 //
 // If the save fails, the error says so and the account keeps the requested
-// state in memory: a failed write may have left the file in either state, so
-// rolling back could not restore agreement with disk, and rolling back a
-// disable would put a credential the caller is withdrawing back into rotation.
-// A retry converges.
+// state in memory: a failed write may have left the stored credential in
+// either state, so rolling back could not restore agreement with the store,
+// and rolling back a disable would put a credential the caller is withdrawing
+// back into rotation. A retry converges.
 func (g *Gateway) SetAccountDisabled(ctx context.Context, id string, disabled bool) error {
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
@@ -693,17 +680,18 @@ func (g *Gateway) SetAccountDisabled(ctx context.Context, id string, disabled bo
 // — so the account is disabled and the configuration re-applied first.
 //
 // Order: disable, re-apply, delete from the store, then remove from memory.
-// Upstream's own management API deletes the file before removing the account
-// (internal/api/handlers/management/auth_files_crud.go DeleteAuthFile). Remove
-// cannot fail once the account is held, so the only partial failure is the
-// store delete: the account is then left disabled, unroutable and still held,
-// and a RemoveAccount retry can finish the job. The credential is then saved
-// marked disabled; if that save fails too, the error reports both, because the
-// file may still say enabled. Removing from memory first would instead strand
-// the credential where no gateway call can reach it until a restart revives
-// it. Deleting after disabling also keeps the credential from being written
-// back: upstream's file store does not recreate a disabled credential whose
-// file is gone (sdk/auth/filestore.go Save).
+// Upstream's own management API deletes the credential before removing the
+// account (internal/api/handlers/management/auth_files_crud.go
+// DeleteAuthFile). Remove cannot fail once the account is held, so the only
+// partial failure is the store delete: the account is then left disabled,
+// unroutable and still held, and a RemoveAccount retry can finish the job.
+// The credential is then saved marked disabled; if that save fails too, the
+// error reports both, because the stored credential may still say enabled.
+// Removing from memory first would instead strand the credential where no
+// gateway call can reach it until a restart revives it. A deleted credential
+// is not written back by the manager's own saves (a refresh, a cooldown):
+// they carry no creation intent, and the token store creates nothing without
+// it (CredentialStore.Save).
 func (g *Gateway) RemoveAccount(ctx context.Context, id string) error {
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
@@ -959,38 +947,36 @@ func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
 	g.apply(reload, g.CurrentConfig())
 }
 
-// loadLocked returns the account the token store loads from the credential at
-// path (as credentialPath resolves it), as boot loads it: the first one List
-// reads from that file, as upstream's readAuthFile takes the first. The
-// caller holds pushMu.
-func (g *Gateway) loadLocked(ctx context.Context, path string) (*coreauth.Auth, error) {
+// loadLocked returns the account the token store loads under key, as boot
+// loads it: the first listed record whose id is key. The caller holds pushMu.
+func (g *Gateway) loadLocked(ctx context.Context, key string) (*coreauth.Auth, error) {
 	listed, err := g.store.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list the token store: %w", err)
 	}
 
 	for _, auth := range listed {
-		if p, err := g.credentialPath(auth); err == nil && p == path {
+		if auth.ID == key {
 			return auth, nil
 		}
 	}
 
-	return nil, fmt.Errorf("%w %q", errCredentialNotLoaded, path)
+	return nil, fmt.Errorf("%w %q", errCredentialNotLoaded, key)
 }
 
 // withdrawLocked undoes a save AddAccount could not complete: an account the
-// manager holds for the credential at path is removed with RemoveAccount's
-// steps, since the save overwrote its file; otherwise the file is deleted. The
+// manager holds under key is removed with RemoveAccount's steps, since the
+// save overwrote its credential; otherwise the credential is deleted. The
 // caller holds pushMu.
-func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfig.Config), path string) error {
+func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfig.Config), key string) error {
 	for _, held := range g.coreAuth.List() {
-		if p, err := g.credentialPath(held); err == nil && p == path {
+		if credentialKey(held) == key {
 			return g.removeLocked(ctx, reload, held)
 		}
 	}
 
-	if err := g.store.Delete(ctx, path); err != nil {
-		return fmt.Errorf("gateway: delete credential %q: %w", path, err)
+	if err := g.store.Delete(ctx, key); err != nil {
+		return fmt.Errorf("gateway: delete credential %q: %w", key, err)
 	}
 
 	return nil
@@ -1000,11 +986,7 @@ func (g *Gateway) withdrawLocked(ctx context.Context, reload func(*cliproxyconfi
 // holds pushMu.
 func (g *Gateway) removeLocked(ctx context.Context, reload func(*cliproxyconfig.Config), auth *coreauth.Auth) error {
 	id := auth.ID
-
-	path, err := g.credentialPath(auth)
-	if err != nil {
-		return err
-	}
+	key := credentialKey(auth)
 
 	updated, err := g.setDisabledLocked(ctx, auth, true)
 	if err != nil {
@@ -1013,100 +995,19 @@ func (g *Gateway) removeLocked(ctx context.Context, reload func(*cliproxyconfig.
 
 	g.reapplyLocked(reload)
 
-	if err := g.store.Delete(ctx, path); err != nil {
+	if err := g.store.Delete(ctx, key); err != nil {
 		if errSave := g.saveLocked(ctx, updated); errSave != nil {
 			return fmt.Errorf("gateway: account %q is disabled but still held, its credential %q was not deleted "+
-				"and may not be marked disabled on disk (retry RemoveAccount): %w", id, path, errors.Join(err, errSave))
+				"and may not be marked disabled in the store (retry RemoveAccount): %w", id, key, errors.Join(err, errSave))
 		}
 
 		return fmt.Errorf("gateway: account %q is disabled but still held, "+
-			"and its credential %q was not deleted (retry RemoveAccount): %w", id, path, err)
+			"and its credential %q was not deleted (retry RemoveAccount): %w", id, key, err)
 	}
 
 	g.coreAuth.Remove(ctx, id)
 
 	return nil
-}
-
-// credentialPath is the absolute path of auth's credential, resolved the way
-// upstream's file store resolves it on Save (sdk/auth/filestore.go
-// resolveAuthPath): the first non-empty of the path attribute (as written, so
-// a relative one is relative to the working directory), the file name and the
-// id, the latter two joined to the auth directory unless absolute. Delete
-// must get an absolute path: it resolves a relative key containing a
-// separator against the working directory, not the auth directory
-// (resolveDeletePath), and reports the missing file as success — and upstream
-// puts the unsanitised account email into Claude file names
-// (internal/auth/claude/filename.go). Upstream's management delete makes the
-// path absolute the same way (auth_files_crud.go deleteAuthFileByName).
-//
-// Every one of those fields that is set must lie inside the auth directory,
-// not only the one Save picks now: the path attribute is Save's own record of
-// where it wrote, and a later save without it falls back to the others.
-// Otherwise the account is refused (ErrCredentialPath): the store would not
-// load it on start, and the gateway neither writes nor deletes a file it does
-// not own. The check is lexical; symlinks are not resolved.
-//
-// The path is empty only for an account with none of the fields set;
-// AddAccount gives it a UUID id, which Save joins to the auth directory.
-func (g *Gateway) credentialPath(auth *coreauth.Auth) (string, error) {
-	if g.authDir == "" {
-		return "", fmt.Errorf("%w: no auth directory is configured", ErrCredentialPath)
-	}
-
-	var saved string
-
-	for _, field := range []struct {
-		value string
-		// fromCWD: Save uses a relative path attribute relative to the working
-		// directory, as written.
-		fromCWD bool
-	}{
-		{strings.TrimSpace(auth.Attributes[coreauth.AttributePath]), true},
-		{strings.TrimSpace(auth.FileName), false},
-		{auth.ID, false},
-	} {
-		if field.value == "" {
-			continue
-		}
-
-		path, err := g.inAuthDir(field.value, field.fromCWD)
-		if err != nil {
-			return "", err
-		}
-
-		if saved == "" {
-			saved = path
-		}
-	}
-
-	return saved, nil
-}
-
-// inAuthDir makes path absolute — against the working directory if fromCWD,
-// else against the auth directory — and cleans it. It must then lie strictly
-// inside the auth directory, or ErrCredentialPath is returned.
-func (g *Gateway) inAuthDir(path string, fromCWD bool) (string, error) {
-	switch {
-	case fromCWD:
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return "", fmt.Errorf("%w: %q: %w", ErrCredentialPath, path, err)
-		}
-
-		path = abs
-	case !filepath.IsAbs(path):
-		path = filepath.Join(g.authDir, path)
-	}
-
-	path = filepath.Clean(path)
-
-	rel, err := filepath.Rel(g.authDir, path)
-	if err != nil || rel == "." || !filepath.IsLocal(rel) {
-		return "", fmt.Errorf("%w: %q (auth directory %q)", ErrCredentialPath, path, g.authDir)
-	}
-
-	return path, nil
 }
 
 // saveLocked writes auth through the token store and returns the error the
