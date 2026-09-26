@@ -20,6 +20,11 @@ type Config struct {
 	// scraper inside the deployment network only.
 	MetricsAddr string
 	DatabaseURL string
+	// CredentialsKey is LLMPROXY_CREDENTIALS_KEY, at least MinCredentialsKeyLen
+	// bytes: the key the vendor accounts' OAuth credentials are sealed with in the
+	// database (credentials.NewSealer). Required; a lost or changed key means
+	// signing every vendor account in again.
+	CredentialsKey Secret
 	// RuntimeDir is LLMPROXY_RUNTIME_DIR: upstream's working directory, where its
 	// request logs go. No configuration file is read from it.
 	RuntimeDir string
@@ -118,6 +123,11 @@ func (w Web) Enabled() bool { return w.Addr != "" }
 // of the AES-256 key derived from it.
 const MinSessionKeyLen = 32
 
+// MinCredentialsKeyLen is the shortest LLMPROXY_CREDENTIALS_KEY accepted: 32 bytes,
+// the size of the AES-256 key derived from it. credentials.MinSealerKeyLen is the
+// same floor.
+const MinCredentialsKeyLen = 32
+
 // Secret is key material that must not reach a log line: whatever verb formats it,
 // it prints as a placeholder.
 type Secret []byte
@@ -206,10 +216,16 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	key, err := loadCredentialsKey()
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		ListenAddr:              envOr("LLMPROXY_LISTEN_ADDR", ":8080"),
 		MetricsAddr:             envOr("LLMPROXY_METRICS_ADDR", "127.0.0.1:9090"),
 		DatabaseURL:             db.URL,
+		CredentialsKey:          key,
 		RuntimeDir:              envOr("LLMPROXY_RUNTIME_DIR", "/var/lib/llmproxy/runtime"),
 		AuthDir:                 envOr("LLMPROXY_AUTH_DIR", "/var/lib/llmproxy/auths"),
 		BootstrapAdminEmail:     strings.TrimSpace(os.Getenv("LLMPROXY_BOOTSTRAP_ADMIN_EMAIL")),
@@ -302,6 +318,24 @@ func LoadDatabase() (Database, error) {
 	}
 
 	return db, nil
+}
+
+// loadCredentialsKey reads LLMPROXY_CREDENTIALS_KEY. Load reads it right after
+// LLMPROXY_DATABASE_URL, so a process started with no environment at all still
+// reports the database URL first (the CI image smoke test checks that message);
+// LoadDatabase does not read it, so gateway reset-password runs without it. Its
+// errors name the variable and never quote the value.
+func loadCredentialsKey() (Secret, error) {
+	key := os.Getenv("LLMPROXY_CREDENTIALS_KEY")
+
+	switch {
+	case key == "":
+		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY is required", errConfig)
+	case len(key) < MinCredentialsKeyLen:
+		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY must be at least %d bytes", errConfig, MinCredentialsKeyLen)
+	}
+
+	return Secret(key), nil
 }
 
 // loadPriceCatalog reads the LLMPROXY_PRICES_CATALOG_* variables.

@@ -174,7 +174,9 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 	apiAddr, webAddr, metricsAddr := freeAddr(t), freeAddr(t), freeAddr(t)
 	proc.apiURL, proc.webURL, proc.metricsURL = "http://"+apiAddr, "http://"+webAddr, "http://"+metricsAddr
 	vars := map[string]string{
-		"LLMPROXY_DATABASE_URL":              pool.Config().ConnString(),
+		"LLMPROXY_DATABASE_URL": pool.Config().ConnString(),
+		// Seals the vendor accounts' credentials in the database; at least 32 bytes.
+		"LLMPROXY_CREDENTIALS_KEY":           "e2e-credentials-key-of-at-least-32-bytes",
 		"LLMPROXY_LISTEN_ADDR":               apiAddr,
 		"LLMPROXY_WEB_ADDR":                  webAddr,
 		"LLMPROXY_METRICS_ADDR":              metricsAddr,
