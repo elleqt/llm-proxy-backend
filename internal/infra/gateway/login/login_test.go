@@ -529,15 +529,15 @@ func answerCodexExchange(t *testing.T, email, accessToken string) {
 	claims, err := json.Marshal(map[string]any{"email": email})
 	require.NoError(t, err)
 
-	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/oauth/token" {
-			http.NotFound(w, r)
+	vendor := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodPost || req.URL.Path != "/oauth/token" {
+			http.NotFound(resp, req)
 
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		resp.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(resp).Encode(map[string]any{
 			"access_token":  accessToken,
 			"refresh_token": "fresh-refresh-token",
 			"id_token":      "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".c2ln",
@@ -578,6 +578,7 @@ func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
 	const email = "relogin@example.com"
 
 	id := "codex-" + email + ".json"
+
 	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(id) })
 
 	params := grantsVolumeParams(t)
@@ -589,8 +590,8 @@ func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(params.Config.AuthDir, id), stale, 0o600))
 	answerCodexExchange(t, email, "fresh-access-token")
 
-	r := startBooted(t, params)
-	_, err = r.gateway.AddAccount(context.Background(), &coreauth.Auth{
+	srv := startBooted(t, params)
+	_, err = srv.gateway.AddAccount(context.Background(), &coreauth.Auth{
 		ID: id, FileName: id, Provider: "codex", Status: coreauth.StatusActive,
 		Metadata: map[string]any{
 			"type": "codex", "email": email, "access_token": "held-access-token",
@@ -599,7 +600,7 @@ func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
 	})
 	require.NoError(t, err, "AddAccount: the held account")
 
-	login, err := New(r.gateway)
+	login, err := New(srv.gateway)
 	require.NoError(t, err, "New")
 	t.Cleanup(func() { endLogins(login) })
 

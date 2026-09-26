@@ -140,7 +140,7 @@ func TestSealerReadsTheSpecifiedFormat(t *testing.T) {
 
 	opened, err := sealer.Open(sealedID, vector)
 	require.NoError(t, err, "a value sealed as specified does not open")
-	require.Equal(t, credentialJSON, string(opened))
+	require.JSONEq(t, credentialJSON, string(opened))
 
 	sealed, err := sealer.Seal(sealedID, []byte(credentialJSON))
 	require.NoError(t, err)

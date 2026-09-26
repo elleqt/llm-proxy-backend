@@ -424,6 +424,7 @@ func TestAddAccountWithdrawsACredentialItCannotLoadBack(t *testing.T) {
 
 	grant := claudeGrant(t)
 	grant.FileName = "renamed-" + grant.ID
+
 	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(grant.FileName) })
 
 	store.dropListed.Store(true)

@@ -136,7 +136,7 @@ const MinCredentialsKeyLen = 32
 
 // composeCredentialsKey is the placeholder LLMPROXY_CREDENTIALS_KEY the shipped
 // compose files carry. It passes the length check but is public, so Load refuses it.
-const composeCredentialsKey = "change-me-credentials-key-at-least-32-bytes" //nolint:gosec // G101: the public placeholder refused here, not a credential.
+const composeCredentialsKey = "change-me-credentials-key-at-least-32-bytes"
 
 // Secret is key material that must not reach a log line: whatever verb formats it,
 // it prints as a placeholder.

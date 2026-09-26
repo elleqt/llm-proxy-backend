@@ -290,7 +290,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	logins, err := login.New(gw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("vendor logins: %w", err)
 	}
 
 	router, err := webapi.NewRouter(webapi.Deps{
