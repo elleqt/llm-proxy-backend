@@ -57,6 +57,9 @@ func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 
 	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults(), bootLog)
 	require.NoError(t, err, "LoadBootConfig")
+	// gateway.admit forces both off on every boot and push, so the gateway's
+	// current configuration never reports them set, whatever runningDoc says.
+	running.RequestLog, running.SaveCooldownStatus = false, false
 
 	fixture := &settingsFixture{
 		repo:    mocks.NewSettingsRepo(t),
@@ -427,6 +430,42 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 
 	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
 	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
+}
+
+// TestSettingsDiffLeavesOutInertKeys: the running configuration reports
+// request-log and save-cooldown-status off (gateway.admit) even when the stored
+// document sets them, and an update does not change that. Neither the diff of a
+// field patch nor its audit record shows them.
+func TestSettingsDiffLeavesOutInertKeys(t *testing.T) {
+	stored := "request-log: true\nsave-cooldown-status: true\nrequest-retry: 1\n"
+	fixture := newSettingsFixture(t, stored)
+	retry := 4
+
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
+	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	var detail map[string]any
+
+	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+		detail = e.Detail
+
+		return nil
+	})
+
+	res, err := fixture.svc.Update(context.Background(), newAdmin(), settings.Update{
+		Fields: &settings.Patch{RequestRetry: &retry},
+	})
+	require.NoError(t, err, "Update")
+	require.Contains(t, res.Diff, "+request-retry: 4\n", "diff does not show the patched field")
+
+	audited, _ := detail["diff"].(string)
+
+	for _, key := range []string{"request-log", "save-cooldown-status"} {
+		require.NotContains(t, res.Diff, key, "diff shows an inert key")
+		require.NotContains(t, audited, key, "audit record shows an inert key")
+	}
 }
 
 func TestSettingsFieldPatchValidation(t *testing.T) {

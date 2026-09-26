@@ -73,9 +73,10 @@ func isOwnedKey(key string) bool {
 // document that adds one or changes its value (refuseInertKeys).
 //
 // COMPAT(credentials-import): a document saved by an earlier release may still set
-// one; LoadBootConfig warns and Update keeps it while unchanged. Remove next release
-// (RELEASING.md): the keys join ownedKeys, refused in any document, and this list,
-// inertKeyWarning, inertValues and refuseInertKeys go away.
+// one; LoadBootConfig warns, Update keeps it while unchanged, and the diff leaves it
+// out (editableYAML). Remove next release (RELEASING.md): the keys join ownedKeys,
+// refused in any document, and this list, inertKeyWarning, inertValues and
+// refuseInertKeys go away.
 var inertKeys = []string{"save-cooldown-status", "request-log", "error-logs-max-files"}
 
 // inertKeyWarning is logged at boot, with the key, for each inert key the stored
@@ -699,6 +700,12 @@ func editableDiff(from, to *sdkconfig.Config) (string, error) {
 
 // editableYAML renders cfg without its gateway-owned keys and with every secret
 // redacted (redactSecrets). Only the rendering is redacted; cfg is not touched.
+//
+// COMPAT(credentials-import): inert keys are left out too. gateway.admit runs
+// request-log and save-cooldown-status off whatever the document says, so a
+// document saved by an earlier release that sets either would show it as a change
+// in every update's diff and audit record, though nothing changes. Remove next
+// release (RELEASING.md), when the keys join ownedKeys and isOwnedKey leaves them out.
 func editableYAML(cfg *sdkconfig.Config) (string, error) {
 	var node yaml.Node
 	if err := node.Encode(cfg); err != nil {
@@ -709,7 +716,7 @@ func editableYAML(cfg *sdkconfig.Config) (string, error) {
 
 	kept := node.Content[:0]
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if !isOwnedKey(node.Content[i].Value) {
+		if key := node.Content[i].Value; !isOwnedKey(key) && !slices.Contains(inertKeys, key) {
 			kept = append(kept, node.Content[i], node.Content[i+1])
 		}
 	}
