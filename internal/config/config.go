@@ -135,7 +135,8 @@ const MinSessionKeyLen = 32
 const MinCredentialsKeyLen = 32
 
 // composeCredentialsKey is the placeholder LLMPROXY_CREDENTIALS_KEY the shipped
-// compose files carry. It passes the length check but is public, so Load refuses it.
+// compose files carry. Load accepts it, so a compose file starts as downloaded;
+// it is public, so boot warns while it is set (CredentialsKeyIsPlaceholder).
 const composeCredentialsKey = "change-me-credentials-key-at-least-32-bytes"
 
 // Secret is key material that must not reach a log line: whatever verb formats it,
@@ -176,6 +177,13 @@ func (c Config) ListenHostPort() (string, int) {
 	}
 
 	return host, port
+}
+
+// CredentialsKeyIsPlaceholder reports whether LLMPROXY_CREDENTIALS_KEY is the
+// compose files' placeholder: a key anyone has, so the vendor accounts sealed
+// under it are as good as unencrypted to whoever holds a copy of the database.
+func (c Config) CredentialsKeyIsPlaceholder() bool {
+	return string(c.CredentialsKey) == composeCredentialsKey
 }
 
 // splitAddr splits a listen address host:port whose port is a number from 1 to
@@ -334,8 +342,8 @@ func LoadDatabase() (Database, error) {
 // LLMPROXY_DATABASE_URL, so a process started with no environment at all still
 // reports the database URL first (the CI image smoke test checks that message);
 // LoadDatabase does not read it, so gateway reset-password runs without it. The
-// compose files' placeholder is refused. Its errors name the variable and never
-// quote the value.
+// compose files' placeholder passes: see CredentialsKeyIsPlaceholder. Its errors
+// name the variable and never quote the value.
 func loadCredentialsKey() (Secret, error) {
 	key := os.Getenv("LLMPROXY_CREDENTIALS_KEY")
 
@@ -344,9 +352,6 @@ func loadCredentialsKey() (Secret, error) {
 		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY is required", errConfig)
 	case len(key) < MinCredentialsKeyLen:
 		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY must be at least %d bytes", errConfig, MinCredentialsKeyLen)
-	case key == composeCredentialsKey:
-		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY is still the compose files' placeholder: "+
-			"generate a key (openssl rand -hex 32) and keep it with your other secrets", errConfig)
 	}
 
 	return Secret(key), nil

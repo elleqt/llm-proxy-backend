@@ -212,6 +212,25 @@ func TestLocalLoginOffLeavesOnlyFederatedSignIn(t *testing.T) {
 	require.Contains(t, proc.out.String(), "LLMPROXY_LOCAL_LOGIN is false", "no warning that the bootstrap administrator cannot sign in")
 }
 
+// TestThePlaceholderCredentialsKeyServesWithAWarning: a compose file started as
+// downloaded keeps LLMPROXY_CREDENTIALS_KEY at its placeholder. The process
+// serves, and the log says the key is public.
+func TestThePlaceholderCredentialsKeyServesWithAWarning(t *testing.T) {
+	if !inFreshProcess(t) {
+		return
+	}
+
+	proc := startProcess(t, "", map[string]string{
+		"LLMPROXY_CREDENTIALS_KEY": "change-me-credentials-key-at-least-32-bytes",
+	})
+
+	var cfg api.AuthConfig
+	proc.webJSON(t, http.MethodGet, "/api/auth/config", "", http.StatusOK, &cfg)
+
+	require.Contains(t, proc.out.String(), "LLMPROXY_CREDENTIALS_KEY is the compose files' public placeholder",
+		"no warning that the credentials key is public")
+}
+
 // catalogueHost is where upstream's model catalogue updaters fetch from first
 // (internal/registry model_updater.go modelsURLs, v7.3.18), as a CONNECT asks
 // for it.
