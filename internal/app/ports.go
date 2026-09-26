@@ -526,6 +526,39 @@ type SettingsRepo interface {
 	SetUpstreamDocument(ctx context.Context, doc string, by uuid.UUID, at time.Time) error
 }
 
+// VendorCredential is a vendor account's stored credential. Sealed is opaque to the
+// repository: it never sees the plaintext, which the gateway seals under the
+// account's ID before writing and opens after reading.
+type VendorCredential struct {
+	ID        string
+	Provider  string
+	Sealed    []byte
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// VendorCredentialRepo persists the vendor accounts' sealed credentials. The
+// gateway's credential store is its only user.
+type VendorCredentialRepo interface {
+	// List returns every stored credential.
+	List(ctx context.Context) ([]VendorCredential, error)
+	// Upsert inserts c or overwrites the row with its id, keeping the row's created_at.
+	Upsert(ctx context.Context, c VendorCredential) error
+	// Update overwrites an existing row, keeping its created_at; ErrNotFound when
+	// there is none, so a runtime save never re-creates a removed account.
+	Update(ctx context.Context, c VendorCredential) error
+	// Delete removes the row; a missing row is not an error.
+	Delete(ctx context.Context, id string) error
+
+	// COMPAT(credentials-import): ImportDone and Import exist only for the one-shot import; remove next release (RELEASING.md).
+	// ImportDone reports whether the import marker is set.
+	ImportDone(ctx context.Context) (bool, error)
+	// Import inserts the marker and every row in one transaction. It returns false,
+	// inserting nothing, when the marker is already set. A row whose id is already
+	// stored fails the whole import with ErrConflict, and nothing is written.
+	Import(ctx context.Context, rows []VendorCredential) (bool, error)
+}
+
 // ConfigPusher is the embedded gateway's configuration surface. PushConfig takes
 // ownership of cfg: the caller must not touch it afterwards.
 type ConfigPusher interface {

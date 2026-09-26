@@ -27,6 +27,7 @@ packages:
       ActivityRepo:
       ModelCatalog:
       SettingsRepo:
+      VendorCredentialRepo:
       ConfigPusher:
       PriceRepo:
       PriceSink:
