@@ -194,34 +194,7 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 
 	apiAddr, webAddr, metricsAddr := freeAddr(t), freeAddr(t), freeAddr(t)
 	proc.apiURL, proc.webURL, proc.metricsURL = "http://"+apiAddr, "http://"+webAddr, "http://"+metricsAddr
-	vars := map[string]string{
-		"LLMPROXY_DATABASE_URL": pool.Config().ConnString(),
-		// Seals the vendor accounts' credentials in the database; at least 32 bytes.
-		"LLMPROXY_CREDENTIALS_KEY":           "e2e-credentials-key-of-at-least-32-bytes",
-		"LLMPROXY_LISTEN_ADDR":               apiAddr,
-		"LLMPROXY_WEB_ADDR":                  webAddr,
-		"LLMPROXY_METRICS_ADDR":              metricsAddr,
-		"LLMPROXY_PUBLIC_API_URL":            proc.apiURL,
-		"LLMPROXY_RUNTIME_DIR":               t.TempDir(),
-		"LLMPROXY_AUTH_DIR":                  t.TempDir(),
-		"LLMPROXY_BOOTSTRAP_ADMIN_EMAIL":     proc.adminEmail,
-		"LLMPROXY_PASSWORD_HASH_CONCURRENCY": "2",
-		// The web listener here is plain http, as behind the local stack's nginx.
-		"LLMPROXY_COOKIE_SECURE": "false",
-		"LLMPROXY_SESSION_KEY":   "",
-		"LLMPROXY_OIDC_ISSUER":   "",
-		"LLMPROXY_LOCAL_LOGIN":   "",
-		// The default text log, whatever format the caller's environment set.
-		"LLMPROXY_LOG_FORMAT": "",
-		// Never the network: a test that wants a catalog serves one and sets these.
-		"LLMPROXY_PRICES_CATALOG_URL":      config.PriceCatalogOff,
-		"LLMPROXY_PRICES_CATALOG_INTERVAL": "",
-		// A set one makes the gateway refuse to start.
-		"MANAGEMENT_PASSWORD": "",
-		// On, upstream's model catalogue updaters fetch from the internet; the
-		// tests of that switch turn it on behind a local proxy.
-		"LLMPROXY_MODEL_CATALOG_UPDATES": "off",
-	}
+	vars := bootEnv(t, pool, apiAddr, webAddr, metricsAddr)
 	maps.Copy(vars, env)
 
 	for k, v := range vars {
@@ -282,6 +255,45 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 
 	return proc
 }
+
+// bootEnv is the environment a process on pool's database boots with: its three
+// listeners on the given addresses, and nothing taken from the caller's
+// environment or the network.
+func bootEnv(t *testing.T, pool *pgxpool.Pool, apiAddr, webAddr, metricsAddr string) map[string]string {
+	t.Helper()
+
+	return map[string]string{
+		"LLMPROXY_DATABASE_URL": pool.Config().ConnString(),
+		// Seals the vendor accounts' credentials in the database; at least 32 bytes.
+		"LLMPROXY_CREDENTIALS_KEY":           e2eCredentialsKey,
+		"LLMPROXY_LISTEN_ADDR":               apiAddr,
+		"LLMPROXY_WEB_ADDR":                  webAddr,
+		"LLMPROXY_METRICS_ADDR":              metricsAddr,
+		"LLMPROXY_PUBLIC_API_URL":            "http://" + apiAddr,
+		"LLMPROXY_RUNTIME_DIR":               t.TempDir(),
+		"LLMPROXY_AUTH_DIR":                  t.TempDir(),
+		"LLMPROXY_BOOTSTRAP_ADMIN_EMAIL":     "admin@example.com",
+		"LLMPROXY_PASSWORD_HASH_CONCURRENCY": "2",
+		// The web listener here is plain http, as behind the local stack's nginx.
+		"LLMPROXY_COOKIE_SECURE": "false",
+		"LLMPROXY_SESSION_KEY":   "",
+		"LLMPROXY_OIDC_ISSUER":   "",
+		"LLMPROXY_LOCAL_LOGIN":   "",
+		// The default text log, whatever format the caller's environment set.
+		"LLMPROXY_LOG_FORMAT": "",
+		// Never the network: a test that wants a catalog serves one and sets these.
+		"LLMPROXY_PRICES_CATALOG_URL":      config.PriceCatalogOff,
+		"LLMPROXY_PRICES_CATALOG_INTERVAL": "",
+		// A set one makes the gateway refuse to start.
+		"MANAGEMENT_PASSWORD": "",
+		// On, upstream's model catalogue updaters fetch from the internet; the
+		// tests of that switch turn it on behind a local proxy.
+		"LLMPROXY_MODEL_CATALOG_UPDATES": "off",
+	}
+}
+
+// e2eCredentialsKey is the LLMPROXY_CREDENTIALS_KEY every process boots with.
+const e2eCredentialsKey = "e2e-credentials-key-of-at-least-32-bytes"
 
 // readBootstrapPassword finds the bootstrap administrator's temporary password
 // in the process's output: a process booted on a database without an

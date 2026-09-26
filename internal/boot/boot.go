@@ -237,6 +237,13 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	sdkauth.RegisterTokenStore(store)
 
+	// Upstream loads the store itself but only warns when that fails, so a wrong
+	// LLMPROXY_CREDENTIALS_KEY would serve with no vendor accounts. One List here
+	// stops the boot instead, naming the account the key cannot open.
+	if _, err := store.List(ctx); err != nil {
+		return nil, fmt.Errorf("vendor credentials: %w", err)
+	}
+
 	manager, cooldown := gateway.NewCoreAuthManager(bootCfg, store)
 
 	//nolint:contextcheck // handlers take each request's context; construction serves nothing yet

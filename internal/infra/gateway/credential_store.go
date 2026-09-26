@@ -271,7 +271,8 @@ func (s *CredentialStore) Delete(ctx context.Context, id string) error {
 // List reads every stored account, as FileTokenStore.List reads the auth
 // directory. A row that does not open (sealed under another key, moved to
 // another id, tampered with) or does not parse fails List naming the
-// account: boot stops rather than drop an account silently. The digests
+// account: boot lists the store once before upstream loads it (upstream only
+// warns), so it stops rather than drop an account silently. The digests
 // become exactly what was read.
 func (s *CredentialStore) List(ctx context.Context) ([]*coreauth.Auth, error) {
 	s.mu.Lock()
