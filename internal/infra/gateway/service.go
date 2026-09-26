@@ -210,11 +210,11 @@ func checkManagementEnv() error {
 // api-keys, and plugins, the only other way a provider enters upstream's
 // access registry — and what would route a request past the policy gate's
 // model check: home mode, and an openai-compatibility entry whose policy name
-// is a built-in provider's or empty (compatNameRefused). It then forces the control
-// panel off and websocket authentication on. Upstream refuses a config update
-// whose credential weights are invalid (sdk/cliproxy/service_config.go
-// commitConfigUpdate) without reporting it to the reload caller, so that
-// check has to happen here.
+// is a built-in provider's or empty (compatNameRefused). It then forces the
+// control panel off, websocket authentication on, and cooldown files and
+// request logging off. Upstream refuses a config update whose credential
+// weights are invalid (sdk/cliproxy/service_config.go commitConfigUpdate)
+// without reporting it to the reload caller, so that check has to happen here.
 //
 // With DisableControlPanel unset, upstream serves GET /management.html and, on
 // the first request, downloads the panel from GitHub
@@ -230,10 +230,22 @@ func checkManagementEnv() error {
 // Forced on, the route goes through the access provider like every other —
 // behind the policy gate, which refuses it outright (see routes).
 //
-// Both flags are set on cfg itself, as upstream's own home mode does
+// With SaveCooldownStatus set, upstream persists cooldown state through the
+// token store's cooldown store and, for a store that provides none — the
+// credential store does not — through a file store it creates in the auth
+// directory (sdk/cliproxy/service_auth.go:566-581 resolveCooldownStateStore).
+// Forced off, cooldown lives in memory only.
+//
+// With RequestLog set, upstream's handlers buffer failed requests' error
+// details and websocket timelines in memory for the request logger
+// (sdk/api/handlers/handlers_errors.go LoggingAPIResponseError,
+// openai/openai_responses_websocket.go); New installs none (noRequestLogger),
+// so nothing would ever consume them.
+//
+// Every forced flag is set on cfg itself, as upstream's own home mode does
 // (service_config.go forceHomeRuntimeConfig), because upstream keeps the
-// pointer; each is written only when unset, so re-pushing the running
-// configuration writes nothing upstream is reading.
+// pointer; each is written only when it differs from the forced value, so
+// re-pushing the running configuration writes nothing upstream is reading.
 func admit(cfg *cliproxyconfig.Config) error {
 	if cfg == nil {
 		return errNilConfig
@@ -271,6 +283,14 @@ func admit(cfg *cliproxyconfig.Config) error {
 
 	if !cfg.WebsocketAuth {
 		cfg.WebsocketAuth = true
+	}
+
+	if cfg.SaveCooldownStatus {
+		cfg.SaveCooldownStatus = false
+	}
+
+	if cfg.RequestLog {
+		cfg.RequestLog = false
 	}
 
 	return nil
@@ -524,7 +544,8 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 // WaitReload), and refuses a configuration upstream would reject, one that
 // would enable the management API and one carrying api-keys. On error the
 // running configuration and CurrentConfig are unchanged. An accepted cfg has
-// its control panel forced off and websocket authentication forced on.
+// its control panel forced off, websocket authentication forced on, and
+// cooldown files and request logging forced off (admit).
 func (g *Gateway) PushConfig(cfg *cliproxyconfig.Config) error {
 	if err := admit(cfg); err != nil {
 		return err

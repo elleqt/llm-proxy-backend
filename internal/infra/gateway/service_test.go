@@ -331,6 +331,30 @@ func TestControlPanelIsNotServed(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, code, "GET /management.html after a push re-enabling it (%q)", body)
 }
 
+// TestAdmitForcesCooldownFilesAndRequestLogOff: with save-cooldown-status on,
+// upstream persists cooldown state to files in the auth directory unless the
+// token store provides its own cooldown store; with request-log on, its
+// handlers buffer every failed request's details in memory for a request
+// logger the gateway does not install. Neither setting survives admission,
+// at boot or on a push.
+func TestAdmitForcesCooldownFilesAndRequestLogOff(t *testing.T) {
+	srv := start(t, &cliproxyconfig.Config{SaveCooldownStatus: true, RequestLog: true})
+
+	booted := srv.gateway.CurrentConfig()
+	assert.False(t, booted.SaveCooldownStatus, "boot configuration: save-cooldown-status survived admission")
+	assert.False(t, booted.RequestLog, "boot configuration: request-log survived admission")
+
+	pushed := srv.emptyPush()
+
+	pushed.SaveCooldownStatus = true
+	pushed.RequestLog = true
+	require.NoError(t, srv.gateway.PushConfig(pushed), "PushConfig")
+
+	current := srv.gateway.CurrentConfig()
+	assert.False(t, current.SaveCooldownStatus, "pushed configuration: save-cooldown-status survived admission")
+	assert.False(t, current.RequestLog, "pushed configuration: request-log survived admission")
+}
+
 // fakeVendor wires the fake executor into a real upstream auth manager, for
 // conductor-level tests only. No HTTP request reaches this path: a request
 // resolves its provider from the global model registry by model name, and every
