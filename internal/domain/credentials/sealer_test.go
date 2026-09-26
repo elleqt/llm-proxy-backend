@@ -2,6 +2,10 @@ package credentials
 
 import (
 	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hkdf"
+	"crypto/sha256"
 	"fmt"
 	"testing"
 
@@ -109,4 +113,37 @@ func TestSealDrawsAFreshNonceEveryTime(t *testing.T) {
 	second, err := sealer.Seal(sealedID, []byte(credentialJSON))
 	require.NoError(t, err, "second Seal")
 	require.NotEqual(t, first, second, "two seals of the same plaintext are equal")
+}
+
+// The stored format is a contract with every row already in the database: a value
+// built from the specification alone — HKDF-SHA256 over the key with the info
+// "llmproxy vendor credentials v1", AES-256-GCM, 0x01 || nonce(12) ||
+// ciphertext+tag, the account id as additional data — must open, and Seal must
+// produce that layout. A change of construction fails here instead of at boot.
+func TestSealerReadsTheSpecifiedFormat(t *testing.T) {
+	derived, err := hkdf.Key(sha256.New, sealerKey, nil, "llmproxy vendor credentials v1", 32)
+	require.NoError(t, err)
+
+	block, err := aes.NewCipher(derived)
+	require.NoError(t, err)
+
+	gcm, err := cipher.NewGCM(block)
+	require.NoError(t, err)
+
+	nonce := []byte("fixed-nonce!") // 12 bytes, as GCM's standard nonce
+	require.Len(t, nonce, gcm.NonceSize())
+
+	vector := append([]byte{0x01}, nonce...)
+	vector = append(vector, gcm.Seal(nil, nonce, []byte(credentialJSON), []byte(sealedID))...)
+
+	sealer := newTestSealer(t, sealerKey)
+
+	opened, err := sealer.Open(sealedID, vector)
+	require.NoError(t, err, "a value sealed as specified does not open")
+	require.Equal(t, credentialJSON, string(opened))
+
+	sealed, err := sealer.Seal(sealedID, []byte(credentialJSON))
+	require.NoError(t, err)
+	require.Equal(t, byte(0x01), sealed[0], "the format version byte")
+	require.Len(t, sealed, 1+gcm.NonceSize()+len(credentialJSON)+gcm.Overhead(), "version, nonce, ciphertext and tag")
 }
