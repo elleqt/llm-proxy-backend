@@ -101,8 +101,8 @@ type Gateway struct {
 	// engine is the embedded server's gin engine, set when Run builds the
 	// server; tests walk its routes against the routes table.
 	engine atomic.Pointer[gin.Engine]
-	// authDir is the boot configuration's AuthDir made absolute: the directory
-	// gateway/login hands upstream's login handler for its callback files
+	// authDir is the boot configuration's AuthDir made absolute: gateway/login
+	// hands upstream's login handler a subdirectory of it for its callback files
 	// (AuthDir). Credentials are wherever Store keeps them; the gateway never
 	// resolves a path for one.
 	authDir string
@@ -825,8 +825,8 @@ func storeHolds(auth *coreauth.Auth) bool {
 // screens (app.ModelCatalog) to read the same source.
 func (g *Gateway) Catalog() *Catalog { return g.catalog }
 
-// AuthDir is the boot configuration's auth directory made absolute, for
-// gateway/login's upstream handler.
+// AuthDir is the boot configuration's auth directory made absolute;
+// gateway/login gives upstream's login handler a subdirectory of it.
 func (g *Gateway) AuthDir() string { return g.authDir }
 
 // CoreAuthManager is the manager account changes act on; gateway/login hands

@@ -52,9 +52,27 @@ func (refuseAll) Resolve(context.Context, string) (app.Principal, access.Policy,
 func productionParams(t *testing.T) gateway.Params {
 	t.Helper()
 
-	cfg := &cliproxyconfig.Config{AuthDir: t.TempDir()}
+	authDir := t.TempDir()
+
+	return paramsOver(authDir, authDir)
+}
+
+// grantsVolumeParams is productionParams as this release runs: the token
+// store (the database in production) lives apart from the auth directory,
+// which is the grants volume still holding the previous release's credential
+// files.
+func grantsVolumeParams(t *testing.T) gateway.Params {
+	t.Helper()
+
+	return paramsOver(t.TempDir(), t.TempDir())
+}
+
+// paramsOver builds Params with authDir as the configured auth directory and
+// upstream's file store over storeDir as the token store.
+func paramsOver(authDir, storeDir string) gateway.Params {
+	cfg := &cliproxyconfig.Config{AuthDir: authDir}
 	store := sdkauth.NewFileTokenStore()
-	store.SetBaseDir(cfg.AuthDir)
+	store.SetBaseDir(storeDir)
 
 	manager, cooldown := gateway.NewCoreAuthManager(cfg, store)
 

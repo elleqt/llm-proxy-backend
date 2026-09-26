@@ -288,6 +288,11 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	tokenService := apptokens.New(users, tokens, audit, clock, logs)
 
+	logins, err := login.New(gw)
+	if err != nil {
+		return nil, err
+	}
+
 	router, err := webapi.NewRouter(webapi.Deps{
 		Auth: auth.New(users, passwords,
 			auth.NewThrottle(pgloginattempts.New(pool), signInFailures, signInLockout, clock),
@@ -307,7 +312,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (providers.Service.Remove).
-		Providers:    providers.New(gw, login.New(gw), sink, meters, audit, clock, logs),
+		Providers:    providers.New(gw, logins, sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,

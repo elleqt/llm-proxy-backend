@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -38,7 +40,7 @@ const (
 	// from before the start request, so it falls before upstream's.
 	loginTTL = 5 * time.Minute
 	// maxPendingLogins bounds the logins in progress, each an upstream waiter
-	// goroutine polling the auth directory.
+	// goroutine polling the hand-off directory.
 	maxPendingLogins = 8
 	// loginFinishWait bounds CompleteLogin: upstream polls for the callback
 	// every 500 ms, then exchanges the code with the vendor.
@@ -49,6 +51,9 @@ const (
 	// start request; upstream hands the request's headers back to the
 	// post-auth hook (PopulateAuthContext → coreauth.GetRequestInfo).
 	loginSessionHeader = "X-Llm-Proxy-Login-Session"
+	// handoffDir, under the gateway's auth directory, is the directory
+	// upstream's login handler is given as its auth directory (New).
+	handoffDir = ".login"
 )
 
 // Returned by the post-auth hook, which makes upstream's saveTokenRecord
@@ -80,7 +85,7 @@ type loginFlow struct {
 //     synthetic gin.Context and reads {url, state} from the JSON it writes.
 //     Without the is_webui query neither binds a callback listener (only
 //     isWebUIRequest starts startCallbackForwarder) nor prints anything
-//     secret; both leave a goroutine polling the auth directory for
+//     secret; both leave a goroutine polling the hand-off directory (New) for
 //     ".oauth-<provider>-<state>.oauth" every 500 ms while the session is
 //     pending.
 //   - CompleteLogin checks that the pasted URL carries a code and the
@@ -100,7 +105,7 @@ type loginFlow struct {
 // A session completes through CompleteLogin and nothing else: no port is
 // bound, CompleteLogin is the only writer of callback files, and only
 // CompleteLogin adds the record the hook hands over. A callback reaching
-// upstream another way (a file planted in the auth directory, which needs the
+// upstream another way (a file planted in the hand-off directory, which needs the
 // session's state) consumes upstream's session, and CompleteLogin then finds
 // it no longer pending: login_expired, nothing added.
 type Service struct {
@@ -121,23 +126,40 @@ var _ app.VendorLogins = (*Service)(nil)
 
 // New serves Claude and Codex sign-ins for gw under their policy names.
 // Upstream's handler gets gw's configuration as it is now, with the auth
-// directory made absolute: its proxy settings reach the code exchange, and a
-// configuration pushed later does not.
-func New(gw *gateway.Gateway) *Service {
+// directory replaced by the hand-off directory: its proxy settings reach the
+// code exchange, and a configuration pushed later does not.
+//
+// The hand-off directory, handoffDir under gw's auth directory, never holds
+// a credential file. Upstream's handler merges into every new login record
+// the non-token keys ("disabled" among them) of the file named like the
+// record in its auth directory, and falls back to the account the manager
+// holds only when there is none (auth_files_fields.go
+// mergeExistingAuthFileMetadata). The auth directory itself may hold
+// credential files — the release before the credentials import kept its
+// accounts there — which a re-login would otherwise take its state from
+// instead of the token store's.
+// It is also the directory upstream polls for the callback file CompleteLogin
+// writes, so both use it.
+func New(gw *gateway.Gateway) (*Service, error) {
 	var cfg cliproxyconfig.Config
 	if current := gw.CurrentConfig(); current != nil {
 		cfg = *current
 	}
 
-	cfg.AuthDir = gw.AuthDir()
+	dir := filepath.Join(gw.AuthDir(), handoffDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("gateway: create the login hand-off directory: %w", err)
+	}
+
+	cfg.AuthDir = dir
 	h := sdkapi.NewHandlerWithoutConfigFilePath(&cfg, gw.CoreAuthManager())
-	login := newLogin(gw.AddAccount, gw.AuthDir(), map[string]loginFlow{
+	login := newLogin(gw.AddAccount, dir, map[string]loginFlow{
 		gateway.PolicyProvider("claude"):                 {upstream: "anthropic", start: h.RequestAnthropicToken},
 		gateway.PolicyProvider(gateway.CodexProviderKey): {upstream: gateway.CodexProviderKey, start: h.RequestCodexToken},
 	})
 	h.SetPostAuthHook(login.deliver)
 
-	return login
+	return login, nil
 }
 
 func newLogin(add func(context.Context, *coreauth.Auth) (*coreauth.Auth, error), authDir string, flows map[string]loginFlow) *Service {

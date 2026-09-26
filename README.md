@@ -557,7 +557,7 @@ Checklist:
     docker compose up -d
     ```
 
-  - The `grants` volume is not part of the backup: after the first start of this release its files are never read again. <!-- COMPAT(credentials-import): delete this item next release (RELEASING.md). -->
+  - The `grants` volume is not part of the backup: after the first start of this release its account files are never read again (a vendor sign-in only passes a short-lived hand-off file through its `.login` subdirectory). <!-- COMPAT(credentials-import): delete this item next release (RELEASING.md). -->
 - **Upgrades:** see [Upgrading](#upgrading).
 - **Shutdown:** on stop the backend lets in-flight requests finish for up to 30 s. Compose gives it 45 s (`stop_grace_period`).
 
