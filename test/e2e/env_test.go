@@ -64,15 +64,12 @@ func inFreshProcess(t *testing.T) bool {
 func isChild() bool { return os.Getenv(childEnv) != "" }
 
 // runChild runs the calling test alone in a new process, in parallel with the
-// other tests, and returns what it printed and how it ended. -short carries over.
+// other tests, and returns what it printed and how it ended.
 func runChild(t *testing.T) ([]byte, error) {
 	t.Helper()
 	t.Parallel()
 
 	args := []string{"-test.run=^" + t.Name() + "$", "-test.count=1", "-test.v"}
-	if testing.Short() {
-		args = append(args, "-test.short")
-	}
 
 	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
 
@@ -132,9 +129,8 @@ type process struct {
 	// adminEmail and adminPassword are the bootstrap administrator's.
 	adminEmail, adminPassword string
 
-	// readyAt is when all three listeners first answered; returnedAt is when Run
-	// returned, read after p.done delivers.
-	readyAt, returnedAt time.Time
+	// returnedAt is when Run returned, read after p.done delivers.
+	returnedAt time.Time
 
 	done     chan error
 	stopOnce sync.Once
@@ -260,7 +256,6 @@ func startProcess(t *testing.T, settingsDoc string, env map[string]string) *proc
 	require.NotNil(t, m, "the process printed no bootstrap password")
 
 	proc.adminPassword = m[1]
-	proc.readyAt = time.Now()
 
 	jar, err := cookiejar.New(nil)
 	require.NoError(t, err)

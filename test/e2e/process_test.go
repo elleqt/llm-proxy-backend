@@ -18,22 +18,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// upstreamShutdownWindow is the deadline upstream gives its own shutdown,
-// counted from when its Run started (sdk/cliproxy/service_lifecycle.go Run,
-// v7.3.15), not from the stop. It is a constant in upstream's code and cannot be
-// shortened for a test: a process stopped by cancelling upstream's Run after
-// that long drains nothing, so the drain test waits it out. That wait is most of
-// this package's run time; -short skips the drain leg for a quick local loop, and
-// the full run (make test, CI) keeps it: it is the only proof that a stop after
-// the window still drains.
-const upstreamShutdownWindow = 30 * time.Second
-
 // TestTheProcessKeepsItsListenersApartAndStopsCleanly is the process as an
 // operator runs it: each listener serves only its own API, metrics only on the
 // metrics listener, the gate's refusals counted there, the routing strategy an
-// administrator stored in force from boot, and a SIGTERM — sent once the
-// process has been up longer than upstream's own shutdown window — lets the
-// proxied request in flight finish before Run returns cleanly.
+// administrator stored in force from boot, and a SIGTERM lets the proxied
+// request in flight finish before Run returns cleanly.
 func TestTheProcessKeepsItsListenersApartAndStopsCleanly(t *testing.T) {
 	if !inFreshProcess(t) {
 		return
@@ -96,16 +85,8 @@ func TestTheProcessKeepsItsListenersApartAndStopsCleanly(t *testing.T) {
 	denied := `llmproxy_policy_denied_total{model="unknown",reason="unknown_model",user="` + proc.adminEmail + `"} 1`
 	require.Contains(t, proc.scrapeMetrics(t), denied, "metrics lack the gate's refusal")
 
-	// Past upstream's own shutdown window, SIGTERM while a request is with the
-	// slow vendor: the request completes before Run returns, and Run returns
-	// without error.
-	if testing.Short() {
-		t.Log("-short: the drain leg, which waits out upstream's shutdown window, is skipped")
-
-		return
-	}
-
-	time.Sleep(time.Until(proc.readyAt.Add(upstreamShutdownWindow + time.Second)))
+	// SIGTERM while a request is with the slow vendor: the request completes
+	// before Run returns, and Run returns without error.
 	inFlight := proc.sendSlowRequest(t, secret)
 	eventually(t, "the request reaches vendor B", func() bool { return len(proc.b.fake.Requests()) == 1 })
 
@@ -232,7 +213,7 @@ func TestLocalLoginOffLeavesOnlyFederatedSignIn(t *testing.T) {
 }
 
 // catalogueHost is where upstream's model catalogue updaters fetch from first
-// (internal/registry model_updater.go modelsURLs, v7.3.15), as a CONNECT asks
+// (internal/registry model_updater.go modelsURLs, v7.3.18), as a CONNECT asks
 // for it.
 const catalogueHost = "raw.githubusercontent.com:443"
 

@@ -63,7 +63,7 @@ make generate                           # pinned mockery + oapi-codegen via go r
 go vet ./...                            # CI gate
 make lint                               # pinned golangci-lint in ./bin, full repo; `make lint fix=1` autofixes
 go test ./internal/app/... -race -run TestName -v
-go test ./test/e2e/... -race -short     # -short skips the slow drain check
+go test ./test/e2e/... -race            # full-process tests only
 make generate && git diff --exit-code   # CI codegen drift gate
 scripts/check-readme-compose.sh         # README block must equal docker-compose.minimal.yml
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build  # from source; needs ../frontend

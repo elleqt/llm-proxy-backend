@@ -27,7 +27,7 @@ import (
 // the running value is carried over from the configuration that owns it:
 //
 //   - host, port, tls: the proxied listener, fixed at boot behind the reverse proxy.
-//   - trusted-proxies (upstream v7.3.15): whose forwarded headers that listener
+//   - trusted-proxies (upstream v7.3.18): whose forwarded headers that listener
 //     believes for a client's address. Upstream applies it only when it builds
 //     its server (internal/api/server.go NewServer), never on a push, so an edit
 //     would be stored without running; and it uses the address only in its own

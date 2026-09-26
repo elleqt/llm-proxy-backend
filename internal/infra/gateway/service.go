@@ -120,6 +120,9 @@ type Gateway struct {
 	// done is closed when Run returns; runErr is its result.
 	done   chan struct{}
 	runErr error
+	// drain lets Shutdown finish the requests in flight, which upstream's stop
+	// cuts.
+	drain requestDrain
 }
 
 // ErrNotRunning reports that the gateway cannot accept configuration: Run has
@@ -187,7 +190,7 @@ var errNilAccount = errors.New("gateway: nil account")
 var errCredentialNotLoaded = errors.New("the token store does not load the saved credential")
 
 // managementEnv lists every environment variable the embedded upstream code
-// reads to enable /v0/management. Upstream v7.3.15 reads exactly one:
+// reads to enable /v0/management. Upstream v7.3.18 reads exactly one:
 // MANAGEMENT_PASSWORD, in internal/api/server.go NewServer (route registration
 // on a non-blank value) and internal/api/handlers/management/handler.go
 // NewHandler (accepted as the management secret). Both trim whitespace, so a
@@ -418,7 +421,7 @@ func NewCoreAuthManager(cfg *cliproxyconfig.Config) (*coreauth.Manager, coreauth
 
 // routingSelector is the selector upstream builds for cfg's routing settings
 // (sdk/cliproxy/service_config.go normalizedRoutingRuntimeState and
-// newRoutingSelector, both unexported in v7.3.15): the strategy by its accepted
+// newRoutingSelector, both unexported in v7.3.18): the strategy by its accepted
 // spellings, round-robin otherwise, wrapped in session affinity when that is on.
 // Upstream replaces it with its own on the first configuration it applies.
 func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
@@ -479,12 +482,13 @@ func (g *Gateway) Run(ctx context.Context) error {
 	return err
 }
 
-// Shutdown stops the proxied listener: it stops accepting, waits until ctx ends
-// for the requests in flight to finish, and stops the service; Run then
-// returns nil. Cancelling Run's ctx instead also shuts the service down, but
-// with upstream's own deadline, which is 30 s from when Run started
-// (sdk/cliproxy/service_lifecycle.go Run: shutdownCtx), so once the service
-// has been up that long it drains nothing.
+// Shutdown stops the proxied listener: from the call on it refuses new
+// requests (503), waits until ctx ends for the requests in flight to finish
+// (requestDrain), and stops the service, which closes the listener and every
+// connection; Run then returns nil. Upstream's own stop, which cancelling
+// Run's ctx runs instead, closes every connection at once (v7.3.17 on,
+// internal/api/server.go Stop), so it drains nothing. When ctx ends first,
+// the service is stopped all the same and the error says so.
 //
 // Upstream's Shutdown runs once (shutdownOnce) and Run's deferred call waits
 // for this one to finish. Shutdown first waits for Run to have built the server
@@ -501,11 +505,13 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 		}
 	}
 
+	drained := g.drain.wait(ctx)
 	if err := g.svc.Shutdown(ctx); err != nil {
-		return fmt.Errorf("gateway: shut the service down: %w", err)
+		//nolint:wrapcheck // joins the drain's error and the stop's, each already wrapped
+		return errors.Join(drained, fmt.Errorf("gateway: shut the service down: %w", err))
 	}
 
-	return nil
+	return drained
 }
 
 // PushConfig applies a configuration built from the database. It returns
@@ -891,12 +897,13 @@ func (g *Gateway) apply(reload func(*cliproxyconfig.Config), cfg *cliproxyconfig
 // case away from a registered route with a redirect to it before any
 // middleware runs: every route would be told apart from an unrouted path, the
 // ones the policy gate refuses included. Unmatched, such a path now reaches
-// the gate and gets its 404. And it installs readDeadlineControl ahead of
-// upstream's middleware, which wraps the response writer.
+// the gate and gets its 404. It installs the drain (requestDrain) ahead of
+// everything, so it counts each request whole, and readDeadlineControl ahead
+// of upstream's middleware, which wraps the response writer.
 func (g *Gateway) configureEngine(e *gin.Engine) {
 	e.RedirectTrailingSlash = false
 	e.RedirectFixedPath = false
-	e.Use(readDeadlineControl())
+	e.Use(g.drain.track(), readDeadlineControl())
 	g.engine.Store(e)
 }
 
