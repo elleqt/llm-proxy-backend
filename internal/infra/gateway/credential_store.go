@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,7 +126,9 @@ func NewCredentialStore(repo app.VendorCredentialRepo, sealer *credentials.Seale
 
 // removeStaleScratchDirs removes the scratchPattern directories under dir that
 // are at least scratchGrace old. The clock is read only when there is one to
-// judge.
+// judge. An entry the process may not inspect or remove (fs.ErrPermission) is
+// skipped: os.TempDir() is shared by every user on a host, and another user's
+// leftover is no reason to stop the boot. Any other error fails.
 func removeStaleScratchDirs(dir string, clock app.Clock) error {
 	leftovers, err := filepath.Glob(filepath.Join(dir, scratchPattern))
 	if err != nil {
@@ -140,8 +143,8 @@ func removeStaleScratchDirs(dir string, clock app.Clock) error {
 
 	for _, leftover := range leftovers {
 		info, err := os.Lstat(leftover)
-		if errors.Is(err, os.ErrNotExist) {
-			continue // its owner removed it meanwhile
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, fs.ErrPermission) {
+			continue // its owner removed it meanwhile, or it is not ours to judge
 		}
 
 		if err != nil {
@@ -152,7 +155,12 @@ func removeStaleScratchDirs(dir string, clock app.Clock) error {
 			continue
 		}
 
-		if err := os.RemoveAll(leftover); err != nil {
+		err = os.RemoveAll(leftover)
+		if errors.Is(err, fs.ErrPermission) {
+			continue // another user's leftover
+		}
+
+		if err != nil {
 			return fmt.Errorf("gateway: remove leftover credential scratch dir %q: %w", leftover, err)
 		}
 	}

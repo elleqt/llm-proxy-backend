@@ -235,6 +235,39 @@ func TestCredentialStoreRemovesLeftoverScratchDirs(t *testing.T) {
 	assert.DirExists(t, unrelated, "NewCredentialStore removed a directory that is not its own")
 }
 
+// TestCredentialStoreSkipsALeftoverItCannotRemove: os.TempDir() is shared by
+// every user on a host, so a stale scratch directory may be another user's,
+// which this process may not remove. That is no reason to stop the boot: it is
+// skipped, and the sweep goes on to the leftovers it can remove.
+func TestCredentialStoreSkipsALeftoverItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes any directory: no leftover can be made unremovable")
+	}
+
+	scratch := t.TempDir()
+	foreign := filepath.Join(scratch, "llmproxy-credential-1111")
+	own := filepath.Join(scratch, "llmproxy-credential-2222")
+
+	for _, dir := range []string{foreign, own} {
+		require.NoError(t, os.Mkdir(dir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "credential.json"), []byte(`{"access_token":"at-left"}`), 0o600))
+		require.NoError(t, os.Chtimes(dir, storeNow.Add(-2*scratchGrace), storeNow.Add(-2*scratchGrace)))
+	}
+
+	// Its file cannot be unlinked: RemoveAll fails with a permission error, as
+	// it does on another user's directory.
+	require.NoError(t, os.Chmod(foreign, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(foreign, 0o700) })
+
+	clock := mocks.NewClock(t)
+	clock.EXPECT().Now().Return(storeNow).Once()
+
+	_, err := NewCredentialStore(mocks.NewVendorCredentialRepo(t), testSealer(t, 'k'), clock, scratch)
+	require.NoError(t, err, "a leftover the process may not remove stopped the boot")
+
+	assert.NoDirExists(t, own, "the sweep stopped at the leftover it could not remove")
+}
+
 // sealedRow is a stored row of fields sealed by sealer under id, in the
 // canonical form Save writes.
 func sealedRow(t *testing.T, sealer *credentials.Sealer, id string, fields map[string]any, created time.Time) app.VendorCredential {
