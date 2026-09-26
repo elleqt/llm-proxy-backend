@@ -3,6 +3,7 @@ package settings_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -44,12 +45,17 @@ func ownedDefaults() *sdkconfig.Config {
 
 // newSettingsFixture boots a running configuration from runningDoc the way the
 // composition root does, and hands it to the service as the gateway's current one.
+// The boot warnings about inert keys are TestLoadBootConfigWarnsAboutInertKeys's
+// concern, so the fixture's boot tolerates them.
 func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 	t.Helper()
 	boot := mocks.NewSettingsRepo(t)
 	boot.EXPECT().UpstreamDocument(mock.Anything).Return(runningDoc, nil).Once()
 
-	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults())
+	bootLog := mocks.NewLogger(t)
+	bootLog.EXPECT().Warn(mock.Anything, mock.Anything).Maybe()
+
+	running, err := settings.LoadBootConfig(context.Background(), boot, ownedDefaults(), bootLog)
 	require.NoError(t, err, "LoadBootConfig")
 
 	fixture := &settingsFixture{
@@ -75,6 +81,18 @@ func wantSettingError(t *testing.T, err, kind error, field string) {
 	require.ErrorIs(t, err, kind)
 	require.ErrorAs(t, err, &se, "want a *SettingError")
 	require.Equal(t, field, se.Field, "field of %v", err)
+}
+
+// inertKeyWarning is the boot warning about an inert key, as an operator reads it.
+const inertKeyWarning = "settings: key has no effect and is ignored; remove it from the settings document"
+
+// keyAttr matches the attributes of a warning about key: exactly key=<key>.
+func keyAttr(key string) any {
+	want := slog.String("key", key)
+
+	return mock.MatchedBy(func(attrs []slog.Attr) bool {
+		return len(attrs) == 1 && attrs[0].Equal(want)
+	})
 }
 
 func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
@@ -120,7 +138,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 	t.Run("stored document at boot", func(t *testing.T) {
 		repo := mocks.NewSettingsRepo(t)
 		repo.EXPECT().UpstreamDocument(mock.Anything).Return("api-keys: [master]\n", nil)
-		_, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
+		_, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), mocks.NewLogger(t))
 		wantSettingError(t, err, app.ErrForbiddenSetting, "api-keys")
 	})
 }
@@ -379,7 +397,7 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	repo := mocks.NewSettingsRepo(t)
 	repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound)
 
-	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults())
+	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), mocks.NewLogger(t))
 	require.NoError(t, err, "LoadBootConfig")
 	require.Equal(t, 8317, cfg.Port, "boot config port")
 	require.Len(t, cfg.OpenAICompatibility, 1, "boot config openai-compatibility")
@@ -394,6 +412,25 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 	excluded := cfg.OAuthExcludedModels["claude"]
 	require.Len(t, excluded, 5, "default exclusions")
 	require.Equal(t, "claude-3-7-sonnet-20250219", excluded[3], "default exclusion")
+}
+
+// TestLoadBootConfigWarnsAboutInertKeys: a document saved by an earlier release
+// that still sets an inert key boots, with exactly one warning per key present,
+// whatever its value.
+func TestLoadBootConfigWarnsAboutInertKeys(t *testing.T) {
+	repo := mocks.NewSettingsRepo(t)
+	repo.EXPECT().UpstreamDocument(mock.Anything).Return(
+		"save-cooldown-status: false\nrequest-log: true\nerror-logs-max-files: 5\nrequest-retry: 2\n", nil)
+
+	logs := mocks.NewLogger(t)
+	for _, key := range []string{"save-cooldown-status", "request-log", "error-logs-max-files"} {
+		logs.EXPECT().Warn(inertKeyWarning, keyAttr(key)).Once()
+	}
+
+	cfg, err := settings.LoadBootConfig(context.Background(), repo, ownedDefaults(), logs)
+	require.NoError(t, err, "LoadBootConfig")
+	require.Equal(t, 2, cfg.RequestRetry, "boot config request-retry")
+	require.Equal(t, 8317, cfg.Port, "gateway-owned port not carried over")
 }
 
 func TestGetWithoutStoredDocumentShowsDefault(t *testing.T) {

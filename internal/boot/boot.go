@@ -180,7 +180,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
+	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility), logs)
 	if err != nil {
 		return nil, fmt.Errorf("boot configuration: %w", err)
 	}

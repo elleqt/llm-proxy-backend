@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"reflect"
 	"slices"
 	"strconv"
@@ -63,6 +64,53 @@ var ownedKeys = []string{
 // "-api-key" is, so a credential family a future upstream adds is boot-only too.
 func isOwnedKey(key string) bool {
 	return key == "home" || strings.HasSuffix(key, "-api-key") || slices.Contains(ownedKeys, key)
+}
+
+// inertKeys are top-level keys of the upstream configuration that have no effect
+// in the gateway: gateway.admit forces save-cooldown-status and request-log off
+// (cooldown state stays in memory, and no request logger is installed), and
+// error-logs-max-files bounds error log files nothing writes. Update refuses a
+// document that adds one or changes its value (refuseInertKeys).
+//
+// COMPAT(credentials-import): a document saved by an earlier release may still set
+// one; LoadBootConfig warns and Update keeps it while unchanged. Remove next release
+// (RELEASING.md): the keys join ownedKeys, refused in any document, and this list,
+// inertKeyWarning, inertValues and refuseInertKeys go away.
+var inertKeys = []string{"save-cooldown-status", "request-log", "error-logs-max-files"}
+
+// inertKeyWarning is logged at boot, with the key, for each inert key the stored
+// document sets.
+const inertKeyWarning = "settings: key has no effect and is ignored; remove it from the settings document"
+
+// inertValues returns the value of every inert key doc sets at the top level,
+// decoded, by key; nil when it sets none.
+func inertValues(doc string) (map[string]any, error) {
+	root, err := documentRoot(doc)
+	if err != nil {
+		return nil, err
+	}
+
+	var values map[string]any
+
+	for keyAt := 0; keyAt+1 < len(root.Content); keyAt += 2 {
+		key := root.Content[keyAt].Value
+		if !slices.Contains(inertKeys, key) {
+			continue
+		}
+
+		var value any
+		if err := root.Content[keyAt+1].Decode(&value); err != nil {
+			return nil, app.InvalidSetting(key, err.Error())
+		}
+
+		if values == nil {
+			values = make(map[string]any, len(inertKeys))
+		}
+
+		values[key] = value
+	}
+
+	return values, nil
 }
 
 // ownedField is a gateway-owned field of sdkconfig.Config: its top-level key and
@@ -323,7 +371,11 @@ var errNoOwnedDefaults = errors.New("app: boot configuration needs the gateway-o
 // parsed by upstream, with every gateway-owned field taken from owned (listen
 // address, auth directory, the boot-only credential families). A stored document
 // that no longer passes the checks Update applies is an error, not ignored.
-func LoadBootConfig(ctx context.Context, repo app.SettingsRepo, owned *sdkconfig.Config) (*sdkconfig.Config, error) {
+//
+// COMPAT(credentials-import): an inert key the stored document still sets is not
+// an error: log gets one warning per key, and gateway.admit forces the setting
+// off. Remove next release (RELEASING.md), when the keys join ownedKeys.
+func LoadBootConfig(ctx context.Context, repo app.SettingsRepo, owned *sdkconfig.Config, log app.Logger) (*sdkconfig.Config, error) {
 	if owned == nil {
 		return nil, errNoOwnedDefaults
 	}
@@ -336,6 +388,17 @@ func LoadBootConfig(ctx context.Context, repo app.SettingsRepo, owned *sdkconfig
 	cfg, err := parseDocument(doc)
 	if err != nil {
 		return nil, fmt.Errorf("app: stored settings: %w", err)
+	}
+
+	inert, err := inertValues(doc)
+	if err != nil {
+		return nil, fmt.Errorf("app: stored settings: %w", err)
+	}
+
+	for _, key := range inertKeys {
+		if _, set := inert[key]; set {
+			log.Warn(inertKeyWarning, slog.String("key", key))
+		}
 	}
 
 	overlayOwned(cfg, owned)
