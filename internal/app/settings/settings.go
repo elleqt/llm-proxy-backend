@@ -292,6 +292,14 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 		return UpdateResult{}, err
 	}
 
+	// A field patch keeps every key but the three it sets, none of them inert, so
+	// only a whole document can add or change an inert key.
+	if req.YAML != nil {
+		if err := s.refuseInertKeys(ctx, doc); err != nil {
+			return UpdateResult{}, err
+		}
+	}
+
 	running := s.gateway.CurrentConfig()
 	if running == nil {
 		return UpdateResult{}, app.ErrNoRunningConfig
@@ -361,6 +369,49 @@ func (s *Service) proposedDocument(ctx context.Context, req Update) (string, err
 	}
 
 	return patchDocument(base, *req.Fields)
+}
+
+// refuseInertKeys refuses a proposed document that adds an inert key or changes
+// its value compared with the stored document: app.ForbiddenSetting naming the
+// key, the refusal an owned key gets. Removing one is accepted. The stored
+// document is read only when the proposed one sets an inert key.
+//
+// COMPAT(credentials-import): a key the stored document already sets, carried
+// over with the same value, is accepted, so a document saved by an earlier
+// release still takes edits; remove next release (RELEASING.md), when the keys
+// join ownedKeys and parseDocument refuses them in any document.
+func (s *Service) refuseInertKeys(ctx context.Context, doc string) error {
+	proposed, err := inertValues(doc)
+	if err != nil {
+		return err
+	}
+
+	if len(proposed) == 0 {
+		return nil
+	}
+
+	base, err := storedDocument(ctx, s.repo)
+	if err != nil {
+		return err
+	}
+
+	stored, err := inertValues(base)
+	if err != nil {
+		return fmt.Errorf("app: stored settings: %w", err)
+	}
+
+	for _, key := range inertKeys {
+		value, set := proposed[key]
+		if !set {
+			continue
+		}
+
+		if previous, had := stored[key]; !had || !reflect.DeepEqual(previous, value) {
+			return app.ForbiddenSetting(key)
+		}
+	}
+
+	return nil
 }
 
 // errNoOwnedDefaults refuses a boot configuration without the gateway-owned values

@@ -163,6 +163,64 @@ func TestSettingsRefusesSmuggledOwnedFields(t *testing.T) {
 	}
 }
 
+// TestSettingsRefusesAddingOrChangingInertKeys: a whole document may not add an
+// inert key or change its value; the refusal is the one an owned key gets.
+func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
+	for key, values := range map[string][2]string{
+		"save-cooldown-status": {"true", "false"},
+		"request-log":          {"true", "false"},
+		"error-logs-max-files": {"5", "20"},
+	} {
+		t.Run(key+" added", func(t *testing.T) {
+			f := newSettingsFixture(t, "request-retry: 1\n")
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
+			// No gateway, persist or audit expectation: touching any fails the test.
+			_, err := f.svc.Update(context.Background(), newAdmin(),
+				yamlUpdate("request-retry: 2\n"+key+": "+values[0]+"\n", false))
+			wantSettingError(t, err, app.ErrForbiddenSetting, key)
+		})
+
+		t.Run(key+" changed", func(t *testing.T) {
+			stored := key + ": " + values[0] + "\nrequest-retry: 1\n"
+			f := newSettingsFixture(t, stored)
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
+			_, err := f.svc.Update(context.Background(), newAdmin(),
+				yamlUpdate(key+": "+values[1]+"\nrequest-retry: 1\n", false))
+			wantSettingError(t, err, app.ErrForbiddenSetting, key)
+		})
+	}
+
+	t.Run("added to the default document", func(t *testing.T) {
+		f := newSettingsFixture(t, "")
+		f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound).Once()
+		_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-log: false\n", true))
+		wantSettingError(t, err, app.ErrForbiddenSetting, "request-log")
+	})
+}
+
+// TestSettingsAcceptsInertKeysKeptOrRemoved: a legacy inert key carried over
+// unchanged does not block other edits, and removing one is accepted.
+func TestSettingsAcceptsInertKeysKeptOrRemoved(t *testing.T) {
+	stored := "save-cooldown-status: true\nrequest-log: true\nerror-logs-max-files: 5\nrequest-retry: 1\n"
+
+	for name, doc := range map[string]string{
+		"kept unchanged": "save-cooldown-status: true\nrequest-log: true # legacy\nerror-logs-max-files: 5\nrequest-retry: 3\n",
+		"one removed":    "save-cooldown-status: true\nerror-logs-max-files: 5\nrequest-retry: 3\n",
+		"all removed":    "request-retry: 3\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newSettingsFixture(t, stored)
+			// Only a document that still sets an inert key needs the stored one.
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Maybe()
+			f.gateway.EXPECT().CurrentConfig().Return(f.running)
+
+			res, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc, true))
+			require.NoError(t, err, "Update")
+			require.Equal(t, 3, res.Settings.Fields.RequestRetry, "proposed requestRetry")
+		})
+	}
+}
+
 func TestSettingsRefusesUnknownAndMalformedDocuments(t *testing.T) {
 	for name, doc := range map[string]string{
 		"misspelt top-level key": "request-retries: 3\n",
@@ -332,8 +390,12 @@ func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
 	require.Equal(t, "socks5://alice:s3cret@proxy.new.test:1080/p4thsecret?token=QS3CRET", res.Settings.Fields.ProxyURL, "settings proxyURL")
 }
 
+// TestSettingsFieldPatchKeepsTheRestOfTheDocument: a field patch keeps every other
+// key and its comments, including inert keys a document saved by an earlier
+// release still sets.
 func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
-	stored := "# operator notes\nrequest-log: true # keep\nproxy-url: http://proxy.test:3128\nrequest-retry: 1\n"
+	stored := "# operator notes\nrequest-log: true # keep\nsave-cooldown-status: true\nerror-logs-max-files: 5\n" +
+		"proxy-url: http://proxy.test:3128\nrequest-retry: 1\n"
 	fixture := newSettingsFixture(t, stored)
 	admin := newAdmin()
 	retry, interval := 5, 20
@@ -356,7 +418,10 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 	})
 	require.NoError(t, err, "Update")
 
-	for _, want := range []string{"# operator notes", "request-log: true # keep", "proxy-url: http://proxy.test:3128", "request-retry: 5", "max-retry-interval: 20"} {
+	for _, want := range []string{
+		"# operator notes", "request-log: true # keep", "save-cooldown-status: true", "error-logs-max-files: 5",
+		"proxy-url: http://proxy.test:3128", "request-retry: 5", "max-retry-interval: 20",
+	} {
 		assert.Contains(t, persisted, want, "persisted document")
 	}
 
