@@ -36,7 +36,7 @@ services:
 
   backend:
     # The backend and the frontend are released together: keep one version for both.
-    image: yoonaowo/llm-proxy-backend:0.1.3
+    image: yoonaowo/llm-proxy-backend:0.2.0
     environment:
       # The password travels as PGPASSWORD, which the driver reads when the URL
       # carries none, so it needs no URL encoding.
@@ -139,7 +139,7 @@ services:
 
   frontend:
     # The same version as the backend image.
-    image: yoonaowo/llm-proxy-frontend:0.1.3
+    image: yoonaowo/llm-proxy-frontend:0.2.0
     environment:
       # The backend's web listener, on the `web` network.
       BACKEND_ORIGIN: http://backend:8081
