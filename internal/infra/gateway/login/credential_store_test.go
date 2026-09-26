@@ -108,6 +108,20 @@ func TestCredentialStoreRemovesTheScratchFileWhenTheTokenFileFails(t *testing.T)
 	st.assertScratchEmpty(t)
 }
 
+// TestCredentialStoreRemovesTheScratchFileWhenTheTokenFileWriterPanics: the
+// vendor's SaveTokenToFile runs inside Save; if it panics after writing the
+// plaintext, a recovering caller (the web router recovers panics) keeps the
+// process up, and the scratch directory must still be gone.
+func TestCredentialStoreRemovesTheScratchFileWhenTheTokenFileWriterPanics(t *testing.T) {
+	st := newStorageStore(t)
+	grant := storageGrant(t, &claudeTokenFile{
+		accessToken: "sk-ant-oat-panic", refreshToken: "sk-ant-ort-panic", email: "panic@example.com", panicAfterWrite: true,
+	})
+
+	require.Panics(t, func() { _, _ = st.store.Save(coreauth.WithAuthCreationIntent(t.Context()), grant) })
+	st.assertScratchEmpty(t)
+}
+
 // TestCredentialStoreRefusesALoginWithoutTokens: the vendor's storage writes
 // both token keys even when they are empty. A record that would store a
 // credential unable to authenticate is refused, and nothing is left behind.

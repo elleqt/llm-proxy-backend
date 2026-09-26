@@ -286,10 +286,12 @@ func TestLoginStartThenCompleteAddsTheAccount(t *testing.T) {
 // ClaudeTokenStorage is: the tokens live only here, not in the record's
 // Metadata, and SaveTokenToFile writes them with the metadata the store
 // injects. The token is valid for two days, so nothing tries to refresh it.
-// fail, when set, is what the write returns instead.
+// fail, when set, is what the write returns instead; panicAfterWrite makes it
+// panic once the file is written.
 type claudeTokenFile struct {
 	accessToken, refreshToken, email string
 	fail                             error
+	panicAfterWrite                  bool
 	metadata                         map[string]any
 }
 
@@ -314,7 +316,15 @@ func (s *claudeTokenFile) SaveTokenToFile(path string) error {
 		return err
 	}
 
-	return os.WriteFile(path, raw, 0o600)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return err
+	}
+
+	if s.panicAfterWrite {
+		panic("token file writer panicked after writing (test)")
+	}
+
+	return nil
 }
 
 // storageGrant is the record upstream's Claude exchange hands the post-auth

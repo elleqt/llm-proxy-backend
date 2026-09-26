@@ -335,16 +335,27 @@ func (s *CredentialStore) credentialFields(auth *coreauth.Auth) (map[string]any,
 // serialize has storage write its credential file into a fresh directory
 // under the scratch dir and reads it back. The directory is removed before
 // serialize returns, whether or not the write succeeded, so no plaintext
-// outlives the call; one a crash leaves behind is removed by the next
-// NewCredentialStore.
+// outlives the call: by the checked removal, whose error is reported, and by
+// a deferred one for a SaveTokenToFile that panics (the web router recovers
+// panics, so the process would otherwise go on with the plaintext on disk).
+// One a crash leaves behind is removed by the next NewCredentialStore.
 func (s *CredentialStore) serialize(storage tokenFileWriter) (map[string]any, error) {
 	dir, err := os.MkdirTemp(s.scratchDir, scratchPattern)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: create a credential scratch dir: %w", err)
 	}
 
+	removed := false
+
+	defer func() {
+		if !removed {
+			_ = os.RemoveAll(dir)
+		}
+	}()
+
 	fields, errRead := readTokenFile(storage, filepath.Join(dir, credentialFile))
 	errRemove := os.RemoveAll(dir)
+	removed = true
 
 	switch {
 	case errRead != nil:
