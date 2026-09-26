@@ -73,10 +73,10 @@ func isOwnedKey(key string) bool {
 // document that adds one or changes its value (refuseInertKeys).
 //
 // COMPAT(credentials-import): a document saved by an earlier release may still set
-// one; LoadBootConfig warns, Update keeps it while unchanged, and the diff leaves it
-// out (editableYAML). Remove next release (RELEASING.md): the keys join ownedKeys,
-// refused in any document, and this list, inertKeyWarning, inertValues and
-// refuseInertKeys go away.
+// one; LoadBootConfig warns, Update keeps it while unchanged, and the diff shows
+// the stored value rather than the admitted one (asStored). Remove next release
+// (RELEASING.md): the keys join ownedKeys, refused in any document, and this list,
+// inertKeyWarning, inertValues, refuseInertKeys and asStored go away.
 var inertKeys = []string{"save-cooldown-status", "request-log", "error-logs-max-files"}
 
 // inertKeyWarning is logged at boot, with the key, for each inert key the stored
@@ -215,7 +215,8 @@ type Update struct {
 }
 
 // UpdateResult is what an update did. Diff is the unified diff of the
-// running configuration's editable part against the proposed one, with proxy
+// running configuration's editable part (as the stored document sets the settings
+// gateway.admit forces, asStored) against the proposed one, with proxy
 // credentials redacted; Settings is the proposed document, applied unless Applied
 // is false.
 type UpdateResult struct {
@@ -283,7 +284,7 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	doc, err := s.proposedDocument(ctx, req)
+	doc, base, err := s.proposedDocument(ctx, req)
 	if err != nil {
 		return UpdateResult{}, err
 	}
@@ -293,12 +294,8 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 		return UpdateResult{}, err
 	}
 
-	// A field patch keeps every key but the three it sets, none of them inert, so
-	// only a whole document can add or change an inert key.
-	if req.YAML != nil {
-		if err := s.refuseInertKeys(ctx, doc); err != nil {
-			return UpdateResult{}, err
-		}
+	if base, err = s.replacedDocument(ctx, req, doc, base); err != nil {
+		return UpdateResult{}, err
 	}
 
 	running := s.gateway.CurrentConfig()
@@ -310,7 +307,12 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 	next := cfg.CloneForRuntime()
 	overlayOwned(next, running)
 
-	diff, err := editableDiff(running, next)
+	from, err := asStored(running, base)
+	if err != nil {
+		return UpdateResult{}, err
+	}
+
+	diff, err := editableDiff(from, next)
 	if err != nil {
 		return UpdateResult{}, err
 	}
@@ -357,31 +359,51 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 	return res, nil
 }
 
-// proposedDocument is the document an update proposes: the one it carries whole,
+// proposedDocument is the document an update proposes, and the stored document
+// it was built from: the one it carries whole (base "", read by replacedDocument),
 // or the stored one with its fields patched in.
-func (s *Service) proposedDocument(ctx context.Context, req Update) (string, error) {
+func (s *Service) proposedDocument(ctx context.Context, req Update) (string, string, error) {
 	if req.YAML != nil {
-		return *req.YAML, nil
+		return *req.YAML, "", nil
 	}
 
 	base, err := storedDocument(ctx, s.repo)
 	if err != nil {
+		return "", "", err
+	}
+
+	doc, err := patchDocument(base, *req.Fields)
+
+	return doc, base, err
+}
+
+// replacedDocument is the stored document the proposed doc replaces: base, the
+// one a field patch was built from, or for a whole document the stored one, read
+// once doc parses (so a refused document touches nothing) and checked by
+// refuseInertKeys. A field patch keeps every key but the three it sets, none of
+// them inert, so only a whole document can add or change an inert key.
+func (s *Service) replacedDocument(ctx context.Context, req Update, doc, base string) (string, error) {
+	if req.YAML == nil {
+		return base, nil
+	}
+
+	stored, err := storedDocument(ctx, s.repo)
+	if err != nil {
 		return "", err
 	}
 
-	return patchDocument(base, *req.Fields)
+	return stored, refuseInertKeys(doc, stored)
 }
 
 // refuseInertKeys refuses a proposed document that adds an inert key or changes
 // its value compared with the stored document: app.ForbiddenSetting naming the
-// key, the refusal an owned key gets. Removing one is accepted. The stored
-// document is read only when the proposed one sets an inert key.
+// key, the refusal an owned key gets. Removing one is accepted.
 //
 // COMPAT(credentials-import): a key the stored document already sets, carried
 // over with the same value, is accepted, so a document saved by an earlier
 // release still takes edits; remove next release (RELEASING.md), when the keys
 // join ownedKeys and parseDocument refuses them in any document.
-func (s *Service) refuseInertKeys(ctx context.Context, doc string) error {
+func refuseInertKeys(doc, storedDoc string) error {
 	proposed, err := inertValues(doc)
 	if err != nil {
 		return err
@@ -391,12 +413,7 @@ func (s *Service) refuseInertKeys(ctx context.Context, doc string) error {
 		return nil
 	}
 
-	base, err := storedDocument(ctx, s.repo)
-	if err != nil {
-		return err
-	}
-
-	stored, err := inertValues(base)
+	stored, err := inertValues(storedDoc)
 	if err != nil {
 		return fmt.Errorf("app: stored settings: %w", err)
 	}
@@ -413,6 +430,28 @@ func (s *Service) refuseInertKeys(ctx context.Context, doc string) error {
 	}
 
 	return nil
+}
+
+// asStored is running as the diff's "from" side: with request-log and
+// save-cooldown-status as the stored document sets them (absent is off), not as
+// gateway.admit forced them (off). The proposed side is not admitted yet, so it
+// already shows them as the proposed document sets them.
+//
+// COMPAT(credentials-import): a document saved by an earlier release may set
+// either. Compared with the admitted values, a key kept unchanged would show as a
+// change in every update's diff and audit record, and removing it as none, so
+// the admin panel would have nothing to apply. Remove next release (RELEASING.md),
+// when the keys join ownedKeys and editableYAML leaves them out.
+func asStored(running *sdkconfig.Config, stored string) (*sdkconfig.Config, error) {
+	cfg, err := parseDocument(stored)
+	if err != nil {
+		return nil, fmt.Errorf("app: stored settings: %w", err)
+	}
+
+	shown := *running // rendered only, never pushed: a shallow copy is enough
+	shown.RequestLog, shown.SaveCooldownStatus = cfg.RequestLog, cfg.SaveCooldownStatus
+
+	return &shown, nil
 }
 
 // errNoOwnedDefaults refuses a boot configuration without the gateway-owned values
@@ -700,12 +739,6 @@ func editableDiff(from, to *sdkconfig.Config) (string, error) {
 
 // editableYAML renders cfg without its gateway-owned keys and with every secret
 // redacted (redactSecrets). Only the rendering is redacted; cfg is not touched.
-//
-// COMPAT(credentials-import): inert keys are left out too. gateway.admit runs
-// request-log and save-cooldown-status off whatever the document says, so a
-// document saved by an earlier release that sets either would show it as a change
-// in every update's diff and audit record, though nothing changes. Remove next
-// release (RELEASING.md), when the keys join ownedKeys and isOwnedKey leaves them out.
 func editableYAML(cfg *sdkconfig.Config) (string, error) {
 	var node yaml.Node
 	if err := node.Encode(cfg); err != nil {
@@ -716,7 +749,7 @@ func editableYAML(cfg *sdkconfig.Config) (string, error) {
 
 	kept := node.Content[:0]
 	for i := 0; i+1 < len(node.Content); i += 2 {
-		if key := node.Content[i].Value; !isOwnedKey(key) && !slices.Contains(inertKeys, key) {
+		if !isOwnedKey(node.Content[i].Value) {
 			kept = append(kept, node.Content[i], node.Content[i+1])
 		}
 	}

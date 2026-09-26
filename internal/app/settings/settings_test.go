@@ -213,8 +213,7 @@ func TestSettingsAcceptsInertKeysKeptOrRemoved(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newSettingsFixture(t, stored)
-			// Only a document that still sets an inert key needs the stored one.
-			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Maybe()
+			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
 			f.gateway.EXPECT().CurrentConfig().Return(f.running)
 
 			res, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc, true))
@@ -259,6 +258,7 @@ func TestSettingsYAMLAndFieldsAreMutuallyExclusive(t *testing.T) {
 
 func TestSettingsDryRunAppliesAndPersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "request-retry: 1\n")
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	// No PushConfig, SetUpstreamDocument or Record expectation: a call fails the test.
 
@@ -281,6 +281,7 @@ func TestSettingsApplyPushesThenPersists(t *testing.T) {
 		pushed *sdkconfig.Config
 	)
 
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
 		steps, pushed = append(steps, "push"), c
@@ -322,6 +323,7 @@ func TestSettingsPushFailurePersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "")
 	refused := errors.New("gateway: not running")
 
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(refused).Once()
 	// No SetUpstreamDocument and no Record expectation.
@@ -336,6 +338,7 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 
 	var pushes []*sdkconfig.Config
 
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
 		pushes = append(pushes, c)
@@ -351,7 +354,9 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 }
 
 func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
-	fixture := newSettingsFixture(t, "proxy-url: http://olduser:oldpass@proxy.old.test:3128/?token=OLDQUERY\n")
+	stored := "proxy-url: http://olduser:oldpass@proxy.old.test:3128/?token=OLDQUERY\n"
+	fixture := newSettingsFixture(t, stored)
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
 	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
@@ -432,39 +437,95 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
 }
 
-// TestSettingsDiffLeavesOutInertKeys: the running configuration reports
+// TestSettingsDiffOmitsUnchangedInertKeys: the running configuration reports
 // request-log and save-cooldown-status off (gateway.admit) even when the stored
-// document sets them, and an update does not change that. Neither the diff of a
-// field patch nor its audit record shows them.
-func TestSettingsDiffLeavesOutInertKeys(t *testing.T) {
+// document sets them. An update that keeps them unchanged — a field patch, or a
+// whole document carrying them over — shows no change to either in its diff or
+// audit record (a key may still appear as an unchanged context line).
+func TestSettingsDiffOmitsUnchangedInertKeys(t *testing.T) {
 	stored := "request-log: true\nsave-cooldown-status: true\nrequest-retry: 1\n"
-	fixture := newSettingsFixture(t, stored)
 	retry := 4
 
-	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
-	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
-	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
-	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	for name, req := range map[string]settings.Update{
+		"field patch":    {Fields: &settings.Patch{RequestRetry: &retry}},
+		"whole document": yamlUpdate("request-log: true\nsave-cooldown-status: true\nrequest-retry: 4\n", false),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newSettingsFixture(t, stored)
+			fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+			fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+			fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
+			fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
-	var detail map[string]any
+			var detail map[string]any
 
-	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
-		detail = e.Detail
+			fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+				detail = e.Detail
 
-		return nil
-	})
+				return nil
+			})
 
-	res, err := fixture.svc.Update(context.Background(), newAdmin(), settings.Update{
-		Fields: &settings.Patch{RequestRetry: &retry},
-	})
-	require.NoError(t, err, "Update")
-	require.Contains(t, res.Diff, "+request-retry: 4\n", "diff does not show the patched field")
+			res, err := fixture.svc.Update(context.Background(), newAdmin(), req)
+			require.NoError(t, err, "Update")
+			require.Contains(t, res.Diff, "+request-retry: 4\n", "diff does not show the patched field")
 
-	audited, _ := detail["diff"].(string)
+			audited, _ := detail["diff"].(string)
 
-	for _, key := range []string{"request-log", "save-cooldown-status"} {
-		require.NotContains(t, res.Diff, key, "diff shows an inert key")
-		require.NotContains(t, audited, key, "audit record shows an inert key")
+			for _, key := range []string{"request-log", "save-cooldown-status"} {
+				for _, change := range []string{"-" + key + ":", "+" + key + ":"} {
+					require.NotContains(t, res.Diff, change, "diff shows an unchanged inert key as changed")
+					require.NotContains(t, audited, change, "audit record shows an unchanged inert key as changed")
+				}
+			}
+		})
+	}
+}
+
+// TestSettingsRemovingAnInertKeyIsAChange: a whole document whose only change is
+// dropping a legacy inert key shows that as a change, so the admin panel can
+// apply it, and it is applied and audited: the stored document no longer sets it.
+func TestSettingsRemovingAnInertKeyIsAChange(t *testing.T) {
+	for key, tc := range map[string]struct{ stored, removed, added string }{
+		"request-log":          {"request-log: true\n", "-request-log: true\n", "+request-log: false\n"},
+		"save-cooldown-status": {"save-cooldown-status: true\n", "-save-cooldown-status: true\n", "+save-cooldown-status: false\n"},
+		"error-logs-max-files": {"error-logs-max-files: 5\n", "-error-logs-max-files: 5\n", "+error-logs-max-files: 10\n"},
+	} {
+		t.Run(key, func(t *testing.T) {
+			stored := tc.stored + "request-retry: 1\n"
+			fixture := newSettingsFixture(t, stored)
+
+			var persisted string
+
+			fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+			fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+			fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
+			fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
+				func(_ context.Context, doc string, _ uuid.UUID, _ time.Time) error {
+					persisted = doc
+
+					return nil
+				})
+
+			var detail map[string]any
+
+			fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+				detail = e.Detail
+
+				return nil
+			})
+
+			res, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-retry: 1\n", false))
+			require.NoError(t, err, "Update")
+			require.True(t, res.Applied, "removal not applied")
+			require.NotContains(t, persisted, key, "persisted document still sets the key")
+
+			audited, _ := detail["diff"].(string)
+
+			for _, line := range []string{tc.removed, tc.added} {
+				require.Contains(t, res.Diff, line, "diff does not show the removal")
+				require.Contains(t, audited, line, "audit record does not show the removal")
+			}
+		})
 	}
 }
 

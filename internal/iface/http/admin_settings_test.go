@@ -48,14 +48,16 @@ func TestSettingsAreTheStoredDocumentUnredacted(t *testing.T) {
 }
 
 // A dry run answers the diff and the proposed settings and touches nothing: no push,
-// no write (the mocks have no expectation for either).
+// no write (the mocks have no expectation for either). It reads the stored document
+// it would replace.
 func TestADrySettingsRunAppliesNothing(t *testing.T) {
-	e := newEnv(t)
-	e.gateway.EXPECT().CurrentConfig().Return(runningConfig(t, "request-retry: 1\n"))
+	env := newEnv(t)
+	env.settings.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil)
+	env.gateway.EXPECT().CurrentConfig().Return(runningConfig(t, "request-retry: 1\n"))
 
 	var got api.SettingsUpdateResult
-	decodeBody(t, e.do(http.MethodPut, "/api/admin/settings", `{"yaml":"request-retry: 5\n","dryRun":true}`,
-		withCookie(e.signedIn(admin()))), http.StatusOK, &got)
+	decodeBody(t, env.do(http.MethodPut, "/api/admin/settings", `{"yaml":"request-retry: 5\n","dryRun":true}`,
+		withCookie(env.signedIn(admin()))), http.StatusOK, &got)
 
 	require.False(t, got.Applied, "a dry run was applied")
 	require.Contains(t, got.Diff, "+request-retry: 5", "diff")
