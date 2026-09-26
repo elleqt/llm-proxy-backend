@@ -410,8 +410,11 @@ func carriesToken(fields map[string]any) bool {
 
 // canonicalJSON is v as the JSON object it marshals to, re-marshaled from a
 // map[string]any: keys sorted, numbers and nesting as any JSON reader sees
-// them. Equal credentials give equal bytes, so their digests compare; the
-// file import seals the same form.
+// them. Equal credentials give equal bytes, so the digest of a row Save wrote
+// and of the plaintext List opened compare.
+//
+// COMPAT(credentials-import): the file import seals the same form, so an imported row compares too; drop this
+// paragraph next release (RELEASING.md).
 func canonicalJSON(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {

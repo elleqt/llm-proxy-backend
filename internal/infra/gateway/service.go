@@ -792,10 +792,10 @@ func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 // lastRefreshed is when the account's credential was last refreshed. The
 // manager sets LastRefreshedAt only when it refreshes the credential in this
 // process (sdk/cliproxy/auth/conductor_refresh.go), so an account loaded from
-// its file at boot shows zero until its next refresh, while the file records
-// the last refresh as metadata "last_refresh" — the key upstream itself reads
-// first (conductor_refresh.go authLastRefreshTimestamp). A value that is not
-// an RFC 3339 time is treated as absent.
+// the token store at boot shows zero until its next refresh, while the stored
+// credential records the last refresh as metadata "last_refresh" — the key
+// upstream itself reads first (conductor_refresh.go authLastRefreshTimestamp).
+// A value that is not an RFC 3339 time is treated as absent.
 func lastRefreshed(auth *coreauth.Auth) time.Time {
 	if !auth.LastRefreshedAt.IsZero() {
 		return auth.LastRefreshedAt
