@@ -27,9 +27,16 @@ const sealerInfo = "llmproxy vendor credentials v1"
 // any other.
 const sealVersion byte = 0x01
 
+// MaxSealedPlaintext bounds what Seal accepts. A vendor credential is a few
+// kilobytes of JSON; the bound keeps the sealed value's size arithmetic far from
+// overflow and refuses a runaway input instead of allocating for it.
+const MaxSealedPlaintext = 1 << 20
+
 var (
 	// ErrShortSealerKey refuses a key below MinSealerKeyLen.
 	ErrShortSealerKey = errors.New("credentials: the sealer key must be at least 32 bytes")
+	// ErrPlaintextTooLarge refuses a plaintext above MaxSealedPlaintext.
+	ErrPlaintextTooLarge = errors.New("credentials: the credential is too large to seal")
 	// ErrUnsealable is every reason a sealed value does not open: a wrong key, a value
 	// sealed for another id, an unknown version, a truncated or tampered value. They
 	// are not told apart; each means the stored credential cannot be used.
@@ -73,7 +80,14 @@ func NewSealer(key []byte) (*Sealer, error) {
 // id. The nonce is fresh from crypto/rand on every call: under one GCM key a
 // repeated nonce discloses plaintext and lets tags be forged.
 func (s *Sealer) Seal(id string, plaintext []byte) ([]byte, error) {
+	if len(plaintext) > MaxSealedPlaintext {
+		return nil, ErrPlaintextTooLarge
+	}
+
 	nonceLen := s.aead.NonceSize()
+	// The header is appended, not indexed into (out[0] = sealVersion): gosec G407
+	// reads an indexed write into the buffer the nonce later fills as a hardcoded
+	// nonce. The bytes are the same; the nonce comes from crypto/rand below.
 	out := append(make([]byte, 0, 1+nonceLen+len(plaintext)+s.aead.Overhead()), sealVersion)
 	out = out[:1+nonceLen]
 

@@ -15,8 +15,10 @@ import (
 // sealerKey is exactly MinSealerKeyLen bytes: the shortest key NewSealer takes.
 var sealerKey = bytes.Repeat([]byte("k"), MinSealerKeyLen)
 
-// credentialJSON stands in for a vendor account's credential file.
-const credentialJSON = `{"access_token":"at-secret","refresh_token":"rt-secret","type":"claude"}`
+// credentialPlaintext stands in for a vendor account's credential. The Sealer never
+// looks inside what it seals, so it need not be JSON; plain bytes let the tests
+// compare the opened value byte for byte.
+const credentialPlaintext = "access_token=at-secret;refresh_token=rt-secret;type=claude\x00"
 
 const sealedID = "claude-user@example.com.json"
 
@@ -41,7 +43,7 @@ func withByte(b []byte, i int, v byte) []byte {
 // Sealer built from the same key, as after a restart — and the stored bytes do not
 // carry the plaintext.
 func TestSealerOpensWhatItSealed(t *testing.T) {
-	sealed, err := newTestSealer(t, sealerKey).Seal(sealedID, []byte(credentialJSON))
+	sealed, err := newTestSealer(t, sealerKey).Seal(sealedID, []byte(credentialPlaintext))
 	require.NoError(t, err, "Seal")
 
 	leaked := bytes.Contains(sealed, []byte("at-secret"))
@@ -49,7 +51,7 @@ func TestSealerOpensWhatItSealed(t *testing.T) {
 
 	opened, err := newTestSealer(t, sealerKey).Open(sealedID, sealed)
 	require.NoError(t, err, "Open")
-	require.JSONEq(t, credentialJSON, string(opened), "opened plaintext")
+	require.Equal(t, []byte(credentialPlaintext), opened, "opened plaintext, byte for byte")
 }
 
 // openCase is one stored value Open must refuse.
@@ -65,7 +67,7 @@ type openCase struct {
 func TestSealerOpensNothingButTheValueSealedForTheID(t *testing.T) {
 	sealer := newTestSealer(t, sealerKey)
 
-	sealed, err := sealer.Seal(sealedID, []byte(credentialJSON))
+	sealed, err := sealer.Seal(sealedID, []byte(credentialPlaintext))
 	require.NoError(t, err, "Seal")
 
 	other := newTestSealer(t, bytes.Repeat([]byte("o"), MinSealerKeyLen))
@@ -107,12 +109,25 @@ func TestNewSealerRefusesAShortKey(t *testing.T) {
 func TestSealDrawsAFreshNonceEveryTime(t *testing.T) {
 	sealer := newTestSealer(t, sealerKey)
 
-	first, err := sealer.Seal(sealedID, []byte(credentialJSON))
+	first, err := sealer.Seal(sealedID, []byte(credentialPlaintext))
 	require.NoError(t, err, "first Seal")
 
-	second, err := sealer.Seal(sealedID, []byte(credentialJSON))
+	second, err := sealer.Seal(sealedID, []byte(credentialPlaintext))
 	require.NoError(t, err, "second Seal")
 	require.NotEqual(t, first, second, "two seals of the same plaintext are equal")
+}
+
+// Seal takes a plaintext up to MaxSealedPlaintext and refuses a larger one before it
+// allocates anything.
+func TestSealRefusesAPlaintextAboveTheBound(t *testing.T) {
+	sealer := newTestSealer(t, sealerKey)
+
+	_, err := sealer.Seal(sealedID, make([]byte, MaxSealedPlaintext))
+	require.NoError(t, err, "a plaintext of exactly MaxSealedPlaintext bytes")
+
+	sealed, err := sealer.Seal(sealedID, make([]byte, MaxSealedPlaintext+1))
+	require.ErrorIs(t, err, ErrPlaintextTooLarge)
+	require.Nil(t, sealed)
 }
 
 // The stored format is a contract with every row already in the database: a value
@@ -134,16 +149,16 @@ func TestSealerReadsTheSpecifiedFormat(t *testing.T) {
 	require.Len(t, nonce, gcm.NonceSize())
 
 	vector := append([]byte{0x01}, nonce...)
-	vector = append(vector, gcm.Seal(nil, nonce, []byte(credentialJSON), []byte(sealedID))...)
+	vector = append(vector, gcm.Seal(nil, nonce, []byte(credentialPlaintext), []byte(sealedID))...)
 
 	sealer := newTestSealer(t, sealerKey)
 
 	opened, err := sealer.Open(sealedID, vector)
 	require.NoError(t, err, "a value sealed as specified does not open")
-	require.JSONEq(t, credentialJSON, string(opened))
+	require.Equal(t, []byte(credentialPlaintext), opened, "the specified vector's plaintext, byte for byte")
 
-	sealed, err := sealer.Seal(sealedID, []byte(credentialJSON))
+	sealed, err := sealer.Seal(sealedID, []byte(credentialPlaintext))
 	require.NoError(t, err)
 	require.Equal(t, byte(0x01), sealed[0], "the format version byte")
-	require.Len(t, sealed, 1+gcm.NonceSize()+len(credentialJSON)+gcm.Overhead(), "version, nonce, ciphertext and tag")
+	require.Len(t, sealed, 1+gcm.NonceSize()+len(credentialPlaintext)+gcm.Overhead(), "version, nonce, ciphertext and tag")
 }
