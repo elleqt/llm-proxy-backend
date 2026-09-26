@@ -52,6 +52,8 @@ func newSettingsFixture(t *testing.T, runningDoc string) *settingsFixture {
 	boot := mocks.NewSettingsRepo(t)
 	boot.EXPECT().UpstreamDocument(mock.Anything).Return(runningDoc, nil).Once()
 
+	// COMPAT(credentials-import): the tolerated boot warnings and the logger parameter; next release boot
+	// takes no logger and this mock goes (RELEASING.md).
 	bootLog := mocks.NewLogger(t)
 	bootLog.EXPECT().Warn(mock.Anything, mock.Anything).Maybe()
 
@@ -86,6 +88,9 @@ func wantSettingError(t *testing.T, err, kind error, field string) {
 	require.Equal(t, field, se.Field, "field of %v", err)
 }
 
+// COMPAT(credentials-import): inertKeyWarning and keyAttr serve only the boot warning's test; remove next
+// release (RELEASING.md).
+//
 // inertKeyWarning is the boot warning about an inert key, as an operator reads it.
 const inertKeyWarning = "settings: key has no effect and is ignored; remove it from the settings document"
 
@@ -203,6 +208,8 @@ func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
 
 // TestSettingsAcceptsInertKeysKeptOrRemoved: a legacy inert key carried over
 // unchanged does not block other edits, and removing one is accepted.
+//
+// COMPAT(credentials-import): tests the tolerance of legacy inert keys; remove next release (RELEASING.md).
 func TestSettingsAcceptsInertKeysKeptOrRemoved(t *testing.T) {
 	stored := "save-cooldown-status: true\nrequest-log: true\nerror-logs-max-files: 5\nrequest-retry: 1\n"
 
@@ -442,6 +449,8 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 // document sets them. An update that keeps them unchanged — a field patch, or a
 // whole document carrying them over — shows no change to either in its diff or
 // audit record (a key may still appear as an unchanged context line).
+//
+// COMPAT(credentials-import): tests asStored; remove next release (RELEASING.md).
 func TestSettingsDiffOmitsUnchangedInertKeys(t *testing.T) {
 	stored := "request-log: true\nsave-cooldown-status: true\nrequest-retry: 1\n"
 	retry := 4
@@ -484,6 +493,9 @@ func TestSettingsDiffOmitsUnchangedInertKeys(t *testing.T) {
 // TestSettingsRemovingAnInertKeyIsAChange: a whole document whose only change is
 // dropping a legacy inert key shows that as a change, so the admin panel can
 // apply it, and it is applied and audited: the stored document no longer sets it.
+//
+// COMPAT(credentials-import): tests asStored and the tolerance of legacy inert keys; remove next release
+// (RELEASING.md).
 func TestSettingsRemovingAnInertKeyIsAChange(t *testing.T) {
 	for key, tc := range map[string]struct{ stored, removed, added string }{
 		"request-log":          {"request-log: true\n", "-request-log: true\n", "+request-log: false\n"},
@@ -582,6 +594,8 @@ func TestLoadBootConfigWithoutStoredDocument(t *testing.T) {
 // TestLoadBootConfigWarnsAboutInertKeys: a document saved by an earlier release
 // that still sets an inert key boots, with exactly one warning per key present,
 // whatever its value.
+//
+// COMPAT(credentials-import): tests the boot warning; remove next release (RELEASING.md).
 func TestLoadBootConfigWarnsAboutInertKeys(t *testing.T) {
 	repo := mocks.NewSettingsRepo(t)
 	repo.EXPECT().UpstreamDocument(mock.Anything).Return(

@@ -351,7 +351,7 @@ From this release the vendor accounts' OAuth credentials are stored in Postgres,
 3. If the log warns that `save-cooldown-status`, `request-log` or `error-logs-max-files` is ignored, remove it from the settings document in the admin panel (**Admin → Settings**).
 4. The `runtime` volume is no longer used: remove the `runtime` mount and volume from your `docker-compose.yml` (the full file had them), run `docker compose up -d`, then `docker volume rm <project>_runtime`.
 
-The next release removes the import and the `grants` volume; the list of what it removes is in [RELEASING.md](RELEASING.md#next-release-remove-the-credentials-import).
+**Do not skip this release.** It is the only one that imports the account files; the next release removes the import and the `grants` volume (the list of what it removes is in [RELEASING.md](RELEASING.md#next-release-remove-the-credentials-import)). An installation on an earlier release must upgrade to this one and start it once (the log reports `imported the vendor credential files into the database` with the count) before upgrading further. Upgrading past it leaves the accounts unimported, and removing the `grants` volume then deletes their only copy.
 
 ## Images
 
