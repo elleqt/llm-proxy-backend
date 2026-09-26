@@ -141,7 +141,7 @@ The full variable reference is in `internal/config/config.go` and the README.
   - `gateway` and `http` tests are white-box.
 - **Database tests:** `pgtest.NewTestPool(t)` starts a fresh migrated `postgres:17-alpine` container on every call. There is no DSN override and no skip path.
 - **`internal/infra/gateway` and its subpackages:** never call `t.Parallel()`, because tests mutate process-global state.
-- **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process.
+- **e2e:** every test starts with `if !inFreshProcess(t) { return }` and then calls `startProcess(...)`. Upstream registries are process-global, so each boot needs its own process. A test that needs several boots (a restart on the same database) branches on `if !isChild()` instead: the parent creates the shared database and calls `runChildWith` once per boot, passing what the boot needs in the environment; the child connects to that database and calls `startProcessOn`. Each boot still gets its own process.
 - **Timestamps:** use a frozen `mocks.NewClock(t)` for exact timestamps.
 - **Coverage expectations:** every behaviour needs an automated test; checking by hand with curl isn't acceptance. There is no coverage threshold.
 - **CI** runs `go vet`, `go test -race`, the codegen drift check, the README/compose sync check, `docker compose config -q` for every compose combination, and a multi-arch image build with a smoke test. The `lint` job runs golangci-lint on new issues only (pull requests and pushes to `main`).

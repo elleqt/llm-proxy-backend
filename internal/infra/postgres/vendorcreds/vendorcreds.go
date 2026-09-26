@@ -56,6 +56,8 @@ const (
 
 // errAlreadyImported rolls Import's transaction back when the marker is already set;
 // it never leaves this package.
+//
+// COMPAT(credentials-import): errAlreadyImported exists only for the one-shot import; remove next release (RELEASING.md).
 var errAlreadyImported = errors.New("postgres: vendor credentials already imported")
 
 type Repo struct{ pool *pgxpool.Pool }

@@ -25,6 +25,30 @@ Why the pins lag the tag: the README and the compose files on `main` are what us
 
 Pushes to `main` publish `edge` and `sha-<commit>` only; `latest` moves only with a version tag.
 
+## Next release: remove the credentials import
+
+<!-- COMPAT(credentials-import): this whole section; the release that completes it deletes it (row 7). -->
+The release that moved the vendor accounts' OAuth credentials from files into Postgres keeps, for the upgrade only, a one-shot import from `LLMPROXY_AUTH_DIR` (the `grants` volume) and a tolerance of settings keys that no longer have an effect. The release after it removes them. Every site is tagged `COMPAT(credentials-import)` in code, compose files and README.
+
+| # | What | Where | Next release |
+|---|---|---|---|
+| 1 | One-shot import | `gateway.ImportFileCredentials` and its tests (`internal/infra/gateway/import.go`, `import_test.go`); its call in `boot.build()`; the e2e test `TestAVendorAccountOutlivesItsCredentialFile` (`test/e2e/credentials_test.go`), whose first boot relies on the import; the `InfoLogger` entry in `.mockery.yaml` and the generated `internal/app/mocks/info_logger.go` (generated files cannot carry the tag), added only for the import tests | delete (the e2e test: delete, or rewrite it to seed the account through the store; the mock: drop `InfoLogger` from `.mockery.yaml` unless something else uses it, then `make generate`) |
+| 2 | Import methods of the port | `VendorCredentialRepo.ImportDone` / `Import`, their SQL, `errAlreadyImported` and tests in `postgres/vendorcreds`, the regenerated mock (`make generate`) | delete |
+| 3 | Import marker row | `settings` row `vendor_credentials_import` | new migration `DELETE FROM settings WHERE key = 'vendor_credentials_import';` |
+| 4 | `grants` volume | `docker-compose.yml`, `docker-compose.minimal.yml`, README compose block (byte-equal) | remove mount and volume |
+| 5 | Import wording | README (Upgrading, backup, env table: "import source" on `LLMPROXY_AUTH_DIR`), config.go comment | keep only "login scratch directory"; Upgrading: `docker volume rm <project>_grants` |
+| 6 | Tolerance of legacy inert keys | `save-cooldown-status`, `request-log`, `error-logs-max-files` in `internal/app/settings/settings.go`: the `LoadBootConfig` boot warning (`inertKeyWarning`), `refuseInertKeys`' acceptance of a key the stored document already sets with the same value, and `asStored` (the diff's "from" side taken from the stored document); the README's **Gateway settings** note | move the keys into `ownedKeys`; delete the warning, the acceptance rule, `inertKeys`, `inertValues`, `refuseInertKeys` and `asStored`. Release notes: a document still setting one now stops boot |
+| 7 | This checklist | the "Next release: remove the credentials import" section of `RELEASING.md` | delete once rows 1-6 are done |
+
+**Done when** both commands print nothing: no tracked file carries the tag, and no production (non-`_test.go`) Go file uses upstream's file token store.
+
+```sh
+git grep -n "COMPAT(credentials-import)"
+git grep -n "sdkauth.NewFileTokenStore" -- '*.go' ':!*_test.go'
+```
+
+Stays permanently: `CredentialStore`, `LLMPROXY_CREDENTIALS_KEY`, `LLMPROXY_AUTH_DIR` as the login scratch directory, the nil request logger, the `admit()` forcing, and `Update`'s refusal of the inert keys.
+
 ## CI security model
 
 - Publishing runs only in the `publish` job, only on `push` events to `main` or `v*` tags, and only after the tests pass. It is the only job that declares the `dockerhub` environment, which holds the Docker Hub token and whose deployment policy admits only the `main` branch and `v*` tags.

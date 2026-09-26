@@ -25,10 +25,16 @@ type Config struct {
 	// database (credentials.NewSealer). Required; a lost or changed key means
 	// signing every vendor account in again.
 	CredentialsKey Secret
-	// RuntimeDir is LLMPROXY_RUNTIME_DIR: upstream's working directory, where its
-	// request logs go. No configuration file is read from it.
+	// RuntimeDir is LLMPROXY_RUNTIME_DIR: the working directory upstream requires a
+	// path for. Nothing is written to it (the gateway installs no request logger)
+	// and no configuration file is read from it.
 	RuntimeDir string
-	AuthDir    string
+	// AuthDir is LLMPROXY_AUTH_DIR: the vendor sign-in's scratch directory, where
+	// upstream hands the OAuth callback to the login for about a second. The vendor
+	// accounts themselves are in Postgres (gateway.CredentialStore).
+	// COMPAT(credentials-import): it is also the source of the one-shot import of the
+	// account files an earlier release kept here; remove next release (RELEASING.md).
+	AuthDir string
 	// BootstrapAdminEmail is LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: the address of the first
 	// administrator, created with a one-time password when no administrator exists.
 	// Optional. Empty disables the bootstrap, which leaves an installation without an

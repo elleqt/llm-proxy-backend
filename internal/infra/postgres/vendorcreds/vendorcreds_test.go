@@ -110,6 +110,9 @@ func TestVendorCredentialRepo(t *testing.T) {
 	})
 }
 
+// COMPAT(credentials-import): importMarkerKey, importMarker, readImportMarker and TestVendorCredentialImport test the
+// one-shot import; remove next release (RELEASING.md).
+
 // importMarkerKey is the settings row Import writes. The repository only reports
 // whether it exists, so the test reads the row itself.
 const importMarkerKey = "vendor_credentials_import"
