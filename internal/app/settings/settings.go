@@ -294,6 +294,7 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 		return UpdateResult{}, err
 	}
 
+	// COMPAT(credentials-import): base feeds only refuseInertKeys and asStored; remove next release (RELEASING.md).
 	if base, err = s.replacedDocument(ctx, req, doc, base); err != nil {
 		return UpdateResult{}, err
 	}
@@ -362,6 +363,9 @@ func (s *Service) Update(ctx context.Context, actor identity.User, req Update) (
 // proposedDocument is the document an update proposes, and the stored document
 // it was built from: the one it carries whole (base "", read by replacedDocument),
 // or the stored one with its fields patched in.
+//
+// COMPAT(credentials-import): the second result (base) exists only for replacedDocument and asStored; remove
+// next release (RELEASING.md), leaving proposedDocument returning the document alone.
 func (s *Service) proposedDocument(ctx context.Context, req Update) (string, string, error) {
 	if req.YAML != nil {
 		return *req.YAML, "", nil
@@ -382,11 +386,15 @@ func (s *Service) proposedDocument(ctx context.Context, req Update) (string, str
 // once doc parses (so a refused document touches nothing) and checked by
 // refuseInertKeys. A field patch keeps every key but the three it sets, none of
 // them inert, so only a whole document can add or change an inert key.
+//
+// COMPAT(credentials-import): feeds only refuseInertKeys and asStored; remove next release (RELEASING.md).
 func (s *Service) replacedDocument(ctx context.Context, req Update, doc, base string) (string, error) {
 	if req.YAML == nil {
 		return base, nil
 	}
 
+	// COMPAT(credentials-import): the extra stored-document read of a whole-document update; remove next release
+	// (RELEASING.md).
 	stored, err := storedDocument(ctx, s.repo)
 	if err != nil {
 		return "", err

@@ -48,10 +48,11 @@ func TestSettingsAreTheStoredDocumentUnredacted(t *testing.T) {
 }
 
 // A dry run answers the diff and the proposed settings and touches nothing: no push,
-// no write (the mocks have no expectation for either). It reads the stored document
-// it would replace.
+// no write (the mocks have no expectation for either).
 func TestADrySettingsRunAppliesNothing(t *testing.T) {
 	env := newEnv(t)
+	// COMPAT(credentials-import): the stored document a whole-document update replaces is read
+	// (replacedDocument); remove next release (RELEASING.md).
 	env.settings.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil)
 	env.gateway.EXPECT().CurrentConfig().Return(runningConfig(t, "request-retry: 1\n"))
 

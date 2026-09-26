@@ -181,6 +181,7 @@ func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
 	} {
 		t.Run(key+" added", func(t *testing.T) {
 			f := newSettingsFixture(t, "request-retry: 1\n")
+			// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 			// No gateway, persist or audit expectation: touching any fails the test.
 			_, err := f.svc.Update(context.Background(), newAdmin(),
@@ -191,6 +192,7 @@ func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
 		t.Run(key+" changed", func(t *testing.T) {
 			stored := key + ": " + values[0] + "\nrequest-retry: 1\n"
 			f := newSettingsFixture(t, stored)
+			// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 			f.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
 			_, err := f.svc.Update(context.Background(), newAdmin(),
 				yamlUpdate(key+": "+values[1]+"\nrequest-retry: 1\n", false))
@@ -200,6 +202,7 @@ func TestSettingsRefusesAddingOrChangingInertKeys(t *testing.T) {
 
 	t.Run("added to the default document", func(t *testing.T) {
 		f := newSettingsFixture(t, "")
+		// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 		f.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", app.ErrNotFound).Once()
 		_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate("request-log: false\n", true))
 		wantSettingError(t, err, app.ErrForbiddenSetting, "request-log")
@@ -265,6 +268,7 @@ func TestSettingsYAMLAndFieldsAreMutuallyExclusive(t *testing.T) {
 
 func TestSettingsDryRunAppliesAndPersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "request-retry: 1\n")
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	// No PushConfig, SetUpstreamDocument or Record expectation: a call fails the test.
@@ -288,6 +292,7 @@ func TestSettingsApplyPushesThenPersists(t *testing.T) {
 		pushed *sdkconfig.Config
 	)
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
@@ -330,6 +335,7 @@ func TestSettingsPushFailurePersistsNothing(t *testing.T) {
 	fixture := newSettingsFixture(t, "")
 	refused := errors.New("gateway: not running")
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(refused).Once()
@@ -345,6 +351,7 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 
 	var pushes []*sdkconfig.Config
 
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(c *sdkconfig.Config) error {
@@ -363,6 +370,7 @@ func TestSettingsPersistFailureRestoresRunningConfiguration(t *testing.T) {
 func TestSettingsDiffAndAuditRedactProxyCredentials(t *testing.T) {
 	stored := "proxy-url: http://olduser:oldpass@proxy.old.test:3128/?token=OLDQUERY\n"
 	fixture := newSettingsFixture(t, stored)
+	// COMPAT(credentials-import): replacedDocument's stored-document read; remove next release (RELEASING.md).
 	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil).Once()
 	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
 	fixture.gateway.EXPECT().PushConfig(mock.Anything).Return(nil)
