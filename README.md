@@ -347,11 +347,19 @@ If a migration fails, the backend does not start; `docker compose logs backend` 
 From this release the vendor accounts' OAuth credentials are stored in Postgres, encrypted, instead of as files in the `grants` volume, and CLIProxyAPI writes no request or error log files. Upgrading from an earlier release:
 
 1. Add `LLMPROXY_CREDENTIALS_KEY` to the backend's `environment` (at least 32 bytes, e.g. `openssl rand -hex 32`) and store it with your other secrets. **The backend does not start without it.** Losing it means signing every vendor account in again.
-2. Keep the `grants` volume mounted for this upgrade (the shipped compose files do). On the first start the accounts are imported into the database once; the files are not changed. If the backend stops at start naming a file in that volume, the file could not be read: fix or remove it and start again.
+2. Keep the `grants` volume mounted for this upgrade (the shipped compose files do). On the first start the accounts are imported into the database once; the files are not changed. If the backend stops at start naming a file in that volume, the file could not be read: fix or remove it and start again. If the first start ran without the volume, nothing was imported and the import does not run again by itself. Provided no vendor account has been added since, delete the import's marker and restart with the volume mounted, which imports the files (an account added since under the name of one of the files makes the import fail at start and roll back):
+
+   ```sh
+   docker compose exec postgres psql -U llmproxy llmproxy -c "DELETE FROM settings WHERE key = 'vendor_credentials_import';"
+   docker compose up -d
+   ```
+
 3. If the log warns that `save-cooldown-status`, `request-log` or `error-logs-max-files` is ignored, remove it from the settings document in the admin panel (**Admin → Settings**).
 4. The `runtime` volume is no longer used: remove the `runtime` mount and volume from your `docker-compose.yml` (the full file had them), run `docker compose up -d`, then `docker volume rm <project>_runtime`.
 
 **Do not skip this release.** It is the only one that imports the account files; the next release removes the import and the `grants` volume (the list of what it removes is in [RELEASING.md](RELEASING.md#next-release-remove-the-credentials-import)). An installation on an earlier release must upgrade to this one and start it once (the log reports `imported the vendor credential files into the database` with the count) before upgrading further. Upgrading past it leaves the accounts unimported, and removing the `grants` volume then deletes their only copy.
+
+**Going back to an earlier release** reads the account files in the `grants` volume, which this release leaves as they were at the upgrade: accounts added since then are missing, and accounts removed since then come back. Upgrading again does not import a second time (the import runs once), so accounts added or signed in again while on the earlier release are lost and must be signed in again.
 
 ## Images
 
@@ -762,6 +770,7 @@ All settings are environment variables, set in the backend's `environment` in th
   - The audit log records admin and auth actions.
   - The process log never contains passwords, keys, session ids or configuration secrets. The bootstrap password bypasses the logger.
   - CLIProxyAPI's debug logging is forced off, and so are its request and error log files: nothing is written to `LLMPROXY_RUNTIME_DIR`. Vendor errors show in the metrics, the usage ledger and the process log.
+  - Every vendor sign-in prints `Saving credentials to /tmp/llmproxy-credential-…/credential.json` on standard output. CLIProxyAPI prints it; it names only the temporary file the fresh credential passes through on its way into the database (removed at once) and carries no secret.
 - The web API and metrics listeners have no protection of their own against the outside world. Keep them private (see [Production deployment](#production-deployment)).
 
 ## Development
