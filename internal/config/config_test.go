@@ -396,6 +396,22 @@ func TestCredentialsKeyIsRequiredAndNeverQuoted(t *testing.T) {
 	require.True(t, bytes.Equal([]byte(exact), cfg.CredentialsKey), "CredentialsKey is not the configured key")
 }
 
+// The compose files ship a placeholder key long enough to pass the length check.
+// It is public, so a server started with it would encrypt the vendor accounts under
+// a key anyone has: refused, with a hint to generate one and without the value.
+func TestCredentialsKeyRefusesTheComposePlaceholder(t *testing.T) {
+	const placeholder = "change-me-credentials-key-at-least-32-bytes"
+
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": placeholder})
+
+	_, err := Load()
+	require.ErrorContains(t, err, "LLMPROXY_CREDENTIALS_KEY")
+	require.ErrorContains(t, err, "openssl rand -hex 32")
+
+	quoted := strings.Contains(err.Error(), placeholder)
+	require.False(t, quoted, "the error quotes the key")
+}
+
 func TestWebDefaultsToALoopbackListenerWithSecureCookies(t *testing.T) {
 	setWebEnv(t, map[string]string{"LLMPROXY_SESSION_KEY": ""})
 

@@ -212,7 +212,7 @@ sed -i '' -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
   -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
 ```
 
-Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database. The credentials key encrypts the vendor accounts stored in the database: keep a copy with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
+Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database. The backend refuses to start while the credentials key is still the placeholder. The credentials key encrypts the vendor accounts stored in the database: keep a copy with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
 
 ### 5. Start
 
@@ -395,7 +395,7 @@ cd backend
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password stays the file's placeholder, which is enough for a local build: Postgres is not published. To update: `git pull` in both checkouts and run the same `up -d --build`.
+The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password can stay the file's placeholder for a local build, since Postgres is not published; the credentials key cannot, so replace `change-me-credentials-key-at-least-32-bytes` first (see [step 4](#4-set-the-database-password-and-the-credentials-key)). To update: `git pull` in both checkouts and run the same `up -d --build`.
 
 ## Connecting clients
 

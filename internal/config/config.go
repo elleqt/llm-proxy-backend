@@ -134,6 +134,10 @@ const MinSessionKeyLen = 32
 // same floor.
 const MinCredentialsKeyLen = 32
 
+// composeCredentialsKey is the placeholder LLMPROXY_CREDENTIALS_KEY the shipped
+// compose files carry. It passes the length check but is public, so Load refuses it.
+const composeCredentialsKey = "change-me-credentials-key-at-least-32-bytes" //nolint:gosec // G101: the public placeholder refused here, not a credential.
+
 // Secret is key material that must not reach a log line: whatever verb formats it,
 // it prints as a placeholder.
 type Secret []byte
@@ -329,8 +333,9 @@ func LoadDatabase() (Database, error) {
 // loadCredentialsKey reads LLMPROXY_CREDENTIALS_KEY. Load reads it right after
 // LLMPROXY_DATABASE_URL, so a process started with no environment at all still
 // reports the database URL first (the CI image smoke test checks that message);
-// LoadDatabase does not read it, so gateway reset-password runs without it. Its
-// errors name the variable and never quote the value.
+// LoadDatabase does not read it, so gateway reset-password runs without it. The
+// compose files' placeholder is refused. Its errors name the variable and never
+// quote the value.
 func loadCredentialsKey() (Secret, error) {
 	key := os.Getenv("LLMPROXY_CREDENTIALS_KEY")
 
@@ -339,6 +344,9 @@ func loadCredentialsKey() (Secret, error) {
 		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY is required", errConfig)
 	case len(key) < MinCredentialsKeyLen:
 		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY must be at least %d bytes", errConfig, MinCredentialsKeyLen)
+	case key == composeCredentialsKey:
+		return nil, fmt.Errorf("%w: LLMPROXY_CREDENTIALS_KEY is still the compose files' placeholder: "+
+			"generate a key (openssl rand -hex 32) and keep it with your other secrets", errConfig)
 	}
 
 	return Secret(key), nil
