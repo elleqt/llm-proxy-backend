@@ -223,6 +223,15 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("vendor credentials: %w", err)
 	}
 
+	// The shipped compose files start as downloaded, placeholder key included. That
+	// key is public, so say so on every start until it is replaced.
+	if cfg.CredentialsKeyIsPlaceholder() {
+		//nolint:contextcheck // the process log is not request-scoped and logs under no context
+		logs.Warn("LLMPROXY_CREDENTIALS_KEY is the compose files' public placeholder: anyone with a copy of the " +
+			"database can read the vendor accounts' credentials. Set a random key (openssl rand -hex 32), " +
+			"best before adding vendor accounts: those added under the placeholder must be signed in again")
+	}
+
 	vendorCredentials := pgvendorcreds.New(pool)
 
 	store, err := gateway.NewCredentialStore(vendorCredentials, sealer, clock, "")

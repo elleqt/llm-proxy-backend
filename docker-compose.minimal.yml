@@ -23,8 +23,10 @@ services:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
       PGPASSWORD: change-me-db-password
-      # CHANGE ME (openssl rand -hex 32): at least 32 bytes. It encrypts the vendor
-      # accounts in the database; without it they must be signed in again.
+      # CHANGE ME (openssl rand -hex 32), best before adding vendor accounts: the
+      # placeholder works but is public, and the backend warns while it is set. The key
+      # encrypts the vendor accounts in the database; changing or losing it means
+      # signing them in again.
       LLMPROXY_CREDENTIALS_KEY: change-me-credentials-key-at-least-32-bytes
       LLMPROXY_WEB_ADDR: ":8081"
       LLMPROXY_PUBLIC_API_URL: http://localhost:8080

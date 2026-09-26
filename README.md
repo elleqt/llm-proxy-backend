@@ -160,8 +160,10 @@ services:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
       PGPASSWORD: change-me-db-password
-      # CHANGE ME (openssl rand -hex 32): at least 32 bytes. It encrypts the vendor
-      # accounts in the database; without it they must be signed in again.
+      # CHANGE ME (openssl rand -hex 32), best before adding vendor accounts: the
+      # placeholder works but is public, and the backend warns while it is set. The key
+      # encrypts the vendor accounts in the database; changing or losing it means
+      # signing them in again.
       LLMPROXY_CREDENTIALS_KEY: change-me-credentials-key-at-least-32-bytes
       LLMPROXY_WEB_ADDR: ":8081"
       LLMPROXY_PUBLIC_API_URL: http://localhost:8080
@@ -194,11 +196,11 @@ volumes:
 curl -fsSLO https://raw.githubusercontent.com/elleqt/llm-proxy-backend/main/docker-compose.yml
 ```
 
-No `.env` file is needed with either: every value is in the compose file, and you change a setting by editing it there. `CHANGE ME` marks what must change. Both files use the same volume, user and database names, so you can switch from the minimal file to the full one later and keep your data: put the database password and the credentials key you already use into the new file instead of new ones.
+No `.env` file is needed with either: every value is in the compose file, and you change a setting by editing it there. `CHANGE ME` marks what to change; either file also starts unchanged (see step 4). Both files use the same volume, user and database names, so you can switch from the minimal file to the full one later and keep your data: put the database password and the credentials key you already use into the new file instead of new ones.
 
 ### 4. Set the database password and the credentials key
 
-Replace the placeholders `change-me-db-password` (it appears twice: Postgres and the backend) and `change-me-credentials-key-at-least-32-bytes` with random values:
+The compose file starts as downloaded, which is enough to try the stack on your own machine. Its placeholders are public, though, so for anything else replace `change-me-db-password` (it appears twice: Postgres and the backend) and `change-me-credentials-key-at-least-32-bytes` with random values:
 
 ```sh
 sed -i -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
@@ -212,7 +214,19 @@ sed -i '' -e "s/change-me-db-password/$(openssl rand -hex 24)/g" \
   -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
 ```
 
-Do this before the first start: Postgres sets the password only when it creates the database in an empty volume. Changing it later in the file alone does not change it in the database. The backend refuses to start while the credentials key is still the placeholder. The credentials key encrypts the vendor accounts stored in the database: keep a copy with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
+Best do this before the first start: Postgres sets the password only when it creates the database in an empty volume, so changing it later in the file alone leaves the database on the old one, and the backend can no longer connect. The credentials key encrypts the vendor accounts stored in the database, so replace it at the latest before adding the first vendor account: accounts added under one key must be signed in again after a change. With the placeholder anyone who gets a copy of the database can read them, and the backend logs a warning on every start while it is set. Keep a copy of your key with your other secrets, apart from database backups. Without it the accounts cannot be read and must be signed in again (see [Backups](#production-deployment)).
+
+**Already started with the placeholders?** If there is nothing to keep, `docker compose down -v` deletes the stack and its data: replace the placeholders as above and start again. To keep the data, change the database password in Postgres first, then in the file, and restart (on macOS `sed -i ''`):
+
+```sh
+db_password="$(openssl rand -hex 24)"
+docker compose exec postgres psql -U llmproxy -c "ALTER USER llmproxy PASSWORD '$db_password'"
+sed -i -e "s/change-me-db-password/$db_password/g" \
+  -e "s/change-me-credentials-key-at-least-32-bytes/$(openssl rand -hex 32)/" docker-compose.yml
+docker compose up -d
+```
+
+Vendor accounts added under the placeholder key cannot be read under the new one: the backend stops at start and names the account. Delete them and sign them in again, as under *Lost or changed key* in [Backups](#production-deployment).
 
 ### 5. Start
 
@@ -395,7 +409,7 @@ cd backend
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. The database password can stay the file's placeholder for a local build, since Postgres is not published; the credentials key cannot, so replace `change-me-credentials-key-at-least-32-bytes` first (see [step 4](#4-set-the-database-password-and-the-credentials-key)). To update: `git pull` in both checkouts and run the same `up -d --build`.
+The override works on top of `docker-compose.minimal.yml` too. It tags the images `llm-proxy-backend:local` and `llm-proxy-frontend:local`, so a source build never passes for a published image. Pass both `-f` files to every later command for this stack (`logs`, `down`, …), or `export COMPOSE_FILE=docker-compose.yml:docker-compose.build.yml` in your shell. Both placeholders work for a local build: Postgres is not published, and the backend only warns about the public credentials key (see [step 4](#4-set-the-database-password-and-the-credentials-key)). To update: `git pull` in both checkouts and run the same `up -d --build`.
 
 ## Connecting clients
 
@@ -555,6 +569,7 @@ Checklist:
 - **Never expose the web API or metrics listeners.** In compose they have no published port. Keep it that way.
 - **Expose the gateway only through the reverse proxy.** Its server has no header or idle timeouts, so slow-client protection comes from the proxy. Allow long responses on the API host: streams can last minutes.
 - **Pin the version:** keep both image tags at a release (`X.Y.Z`), never `edge`.
+- **Credentials key:** replace the placeholder `LLMPROXY_CREDENTIALS_KEY` with a random key (`openssl rand -hex 32`) before adding vendor accounts. The backend warns on every start while the placeholder is set.
 - **Backups:** a database dump and `LLMPROXY_CREDENTIALS_KEY` are the whole backup; the backend keeps nothing else on disk.
   - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file). The dump includes the vendor accounts' OAuth credentials, encrypted.
   - **`LLMPROXY_CREDENTIALS_KEY`**: keep it with your other secrets, not next to the dumps. A dump restored without it has everything but the vendor accounts, which must then be signed in again.
@@ -700,7 +715,7 @@ All settings are environment variables, set in the backend's `environment` in th
 | Variable | Default | Description |
 |---|---|---|
 | `LLMPROXY_DATABASE_URL` | — (required) | PostgreSQL connection URL. The compose files write the user and database into it and pass the password separately as `PGPASSWORD` |
-| `LLMPROXY_CREDENTIALS_KEY` | — (required) | Encrypts the vendor accounts' OAuth credentials in the database (AES-256-GCM). At least 32 bytes (`openssl rand -hex 32`). Keep it apart from database backups: without it every vendor account must be signed in again |
+| `LLMPROXY_CREDENTIALS_KEY` | — (required) | Encrypts the vendor accounts' OAuth credentials in the database (AES-256-GCM). At least 32 bytes (`openssl rand -hex 32`). The compose files' placeholder is accepted, with a warning at every start: it is public. Keep the key apart from database backups: without it every vendor account must be signed in again |
 
 **Auth and sessions**
 

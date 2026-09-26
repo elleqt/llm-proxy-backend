@@ -396,20 +396,21 @@ func TestCredentialsKeyIsRequiredAndNeverQuoted(t *testing.T) {
 	require.True(t, bytes.Equal([]byte(exact), cfg.CredentialsKey), "CredentialsKey is not the configured key")
 }
 
-// The compose files ship a placeholder key long enough to pass the length check.
-// It is public, so a server started with it would encrypt the vendor accounts under
-// a key anyone has: refused, with a hint to generate one and without the value.
-func TestCredentialsKeyRefusesTheComposePlaceholder(t *testing.T) {
-	const placeholder = "change-me-credentials-key-at-least-32-bytes"
+// The compose files ship a placeholder key long enough to pass the length check,
+// so a compose file starts as downloaded. The placeholder is public, and only it
+// is reported as such, which is what boot warns on.
+func TestCredentialsKeyAcceptsTheComposePlaceholderAndReportsIt(t *testing.T) {
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": "change-me-credentials-key-at-least-32-bytes"})
 
-	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": placeholder})
+	cfg, err := Load()
+	require.NoError(t, err, "Load")
+	require.True(t, cfg.CredentialsKeyIsPlaceholder(), "the compose placeholder is not reported")
 
-	_, err := Load()
-	require.ErrorContains(t, err, "LLMPROXY_CREDENTIALS_KEY")
-	require.ErrorContains(t, err, "openssl rand -hex 32")
+	setWebEnv(t, map[string]string{"LLMPROXY_CREDENTIALS_KEY": testCredentialsKey})
 
-	quoted := strings.Contains(err.Error(), placeholder)
-	require.False(t, quoted, "the error quotes the key")
+	cfg, err = Load()
+	require.NoError(t, err, "Load")
+	require.False(t, cfg.CredentialsKeyIsPlaceholder(), "a generated key is reported as the placeholder")
 }
 
 func TestWebDefaultsToALoopbackListenerWithSecureCookies(t *testing.T) {
