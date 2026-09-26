@@ -64,7 +64,7 @@ func (r route) bodyLimitFor(c *gin.Context) int64 {
 	return r.maxBody
 }
 
-// routes classifies every route upstream v7.3.15 registers on its engine
+// routes classifies every route upstream v7.3.18 registers on its engine
 // (internal/api/server_routes.go setupRoutes, and AttachWebsocketRoute from
 // sdk/cliproxy/service_lifecycle.go), keyed by method and gin route pattern.
 // A request whose route is absent — including an unrouted path — is denied

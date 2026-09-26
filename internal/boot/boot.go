@@ -410,8 +410,8 @@ type server struct {
 //   - the web and metrics listeners stop accepting, and their requests in flight
 //     get listenerGrace;
 //   - meanwhile the gateway stops accepting, and its requests in flight get
-//     drainGrace (Gateway.Shutdown, not the cancellation of Run's context, whose
-//     deadline upstream counts from boot);
+//     drainGrace (Gateway.Shutdown, not the cancellation of Run's context,
+//     which makes upstream close every connection at once);
 //   - once all have returned, the usage sink gets sinkGrace to write what it
 //     still holds, and Run closes the pool.
 //

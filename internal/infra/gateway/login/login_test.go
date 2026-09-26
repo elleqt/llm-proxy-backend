@@ -28,7 +28,7 @@ import (
 
 // fakeOAuth is upstream's management start handler with the vendor's code
 // exchange replaced, keeping everything the gateway relies on as upstream
-// v7.3.15 does it (auth_files_provider_oauth.go RequestAnthropicToken): the
+// v7.3.18 does it (auth_files_provider_oauth.go RequestAnthropicToken): the
 // real session registry, the callback file in the auth directory read and
 // deleted by a poller, the state check, the pre-save pending guard and the
 // post-auth hook given the start request's context. The real handler is

@@ -23,7 +23,7 @@ import (
 )
 
 // These tests pin upstream behaviour the account methods depend on, measured
-// against v7.3.15: an upgrade that changes it must fail here.
+// against v7.3.18: an upgrade that changes it must fail here.
 
 // claudeGrant is a Claude OAuth account. Claude models come from upstream's
 // static catalogue, so registering one needs no network; the token is valid
@@ -583,7 +583,7 @@ func TestAccountsListsUnderPolicyNames(t *testing.T) {
 // TestNewRefusesAManagementEnvironment: MANAGEMENT_PASSWORD enables every
 // /v0/management route whatever the configuration says.
 func TestNewRefusesAManagementEnvironment(t *testing.T) {
-	// Every variable found in upstream v7.3.15 that enables management; listed
+	// Every variable found in upstream v7.3.18 that enables management; listed
 	// here rather than read from managementEnv, so dropping one from the guard
 	// fails the test.
 	for _, name := range []string{"MANAGEMENT_PASSWORD"} {
@@ -621,7 +621,7 @@ func TestRunRefusesAManagementEnvironment(t *testing.T) {
 	require.ErrorIs(t, gw.WaitReload(ctx), ErrManagementEnv, "WaitReload after the refused Run")
 }
 
-// claudeBaselineUserAgent is the Claude CLI identity upstream v7.3.15 presents
+// claudeBaselineUserAgent is the Claude CLI identity upstream v7.3.18 presents
 // for a Claude OAuth account when the client is not Claude Code itself
 // (internal/runtime/executor/helps/claude_device_profile.go
 // defaultClaudeFingerprintUserAgent). Before v7.3.15 the baseline was older
