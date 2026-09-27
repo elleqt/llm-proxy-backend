@@ -32,10 +32,6 @@ services:
       LLMPROXY_PUBLIC_API_URL: http://localhost:8080
       LLMPROXY_COOKIE_SECURE: "false"
       LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
-    volumes:
-      # COMPAT(credentials-import): an earlier release's vendor account files,
-      # imported into the database once; the next release removes this mount.
-      - grants:/var/lib/llmproxy/auths
     ports:
       - "8080:8080"
     depends_on:
@@ -49,5 +45,3 @@ services:
 
 volumes:
   pgdata:
-  # COMPAT(credentials-import): removed with the mount above in the next release.
-  grants:

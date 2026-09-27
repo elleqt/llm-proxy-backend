@@ -180,7 +180,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, err
 	}
 
-	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility), logs)
+	bootCfg, err := appsettings.LoadBootConfig(ctx, settings, ownedConfig(cfg, opts.Compatibility))
 	if err != nil {
 		return nil, fmt.Errorf("boot configuration: %w", err)
 	}
@@ -236,11 +236,6 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	store, err := gateway.NewCredentialStore(vendorCredentials, sealer, clock, "")
 	if err != nil {
-		return nil, fmt.Errorf("vendor credentials: %w", err)
-	}
-
-	// COMPAT(credentials-import): the one-shot import of the previous release's credential files; remove next release (RELEASING.md).
-	if err := gateway.ImportFileCredentials(ctx, bootCfg.AuthDir, vendorCredentials, sealer, clock, logs); err != nil {
 		return nil, fmt.Errorf("vendor credentials: %w", err)
 	}
 

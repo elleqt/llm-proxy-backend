@@ -96,7 +96,7 @@ type CredentialStore struct {
 // NewCredentialStore returns the store over repo, sealing with sealer and
 // stamping rows with clock. A fresh login's token storage is serialized
 // under scratchDir; "" means os.TempDir(), which boot passes, so the
-// plaintext never touches the grants volume. Directories a crashed process
+// plaintext never touches the auth directory. Directories a crashed process
 // left there are removed first, so no plaintext outlives a restart; one
 // younger than scratchGrace is kept, since processes on one host share
 // os.TempDir() and it may be another process's login in progress.
@@ -412,9 +412,6 @@ func carriesToken(fields map[string]any) bool {
 // map[string]any: keys sorted, numbers and nesting as any JSON reader sees
 // them. Equal credentials give equal bytes, so the digest of a row Save wrote
 // and of the plaintext List opened compare.
-//
-// COMPAT(credentials-import): the file import seals the same form, so an imported row compares too; drop this
-// paragraph next release (RELEASING.md).
 func canonicalJSON(v any) ([]byte, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {

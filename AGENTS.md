@@ -40,7 +40,6 @@ One process runs three listeners (defaults are in `internal/config/config.go`):
 - Startup: `config.Load()` → goose migrations (on every boot) → pgx pool → `build()` → `serve()`.
 - `build()` also bootstraps the first admin and loads the upstream config document from the `settings` table.
 - Vendor accounts' OAuth credentials live in Postgres (`vendor_credentials`), sealed with AES-256-GCM under `LLMPROXY_CREDENTIALS_KEY` (`credentials.Sealer`). `build()` wires `gateway.CredentialStore` (upstream's token store over `postgres/vendorcreds`), registers it process-wide, and lists it once so a wrong key stops the boot. Plaintext exists only in memory and, during a sign-in, in a `llmproxy-credential-*` scratch dir under `os.TempDir()`.
-- Between creating the store and listing it, `build()` runs `gateway.ImportFileCredentials`: a one-shot import of the credential files an earlier release kept in `LLMPROXY_AUTH_DIR`. It is temporary, tagged `COMPAT(credentials-import)` like every other upgrade-only site, and goes next release (`RELEASING.md`). <!-- COMPAT(credentials-import): drop this item next release. -->
 - Shutdown order: listeners → gateway drain → usage sink drain → pool.
 - Admin settings changes reach the live gateway through `app.ConfigPusher`.
 
