@@ -119,6 +119,8 @@ type Gateway struct {
 	// derived names, lower-cased, the OpenAI-compatible providers whose entries
 	// New added to the boot configuration (dropSynthesizedCompat).
 	derived map[string]struct{}
+	// discoverWait overrides discoverTimeout; tests shorten it.
+	discoverWait time.Duration
 
 	// pushMu serialises configuration pushes and account changes, so current
 	// always matches the last configuration upstream committed and an account

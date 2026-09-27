@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -324,6 +325,64 @@ func TestDiscoverModels(t *testing.T) {
 		require.NotContains(t, err.Error(), vendorSecret, path)
 		require.NotContains(t, err.Error(), vendor.URL, "%s: the error names the URL", path)
 	}
+}
+
+// TestDiscoverModelsRefusesLinkLocalTargets: a link-local target (where cloud
+// metadata answers) is refused before anything is sent, directly and behind
+// a proxy-url, where the dialer only ever sees the proxy; loopback, where a
+// local vendor runs, stays allowed.
+func TestDiscoverModelsRefusesLinkLocalTargets(t *testing.T) {
+	var proxied atomic.Int64
+
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxied.Add(1)
+		_, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`))
+	}))
+	t.Cleanup(proxy.Close)
+
+	for name, proxyURL := range map[string]string{"direct": "", "behind a proxy": proxy.URL} {
+		t.Run(name, func(t *testing.T) {
+			gw := &Gateway{current: &cliproxyconfig.Config{ProxyURL: proxyURL}}
+
+			for _, base := range []string{"http://169.254.169.254/latest", "http://[fe80::1]/v1", "http://0.0.0.0:1/v1"} {
+				_, err := gw.DiscoverModels(t.Context(), base, "sk-discover", "")
+
+				var invalid *app.InvalidInputError
+				require.ErrorAs(t, err, &invalid, "%s was asked", base)
+				require.Equal(t, "baseURL", invalid.Field)
+			}
+
+			require.Zero(t, proxied.Load(), "a link-local target reached the proxy")
+		})
+	}
+
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[{"id":"local"}]}`))
+	}))
+	t.Cleanup(vendor.Close)
+
+	ids, err := (&Gateway{}).DiscoverModels(t.Context(), vendor.URL, "", "")
+	require.NoError(t, err, "a loopback vendor is allowed")
+	require.Equal(t, []string{"local"}, ids)
+}
+
+// TestDiscoverModelsGivesUpOnASlowVendor: a vendor that does not answer in
+// time is unreachable, not waited on.
+func TestDiscoverModelsGivesUpOnASlowVendor(t *testing.T) {
+	release := make(chan struct{})
+
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(func() { close(release); slow.Close() })
+
+	started := time.Now()
+	_, err := (&Gateway{discoverWait: 200 * time.Millisecond}).DiscoverModels(t.Context(), slow.URL, "", "")
+	require.ErrorIs(t, err, app.ErrProviderUnreachable)
+	require.Less(t, time.Since(started), 5*time.Second, "discovery waited past its timeout")
 }
 
 // TestDiscoverModelsWithTheStoredKey: discovery for an existing provider

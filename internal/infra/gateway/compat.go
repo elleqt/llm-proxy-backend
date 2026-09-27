@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
@@ -407,12 +409,18 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 		return nil, &app.InvalidInputError{Field: "baseURL"}
 	}
 
+	// The target itself, resolved here: behind a proxy the dialer below only
+	// ever sees the proxy's address.
+	if err := refuseLinkLocalHost(ctx, endpoint.Hostname()); err != nil {
+		return nil, err
+	}
+
 	client, err := g.discoveryClient(endpoint)
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, discoverTimeout)
+	ctx, cancel := context.WithTimeout(ctx, g.discoveryTimeout())
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), http.NoBody)
@@ -458,13 +466,27 @@ func (g *Gateway) discoveryClient(endpoint *url.URL) (*http.Client, error) {
 		proxyURL = cfg.ProxyURL
 	}
 
-	transport, _, err := proxyutil.BuildHTTPTransport(proxyURL)
+	transport, mode, err := proxyutil.BuildHTTPTransport(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the proxy-url is not usable", app.ErrProviderUnreachable)
 	}
 
-	client := &http.Client{
-		Timeout: discoverTimeout,
+	if transport == nil {
+		// No proxy-url: a direct connection, not whatever proxy the
+		// environment names, so the dialer below sees the vendor's address.
+		transport = proxyutil.NewDirectTransport()
+	}
+
+	if mode != proxyutil.ModeProxy {
+		// A direct connection checks the address it actually dials, so a
+		// name that resolves differently after refuseLinkLocalHost is caught.
+		dialer := &net.Dialer{Timeout: g.discoveryTimeout(), Control: refuseLinkLocalDial}
+		transport.DialContext = dialer.DialContext
+	}
+
+	return &http.Client{
+		Timeout:   g.discoveryTimeout(),
+		Transport: transport,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if req.URL.Scheme != endpoint.Scheme || req.URL.Host != endpoint.Host || len(via) >= 5 {
 				return errCrossHostRedirect
@@ -472,12 +494,65 @@ func (g *Gateway) discoveryClient(endpoint *url.URL) (*http.Client, error) {
 
 			return nil
 		},
-	}
-	if transport != nil {
-		client.Transport = transport
+	}, nil
+}
+
+// discoveryTimeout is how long DiscoverModels waits: discoverTimeout unless a
+// test shortened it.
+func (g *Gateway) discoveryTimeout() time.Duration {
+	if g.discoverWait > 0 {
+		return g.discoverWait
 	}
 
-	return client, nil
+	return discoverTimeout
+}
+
+// errLinkLocal refuses a discovery target on a link-local, multicast or
+// unspecified address: where cloud metadata services answer, never a vendor.
+// Loopback and private addresses stay allowed; a vendor on the same machine
+// or network is a real case.
+var errLinkLocal = errors.New("gateway: link-local discovery target")
+
+// linkLocal reports whether ip is an address discovery must not reach.
+func linkLocal(ip net.IP) bool {
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified()
+}
+
+// refuseLinkLocalHost resolves host and refuses it (*app.InvalidInputError on
+// "baseURL") when any address it names is link-local. A name that does not
+// resolve is left to the request, which then fails as unreachable.
+func refuseLinkLocalHost(ctx context.Context, host string) error {
+	var ips []net.IP
+
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else if addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host); err == nil {
+		for _, addr := range addrs {
+			ips = append(ips, addr.IP)
+		}
+	}
+
+	if slices.ContainsFunc(ips, linkLocal) {
+		return &app.InvalidInputError{Field: "baseURL"}
+	}
+
+	return nil
+}
+
+// refuseLinkLocalDial is the direct dialer's Control hook: it refuses to
+// connect to a link-local address, whatever name led there.
+func refuseLinkLocalDial(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("gateway: discovery dial address %q: %w", address, err)
+	}
+
+	if ip := net.ParseIP(host); ip != nil && linkLocal(ip) {
+		return errLinkLocal
+	}
+
+	return nil
 }
 
 // errCrossHostRedirect stops a discovery redirect that leaves the base URL's
