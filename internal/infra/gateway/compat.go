@@ -322,6 +322,10 @@ func (g *Gateway) AddCompatProvider(ctx context.Context, provider app.CompatProv
 // UpdateCompatProvider replaces the definition of the OpenAI-compatible
 // provider id and serves it at once. The credential is saved first, so a
 // failed save changes nothing; the name and the disabled state are kept.
+// A stored key stays bound to its base URL: moving the provider to another
+// base URL while keeping the key is an *app.InvalidInputError on "apiKey"
+// (type the key again, or remove it), so the key never follows a URL the
+// administrator merely typed.
 func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update app.CompatProviderUpdate) (app.VendorAccount, error) {
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
@@ -341,9 +345,13 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 
 	name, _ := held.Metadata[compatMetaName].(string)
 	apiKey, _ := held.Metadata[compatMetaAPIKey].(string)
+	storedURL, _ := held.Metadata[compatMetaBaseURL].(string)
 
-	if update.APIKey != nil {
+	switch {
+	case update.APIKey != nil:
 		apiKey = *update.APIKey
+	case apiKey != "" && strings.TrimRight(storedURL, "/") != strings.TrimRight(update.BaseURL, "/"):
+		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
 	next := held.Clone()
@@ -374,15 +382,22 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 // DiscoverModels asks the vendor at baseURL which models it serves (GET
 // {baseURL}/models, the OpenAI model list) and returns their ids, sorted.
 // With no apiKey and accountID naming an OpenAI-compatible provider, that
-// provider's stored key is sent. The request goes through the running
-// configuration's proxy-url, as the provider's traffic does, follows
-// redirects only within the same scheme and host, and gives up after
-// discoverTimeout or discoverMaxBytes. Errors name neither the URL nor the
-// vendor's answer: app.ErrProviderAuthFailed for 401 and 403, else
-// app.ErrProviderUnreachable.
+// provider's stored key is sent, and only to its stored base URL: for any
+// other baseURL it is an *app.InvalidInputError on "apiKey", so no request
+// can carry a stored key to a host the administrator merely typed. The
+// request goes through the running configuration's proxy-url, as the
+// provider's traffic does, follows redirects only within the same scheme and
+// host, and gives up after discoverTimeout or discoverMaxBytes. Errors name
+// neither the URL nor the vendor's answer: app.ErrProviderAuthFailed for 401
+// and 403, else app.ErrProviderUnreachable.
 func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string) ([]string, error) {
 	if apiKey == "" && accountID != "" && g.coreAuth != nil {
 		if held, ok := g.coreAuth.GetByID(accountID); ok && isCompatAccount(held) {
+			stored, _ := held.Metadata[compatMetaBaseURL].(string)
+			if strings.TrimRight(stored, "/") != strings.TrimRight(baseURL, "/") {
+				return nil, &app.InvalidInputError{Field: "apiKey"}
+			}
+
 			apiKey, _ = held.Metadata[compatMetaAPIKey].(string)
 		}
 	}

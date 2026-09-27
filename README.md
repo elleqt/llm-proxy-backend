@@ -607,7 +607,7 @@ Checklist:
 
 - **Name**: the provider name in access rules (`<name>:*`). Lower case letters, digits, `.`, `_` and `-`; it cannot be changed later, and names of built-in providers (`claude`, `chatgpt`, `gemini`, …) are refused.
 - **Base URL**: up to and including the API version, e.g. `https://api.example.com/v1`. Local addresses are allowed.
-- **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it.
+- **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it. A stored key is bound to its base URL: changing the base URL needs the key typed again (or removed), so a key never follows a provider to another host.
 - **Models**: **Discover models** asks the vendor (`GET <base URL>/models`, through `proxy-url` when set) and lets you pick which to serve, each optionally under an alias. A model can also be typed by hand. The list does not follow the vendor by itself: discover again and save to change it.
 - **Prefix** (optional): clients then request `<prefix>/<model>`.
 

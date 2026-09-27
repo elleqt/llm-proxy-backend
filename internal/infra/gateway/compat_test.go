@@ -177,6 +177,15 @@ func TestCompatProviderUpdateDisableRemove(t *testing.T) {
 	require.Equal(t, http.StatusOK, chatVia(t, srv, newModel))
 	require.Equal(t, "Bearer "+compatKey, vendor.Requests()[1].Header.Get("Authorization"), "the kept key")
 
+	// The stored key does not follow the provider to another base URL.
+	_, err = gw.UpdateCompatProvider(t.Context(), account.ID, app.CompatProviderUpdate{
+		BaseURL: "https://elsewhere.example.com/v1", Models: []app.CompatModel{{Name: newModel}},
+	})
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, err, &invalid, "the stored key was kept for another base URL")
+	require.Equal(t, "apiKey", invalid.Field)
+
 	cleared := ""
 	keyless, err := gw.UpdateCompatProvider(t.Context(), account.ID, app.CompatProviderUpdate{
 		BaseURL: vendorSrv.URL, APIKey: &cleared, Models: []app.CompatModel{{Name: newModel}},
@@ -318,7 +327,8 @@ func TestDiscoverModels(t *testing.T) {
 }
 
 // TestDiscoverModelsWithTheStoredKey: discovery for an existing provider
-// sends its stored key when none is typed.
+// sends its stored key when none is typed, and only to the provider's own
+// base URL: another host an administrator types never receives it.
 func TestDiscoverModelsWithTheStoredKey(t *testing.T) {
 	var gotAuth string
 
@@ -328,13 +338,28 @@ func TestDiscoverModelsWithTheStoredKey(t *testing.T) {
 	}))
 	t.Cleanup(vendor.Close)
 
+	var elsewhereAsked bool
+
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		elsewhereAsked = true
+		_, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`))
+	}))
+	t.Cleanup(elsewhere.Close)
+
 	srv := startCompat(t, pgtest.NewTestPool(t))
 	account, err := srv.gateway.AddCompatProvider(t.Context(), app.CompatProvider{
 		Name: compatName(t, "disc"), BaseURL: vendor.URL, APIKey: compatKey, Models: []app.CompatModel{{Name: compatModel(t, "m")}},
 	})
 	require.NoError(t, err)
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", account.ID)
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL+"/", "", account.ID)
 	require.NoError(t, err)
 	require.Equal(t, "Bearer "+compatKey, gotAuth)
+
+	_, err = srv.gateway.DiscoverModels(t.Context(), elsewhere.URL, "", account.ID)
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, err, &invalid, "the stored key was offered to another host")
+	require.Equal(t, "apiKey", invalid.Field)
+	require.False(t, elsewhereAsked, "another host was asked with the stored key")
 }

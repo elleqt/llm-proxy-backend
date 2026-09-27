@@ -620,7 +620,9 @@ paths:
       operationId: discoverCompatModels
       summary: >
         List the models a vendor serves (GET {baseURL}/models). Nothing is saved. Without
-        `apiKey`, the stored key of `accountId` is used.
+        `apiKey`, the stored key of `accountId` is used, and only when `baseURL` is that
+        provider's own: for any other URL the answer is `invalid_input` on `apiKey`, and
+        nothing is sent.
       requestBody:
         required: true
         content:
@@ -1146,7 +1148,12 @@ components:
       required: [baseURL, models]
       properties:
         baseURL: { type: string }
-        apiKey: { type: string, description: A new key. Absent keeps the stored one. }
+        apiKey:
+          type: string
+          description: >
+            A new key. Absent keeps the stored one, but only at the same `baseURL`: a changed
+            `baseURL` with a stored key and neither `apiKey` nor `clearApiKey` is `invalid_input`
+            on `apiKey`, so a stored key never follows the provider to another host.
         clearApiKey: { type: boolean, default: false, description: Remove the stored key. Ignored when `apiKey` is set. }
         prefix: { type: string }
         models:

@@ -298,7 +298,7 @@ type CompatProviderRequest struct {
 
 // CompatProviderUpdate defines model for CompatProviderUpdate.
 type CompatProviderUpdate struct {
-	// ApiKey A new key. Absent keeps the stored one.
+	// ApiKey A new key. Absent keeps the stored one, but only at the same `baseURL`: a changed `baseURL` with a stored key and neither `apiKey` nor `clearApiKey` is `invalid_input` on `apiKey`, so a stored key never follows the provider to another host.
 	ApiKey  *string `json:"apiKey,omitempty"`
 	BaseURL string  `json:"baseURL"`
 
