@@ -7,8 +7,8 @@ import (
 )
 
 // The upstream binary keeps its model catalogue current by starting three
-// updaters from its command, not from the SDK service (v7.3.18
-// cmd/server/main.go:824 and :840-853 startModelCatalogUpdaters): each fetches
+// updaters from its command, not from the SDK service (v7.3.20
+// cmd/server/main.go:827 and :863-876 startModelCatalogUpdaters): each fetches
 // its catalogue from github.com/router-for-me/models at once and then every
 // three hours, and the service re-registers the models of every account whose
 // provider changed (sdk/cliproxy/service_plugins.go:322
