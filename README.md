@@ -250,7 +250,7 @@ Open **http://localhost:8081**, sign in with that email and password, and choose
 
 ![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)
 
-1. Go to **Admin → Providers → Add account** and choose `claude` or `chatgpt`.
+1. Go to **Admin → Providers → Add provider** and choose `claude` or `chatgpt`.
 2. Open the sign-in link and sign in to the vendor with the subscription account you want to share.
 3. At the end, the browser goes to a `localhost` URL that **does not load**. This is expected. The vendor's OAuth client is registered for CLI tools, which run a small listener on your own machine to catch that redirect. llm-proxy runs on a server and opens no such listener. The authorization code is in the URL itself.
 4. Copy the **whole URL** from the address bar, paste it into the wizard, and click **Finish adding**.
@@ -573,7 +573,7 @@ Checklist:
 - **Backups:** a database dump and `LLMPROXY_CREDENTIALS_KEY` are the whole backup; the backend keeps nothing else on disk.
   - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file). The dump includes the vendor accounts' OAuth credentials, encrypted.
   - **`LLMPROXY_CREDENTIALS_KEY`**: keep it with your other secrets, not next to the dumps. A dump restored without it has everything but the vendor accounts, which must then be signed in again.
-  - **Lost or changed key:** the backend does not start while the database holds accounts the key cannot open; its log names the account. Put the new key in the compose file, delete the stored accounts, start the backend, and sign each account in again (**Admin → Providers → Add account**):
+  - **Lost or changed key:** the backend does not start while the database holds accounts the key cannot open; its log names the account. Put the new key in the compose file, delete the stored accounts, start the backend, and sign each account in again (**Admin → Providers → Add provider**):
 
     ```sh
     docker compose exec postgres psql -U llmproxy llmproxy -c 'DELETE FROM vendor_credentials;'
@@ -599,11 +599,11 @@ Checklist:
 
 ### Vendor accounts
 
-**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add account** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
+**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add provider** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
 #### OpenAI-compatible providers
 
-**Add OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
+**Add provider → OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
 
 - **Name**: the provider name in access rules (`<name>:*`). Lower case letters, digits, `.`, `_` and `-`; it cannot be changed later, and names of built-in providers (`claude`, `chatgpt`, `gemini`, …) are refused.
 - **Base URL**: up to and including the API version, e.g. `https://api.example.com/v1`. Local and private addresses are allowed; model discovery refuses link-local ones (`169.254.0.0/16`, `fe80::/10`, where cloud metadata services answer).
