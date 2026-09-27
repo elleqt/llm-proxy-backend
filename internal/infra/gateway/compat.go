@@ -66,6 +66,9 @@ const (
 	discoverMaxBytes = 1 << 20
 )
 
+// fieldBaseURL is the request field a refused discovery target is reported on.
+const fieldBaseURL = "baseURL"
+
 // errCompatNotHeld reports an update of an account that is not an
 // OpenAI-compatible provider.
 var errCompatNotHeld = fmt.Errorf("gateway: not an openai-compatible provider: %w", app.ErrNotFound)
@@ -406,7 +409,7 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 
 	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/models")
 	if err != nil {
-		return nil, &app.InvalidInputError{Field: "baseURL"}
+		return nil, &app.InvalidInputError{Field: fieldBaseURL}
 	}
 
 	// The target itself, resolved here: behind a proxy the dialer below only
@@ -425,7 +428,7 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), http.NoBody)
 	if err != nil {
-		return nil, &app.InvalidInputError{Field: "baseURL"}
+		return nil, &app.InvalidInputError{Field: fieldBaseURL}
 	}
 
 	req.Header.Set("Accept", "application/json")
@@ -534,7 +537,7 @@ func refuseLinkLocalHost(ctx context.Context, host string) error {
 	}
 
 	if slices.ContainsFunc(ips, linkLocal) {
-		return &app.InvalidInputError{Field: "baseURL"}
+		return &app.InvalidInputError{Field: fieldBaseURL}
 	}
 
 	return nil

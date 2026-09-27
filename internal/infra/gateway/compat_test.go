@@ -336,6 +336,7 @@ func TestDiscoverModelsRefusesLinkLocalTargets(t *testing.T) {
 
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		proxied.Add(1)
+
 		_, _ = w.Write([]byte(`{"data":[{"id":"m"}]}`))
 	}))
 	t.Cleanup(proxy.Close)
@@ -371,12 +372,13 @@ func TestDiscoverModelsRefusesLinkLocalTargets(t *testing.T) {
 func TestDiscoverModelsGivesUpOnASlowVendor(t *testing.T) {
 	release := make(chan struct{})
 
-	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		select {
 		case <-release:
 		case <-r.Context().Done():
 		}
 	}))
+
 	t.Cleanup(func() { close(release); slow.Close() })
 
 	started := time.Now()
