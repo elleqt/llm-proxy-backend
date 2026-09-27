@@ -34,7 +34,7 @@ func TestCreateCompatNormalisesAndAuditsWithoutTheKey(t *testing.T) {
 	}).Return(compatAccount, nil)
 
 	account, err := fixture.svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
-		Name: " acme ", BaseURL: " https://api.example.com/v1/ ", APIKey: compatSecret, Prefix: " team ",
+		Name: " AcMe ", BaseURL: " https://api.example.com/v1/ ", APIKey: compatSecret, Prefix: " team ",
 		Models: []app.CompatModel{{Name: " m "}, {Name: "m", Alias: " m-fast "}},
 	})
 	require.NoError(t, err)
@@ -55,7 +55,6 @@ func TestCreateCompatRefusesABadDefinition(t *testing.T) {
 		edit  func(*app.CompatProvider)
 		field string
 	}{
-		"upper-case name":    {func(p *app.CompatProvider) { p.Name = "Acme" }, "name"},
 		"name with a colon":  {func(p *app.CompatProvider) { p.Name = "acme:x" }, "name"},
 		"empty name":         {func(p *app.CompatProvider) { p.Name = "" }, "name"},
 		"relative base URL":  {func(p *app.CompatProvider) { p.BaseURL = "api.example.com/v1" }, "baseURL"},

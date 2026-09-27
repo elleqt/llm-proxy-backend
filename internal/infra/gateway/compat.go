@@ -475,14 +475,21 @@ func (g *Gateway) discoveryClient(endpoint *url.URL) (*http.Client, error) {
 	}
 
 	if transport == nil {
-		// No proxy-url: a direct connection, not whatever proxy the
-		// environment names, so the dialer below sees the vendor's address.
-		transport = proxyutil.NewDirectTransport()
+		// No proxy-url: the default transport, environment proxy included,
+		// as the rest of the vendor traffic goes out.
+		base, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		}
+
+		transport = base.Clone()
 	}
 
 	if mode != proxyutil.ModeProxy {
-		// A direct connection checks the address it actually dials, so a
-		// name that resolves differently after refuseLinkLocalHost is caught.
+		// The dialer checks the address it actually connects to, so a name
+		// that resolves differently after refuseLinkLocalHost is caught. Behind
+		// an environment proxy it sees the proxy, and refuseLinkLocalHost has
+		// covered the target. A proxy-url's own dialer (SOCKS) is left alone.
 		dialer := &net.Dialer{Timeout: g.discoveryTimeout(), Control: refuseLinkLocalDial}
 		transport.DialContext = dialer.DialContext
 	}

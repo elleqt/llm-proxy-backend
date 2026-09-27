@@ -43,7 +43,9 @@ func (s *Service) CreateCompat(ctx context.Context, actor identity.User, provide
 		return app.VendorAccount{}, err
 	}
 
-	provider.Name = strings.TrimSpace(provider.Name)
+	// Lower case, as upstream matches names case-insensitively: "DeepSeek" is
+	// "deepseek", and cannot be added beside it.
+	provider.Name = strings.ToLower(strings.TrimSpace(provider.Name))
 	if !compatName.MatchString(provider.Name) {
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "name"}
 	}
