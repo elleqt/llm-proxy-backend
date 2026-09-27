@@ -2,13 +2,14 @@
 
 [![backend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-backend?sort=semver&label=backend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-backend) [![frontend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-frontend?sort=semver&label=frontend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) [![ci](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml)
 
-A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
+A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions, and any OpenAI-compatible API, through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
 
 > **llm-proxy is one system in two repositories:** [llm-proxy-backend](https://github.com/elleqt/llm-proxy-backend) — the gateway, web API and metrics (start here to run it) · [llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend) — the web interface: cabinet and admin panel.
 
 ## Contents
 
 - [What it is / why](#what-it-is--why)
+- [Supported providers](#supported-providers)
 - [Screenshots](#screenshots)
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
@@ -44,6 +45,16 @@ A plain CLIProxyAPI setup keeps API keys and access in one config file. Everythi
 | Nobody knows who changed what | Admin actions are written to an audit log |
 
 Clients: Claude Code, [omp](https://github.com/can1357/oh-my-pi), any OpenAI-compatible client, and Codex-style clients (`/backend-api/codex/responses`).
+
+## Supported providers
+
+| Provider | How it is added | Name in access rules |
+|---|---|---|
+| Claude (Pro/Max subscription) | Browser sign-in wizard ([Quick start](#7-add-a-vendor-account)) | `claude` |
+| ChatGPT (Plus/Pro subscription, Codex backend) | Browser sign-in wizard | `chatgpt` |
+| Any OpenAI-compatible API: a hosted vendor, a router, a local Ollama or vLLM | Base URL, optional API key and models in the admin panel ([details](#openai-compatible-providers)) | the name you give it |
+
+Each kind can be added as many times as needed: several subscription accounts, several OpenAI-compatible providers. OpenAI-compatible providers are tested end to end against [DeepSeek](https://api-docs.deepseek.com/) (model discovery, chat, streaming, and the Anthropic `/v1/messages` route translated to it); other vendors that speak the same `/models` and `/chat/completions` API are expected to work the same way.
 
 ## Screenshots
 
@@ -250,7 +261,7 @@ Open **http://localhost:8081**, sign in with that email and password, and choose
 
 ![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)
 
-1. Go to **Admin → Providers → Add account** and choose `claude` or `chatgpt`.
+1. Go to **Admin → Providers → Add provider** and choose `claude` or `chatgpt`.
 2. Open the sign-in link and sign in to the vendor with the subscription account you want to share.
 3. At the end, the browser goes to a `localhost` URL that **does not load**. This is expected. The vendor's OAuth client is registered for CLI tools, which run a small listener on your own machine to catch that redirect. llm-proxy runs on a server and opens no such listener. The authorization code is in the URL itself.
 4. Copy the **whole URL** from the address bar, paste it into the wizard, and click **Finish adding**.
@@ -466,7 +477,7 @@ claude:claude-opus-4-?       one character after "4-"
 *:*                          everything
 ```
 
-- **Providers** are `claude` and `chatgpt` (the Codex backend is called `chatgpt` in rules). Matching is case-insensitive.
+- **Providers** are `claude` and `chatgpt` (the Codex backend is called `chatgpt` in rules), plus each [OpenAI-compatible provider](#openai-compatible-providers) under its name. Matching is case-insensitive.
 - **Globs:** `*` matches any run of characters, including `/` and `:`. `?` matches exactly one character. Everything else is literal, and the pattern must match the whole model name. The rule splits on the first colon, so model names can contain colons.
 - **Wildcards are evaluated per request** against the live model catalog. `chatgpt:*` covers a model the vendor releases tomorrow.
 - **A model served by several providers** must be allowed on **all** of them. The router may choose any of them.
@@ -573,7 +584,7 @@ Checklist:
 - **Backups:** a database dump and `LLMPROXY_CREDENTIALS_KEY` are the whole backup; the backend keeps nothing else on disk.
   - Database: `docker compose exec postgres pg_dump -U llmproxy llmproxy > llmproxy.sql` (the `POSTGRES_USER` / `POSTGRES_DB` from your compose file). The dump includes the vendor accounts' OAuth credentials, encrypted.
   - **`LLMPROXY_CREDENTIALS_KEY`**: keep it with your other secrets, not next to the dumps. A dump restored without it has everything but the vendor accounts, which must then be signed in again.
-  - **Lost or changed key:** the backend does not start while the database holds accounts the key cannot open; its log names the account. Put the new key in the compose file, delete the stored accounts, start the backend, and sign each account in again (**Admin → Providers → Add account**):
+  - **Lost or changed key:** the backend does not start while the database holds accounts the key cannot open; its log names the account. Put the new key in the compose file, delete the stored accounts, start the backend, and sign each account in again (**Admin → Providers → Add provider**):
 
     ```sh
     docker compose exec postgres psql -U llmproxy llmproxy -c 'DELETE FROM vendor_credentials;'
@@ -599,16 +610,29 @@ Checklist:
 
 ### Vendor accounts
 
-**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add account** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
+**Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add provider** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
+
+#### OpenAI-compatible providers
+
+**Add provider → OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
+
+- **Name**: the provider name in access rules (`<name>:*`). Latin letters (stored in lower case, so `DeepSeek` is `deepseek`), digits, `.`, `_` and `-`; it cannot be changed later, and names of built-in providers (`claude`, `chatgpt`, `gemini`, …) are refused.
+- **Base URL**: up to and including the API version, e.g. `https://api.example.com/v1`. Local and private addresses are allowed; model discovery refuses link-local ones (`169.254.0.0/16`, `fe80::/10`, where cloud metadata services answer).
+- **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it. A stored key is bound to its base URL: changing the base URL needs the key typed again (or removed), so a key never follows a provider to another host.
+- **Models**: **Discover models** asks the vendor (`GET <base URL>/models`, through `proxy-url` when set) and lets you pick which to serve, each optionally under an alias. A model can also be typed by hand. The list does not follow the vendor by itself: discover again and save to change it.
+- **Prefix** (optional): clients then request `<prefix>/<model>`.
+
+Two providers may serve the same model name, for example two keys of one vendor: requests to it are spread across them. Such a model is admitted only to users allowed it on **every** provider serving it (see [Access control](#access-control)); the form warns when a discovered model is already served by another provider. Give one of them a prefix or aliases to keep them apart instead. Set prices for their models in **Admin → Prices**.
 
 ### Gateway settings
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval, sticky sessions) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
 
+- **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
-- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel.
+- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**.
 - **`save-cooldown-status`, `request-log` and `error-logs-max-files`** have no effect: cooldowns stay in memory and CLIProxyAPI writes no request or error log files. A document may not add one of them or change its value. A document saved by an earlier release that still sets one keeps working, and the backend logs a warning for each at start: remove them when you next edit the settings. <!-- COMPAT(credentials-import): the next release refuses these keys in any document, like the owned keys above. -->
 
 ### Prices

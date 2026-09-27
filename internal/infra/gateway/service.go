@@ -85,6 +85,11 @@ type Params struct {
 	Observer gate.Observer
 	// Log receives the policy gate's own failures. Nil discards them.
 	Log *slog.Logger
+	// Stored is what Store listed at boot. New adds the openai-compatibility
+	// entry of every OpenAI-compatible provider among it to Config, so upstream
+	// registers their models on Run; Config's own entries stay the boot entries
+	// every applied configuration keeps.
+	Stored []*coreauth.Auth
 }
 
 // Gateway owns the embedded upstream service and the configuration pushed into it.
@@ -106,6 +111,16 @@ type Gateway struct {
 	// (AuthDir). Credentials are wherever Store keeps them; the gateway never
 	// resolves a path for one.
 	authDir string
+
+	// static are the boot configuration's own openai-compatibility entries;
+	// every applied configuration carries them, then one entry per held
+	// OpenAI-compatible provider (withCompat).
+	static []cliproxyconfig.OpenAICompatibility
+	// derived names, lower-cased, the OpenAI-compatible providers whose entries
+	// New added to the boot configuration (dropSynthesizedCompat).
+	derived map[string]struct{}
+	// discoverWait overrides discoverTimeout; tests shorten it.
+	discoverWait time.Duration
 
 	// pushMu serialises configuration pushes and account changes, so current
 	// always matches the last configuration upstream committed and an account
@@ -310,6 +325,12 @@ func New(params Params) (*Gateway, error) {
 		return nil, err
 	}
 
+	if params.Config == nil {
+		return nil, errNilConfig
+	}
+
+	static, derived := bootCompat(params.Config, params.Stored)
+
 	if err := admit(params.Config); err != nil {
 		return nil, err
 	}
@@ -330,9 +351,12 @@ func New(params Params) (*Gateway, error) {
 		access:   sdkaccess.NewManager(),
 		provider: NewAccessProvider(params.Resolver),
 		catalog:  catalog,
+		static:   static,
+		derived:  derived,
 		ready:    make(chan struct{}),
 		done:     make(chan struct{}),
 	}
+
 	if dir := strings.TrimSpace(params.Config.AuthDir); dir != "" {
 		abs, err := filepath.Abs(dir)
 		if err != nil {
@@ -367,7 +391,10 @@ func New(params Params) (*Gateway, error) {
 			// Run refreshes the access manager from the registry after
 			// building the server (service_plugins.go syncPluginRuntimeConfig)
 			// and serves before it creates the watcher; take it back first.
+			// Run has also synthesised keyless copies of the stored
+			// OpenAI-compatible providers from their entries; drop them.
 			OnBeforeStart: func(*cliproxyconfig.Config) {
+				gw.dropSynthesizedCompat(context.Background())
 				accessMu.Lock()
 				gw.claimAccess()
 				accessMu.Unlock()
@@ -547,12 +574,17 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 // its control panel forced off, websocket authentication forced on, and
 // cooldown files and request logging forced off (admit).
 func (g *Gateway) PushConfig(cfg *cliproxyconfig.Config) error {
-	if err := admit(cfg); err != nil {
-		return err
+	if cfg == nil {
+		return errNilConfig
 	}
 
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
+
+	cfg.OpenAICompatibility = g.withCompat(g.heldAuths())
+	if err := admit(cfg); err != nil {
+		return err
+	}
 
 	reload, err := g.reloadLocked()
 	if err != nil {
@@ -610,62 +642,7 @@ func (g *Gateway) AddAccount(ctx context.Context, auth *coreauth.Auth) (*coreaut
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
 
-	if g.coreAuth == nil {
-		return nil, ErrNoCoreAuth
-	}
-
-	if g.store == nil {
-		return nil, ErrNoTokenStore
-	}
-
-	reload, err := g.reloadLocked()
-	if err != nil {
-		return nil, err
-	}
-
-	if auth.Storage != nil && auth.Metadata == nil {
-		auth.Metadata = make(map[string]any) // as Save does
-	}
-
-	if !storeHolds(auth) {
-		stored, err := g.coreAuth.Register(ctx, auth)
-		if err != nil {
-			return nil, fmt.Errorf("gateway: register account: %w", err)
-		}
-
-		g.reapplyLocked(reload)
-
-		return stored, nil
-	}
-
-	key := credentialKey(auth)
-	if key == "" {
-		auth.ID = uuid.NewString()
-		key = auth.ID
-	}
-
-	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
-		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
-	}
-
-	stored, err := g.loadLocked(ctx, key)
-	if err == nil {
-		stored, err = g.coreAuth.Register(ctx, stored)
-	}
-
-	if err != nil {
-		if errWithdraw := g.withdrawLocked(ctx, reload, key); errWithdraw != nil {
-			return nil, fmt.Errorf("gateway: account %q was saved but not added, "+
-				"and its credential %q could not be withdrawn (retry RemoveAccount): %w",
-				auth.ID, key, errors.Join(err, errWithdraw))
-		}
-
-		return nil, fmt.Errorf("gateway: account %q was saved but not added, so its credential was withdrawn: %w", auth.ID, err)
-	}
-
-	g.reapplyLocked(reload)
-
-	return stored, nil
+	return g.addLocked(ctx, auth)
 }
 
 // SetAccountDisabled disables or re-enables account id and re-applies the
@@ -768,7 +745,8 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 
 // VendorAccount is auth as the admin API shows it, for Accounts and
 // gateway/login. Email is the one metadata field read; tokens, attributes and
-// storage never leave the gateway.
+// storage never leave the gateway. An OpenAI-compatible provider goes by its
+// own name and carries its definition, never its key.
 func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 	account := app.VendorAccount{
 		ID:              auth.ID,
@@ -784,6 +762,11 @@ func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 
 	if auth.LastError != nil {
 		account.LastError = auth.LastError.Message
+	}
+
+	if isCompatAccount(auth) {
+		account.Compat = compatDetails(auth)
+		account.Provider = account.Compat.Name
 	}
 
 	return account
@@ -931,6 +914,66 @@ func (g *Gateway) configureEngine(e *gin.Engine) {
 	g.engine.Store(e)
 }
 
+// addLocked is AddAccount under pushMu.
+func (g *Gateway) addLocked(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
+	if g.coreAuth == nil {
+		return nil, ErrNoCoreAuth
+	}
+
+	if g.store == nil {
+		return nil, ErrNoTokenStore
+	}
+
+	reload, err := g.reloadLocked()
+	if err != nil {
+		return nil, err
+	}
+
+	if auth.Storage != nil && auth.Metadata == nil {
+		auth.Metadata = make(map[string]any) // as Save does
+	}
+
+	if !storeHolds(auth) {
+		stored, err := g.coreAuth.Register(ctx, auth)
+		if err != nil {
+			return nil, fmt.Errorf("gateway: register account: %w", err)
+		}
+
+		g.reapplyLocked(reload)
+
+		return stored, nil
+	}
+
+	key := credentialKey(auth)
+	if key == "" {
+		auth.ID = uuid.NewString()
+		key = auth.ID
+	}
+
+	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
+		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
+	}
+
+	stored, err := g.loadLocked(ctx, key)
+	if err == nil {
+		stored, err = g.coreAuth.Register(ctx, stored)
+	}
+
+	if err != nil {
+		if errWithdraw := g.withdrawLocked(ctx, reload, key); errWithdraw != nil {
+			return nil, fmt.Errorf("gateway: account %q was saved but not added, "+
+				"and its credential %q could not be withdrawn (retry RemoveAccount): %w",
+				auth.ID, key, errors.Join(err, errWithdraw))
+		}
+
+		return nil, fmt.Errorf("gateway: account %q was saved but not added, so its credential was withdrawn: %w", auth.ID, err)
+	}
+
+	g.reapplyLocked(reload)
+
+	return stored, nil
+}
+
 // reloadLocked returns upstream's reload callback, or ErrNotRunning unless Run
 // has installed the watcher and not yet returned. The caller holds pushMu.
 func (g *Gateway) reloadLocked() (func(*cliproxyconfig.Config), error) {
@@ -978,9 +1021,26 @@ func (g *Gateway) accountLocked(id string) (func(*cliproxyconfig.Config), *corea
 // holds (sdk/cliproxy/service_config.go applyConfigRuntime →
 // service_plugins.go syncPluginModelRuntime) and unregisters the models of a
 // disabled one; nothing else does so under the hollow watcher, which drops the
-// account update queue upstream would otherwise use. The caller holds pushMu.
+// account update queue upstream would otherwise use. The configuration applied
+// is a copy of the current one with the openai-compatibility entries the held
+// accounts call for (withCompat), which becomes the current one. The caller
+// holds pushMu.
 func (g *Gateway) reapplyLocked(reload func(*cliproxyconfig.Config)) {
-	g.apply(reload, g.CurrentConfig())
+	next := g.CurrentConfig().CloneForRuntime()
+	next.OpenAICompatibility = g.withCompat(g.heldAuths())
+
+	if err := admit(next); err != nil {
+		// Only held accounts changed the entries, and each was admitted by
+		// name when it was added: the current configuration still stands.
+		g.apply(reload, g.CurrentConfig())
+
+		return
+	}
+
+	g.apply(reload, next)
+	g.mu.Lock()
+	g.current = next
+	g.mu.Unlock()
 }
 
 // loadLocked returns the account the token store loads under key, as boot

@@ -448,8 +448,55 @@ func TestSettingsFieldPatchKeepsTheRestOfTheDocument(t *testing.T) {
 		assert.Contains(t, persisted, want, "persisted document")
 	}
 
-	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20}, res.Settings.Fields)
+	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 5, MaxRetryInterval: 20, SessionAffinity: true}, res.Settings.Fields)
 	require.NotContains(t, res.Diff, "request-log", "diff shows an untouched key")
+}
+
+// TestSessionAffinityIsOnUntilTurnedOff: a document that does not set
+// routing.session-affinity runs session-sticky; the field patch writes an
+// explicit false next to the rest of routing, and that false survives a
+// restart instead of reading as "unset" again.
+func TestSessionAffinityIsOnUntilTurnedOff(t *testing.T) {
+	stored := "routing:\n  strategy: fill-first\nrequest-retry: 1\n"
+	fixture := newSettingsFixture(t, stored)
+	require.True(t, fixture.running.Routing.SessionAffinity, "a document without the key boots session-sticky")
+
+	admin := newAdmin()
+	off := false
+
+	var (
+		persisted string
+		pushed    *sdkconfig.Config
+	)
+
+	fixture.repo.EXPECT().UpstreamDocument(mock.Anything).Return(stored, nil)
+	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+	fixture.gateway.EXPECT().PushConfig(mock.Anything).RunAndReturn(func(cfg *sdkconfig.Config) error {
+		pushed = cfg
+
+		return nil
+	})
+	fixture.repo.EXPECT().SetUpstreamDocument(mock.Anything, mock.Anything, admin.ID, settingsNow).RunAndReturn(
+		func(_ context.Context, doc string, _ uuid.UUID, _ time.Time) error {
+			persisted = doc
+
+			return nil
+		})
+	fixture.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil)
+
+	res, err := fixture.svc.Update(context.Background(), admin, settings.Update{Fields: &settings.Patch{SessionAffinity: &off}})
+	require.NoError(t, err, "Update")
+	require.False(t, res.Settings.Fields.SessionAffinity)
+	require.False(t, pushed.Routing.SessionAffinity, "pushed session-sticky")
+	require.Equal(t, "fill-first", pushed.Routing.Strategy, "the rest of routing was lost")
+	assert.Contains(t, persisted, "session-affinity: false")
+
+	restart := mocks.NewSettingsRepo(t)
+	restart.EXPECT().UpstreamDocument(mock.Anything).Return(persisted, nil)
+
+	booted, err := settings.LoadBootConfig(context.Background(), restart, ownedDefaults(), mocks.NewLogger(t))
+	require.NoError(t, err)
+	require.False(t, booted.Routing.SessionAffinity, "the administrator's off read as unset after a restart")
 }
 
 // TestSettingsDiffOmitsUnchangedInertKeys: the running configuration reports
@@ -572,7 +619,7 @@ func TestSettingsGet(t *testing.T) {
 	got, err := fixture.svc.Get(context.Background(), newAdmin())
 	require.NoError(t, err, "Get")
 	require.Equal(t, stored, got.YAML, "Get YAML")
-	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4}, got.Fields, "Get fields")
+	require.Equal(t, settings.Fields{ProxyURL: "http://proxy.test:3128", RequestRetry: 4, SessionAffinity: true}, got.Fields, "Get fields")
 
 	_, err = fixture.svc.Get(context.Background(), identity.User{})
 	require.ErrorIs(t, err, app.ErrForbidden, "Get by nobody")

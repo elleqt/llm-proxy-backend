@@ -133,15 +133,14 @@ func TestCompatNamesOfBuiltinProvidersAreRefused(t *testing.T) {
 		})
 	}
 
+	// A pushed list never runs: the gateway owns openai-compatibility and
+	// replaces it with the boot entries and the held providers' (withCompat).
 	srv := start(t, &cliproxyconfig.Config{})
-	before := srv.gateway.CurrentConfig()
 	pushed := srv.emptyPush()
 
 	pushed.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{{Name: "claude", BaseURL: "http://" + net.JoinHostPort("", "1")}}
-	err := srv.gateway.PushConfig(pushed)
-	require.ErrorIs(t, err, ErrCompatName, "PushConfig with an entry named claude")
-
-	require.Same(t, before, srv.gateway.CurrentConfig(), "CurrentConfig reports the refused configuration")
+	require.NoError(t, srv.gateway.PushConfig(pushed), "PushConfig with an entry named claude")
+	require.Empty(t, srv.gateway.CurrentConfig().OpenAICompatibility, "the pushed entry named claude runs")
 }
 
 // TestCatalogListsModelsByProvider: Models groups what the registry serves

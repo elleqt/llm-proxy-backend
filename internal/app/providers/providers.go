@@ -1,5 +1,6 @@
 // Package providers is the administrator's view of the gateway's vendor accounts:
-// the list with quota signals, the login wizard, disabling and removal.
+// the list with quota signals, the login wizard, OpenAI-compatible providers,
+// disabling and removal.
 package providers
 
 import (
@@ -27,6 +28,7 @@ import (
 type Service struct {
 	accounts app.VendorAccounts
 	logins   app.VendorLogins
+	catalog  app.ModelCatalog
 	quota    app.VendorQuota
 	metrics  app.AccountMetrics
 	audit    app.AuditSink
@@ -41,10 +43,13 @@ const (
 )
 
 func New(
-	accounts app.VendorAccounts, logins app.VendorLogins, quota app.VendorQuota, metrics app.AccountMetrics, audit app.AuditSink,
-	clock app.Clock, logger app.Logger,
+	accounts app.VendorAccounts, logins app.VendorLogins, catalog app.ModelCatalog, quota app.VendorQuota,
+	metrics app.AccountMetrics, audit app.AuditSink, clock app.Clock, logger app.Logger,
 ) *Service {
-	return &Service{accounts: accounts, logins: logins, quota: quota, metrics: metrics, audit: audit, clock: clock, logger: logger}
+	return &Service{
+		accounts: accounts, logins: logins, catalog: catalog, quota: quota, metrics: metrics, audit: audit,
+		clock: clock, logger: logger,
+	}
 }
 
 // List returns every account the gateway holds with the latest quota windows

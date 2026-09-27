@@ -526,6 +526,10 @@ func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, er
 
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 
+	if isCompatAccount(auth) {
+		applyCompatAttributes(auth)
+	}
+
 	return auth, nil
 }
 

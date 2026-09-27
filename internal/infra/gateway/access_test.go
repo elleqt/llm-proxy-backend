@@ -277,11 +277,7 @@ func TestPushConfigRejectsWhatUpstreamWouldDrop(t *testing.T) {
 	tooHeavy := 1_000_001
 	rejected := srv.emptyPush()
 
-	rejected.OpenAICompatibility = []cliproxyconfig.OpenAICompatibility{{
-		Name:          "overweight",
-		BaseURL:       "http://" + net.JoinHostPort("", "1"),
-		APIKeyEntries: []cliproxyconfig.OpenAICompatibilityAPIKey{{APIKey: "k", Weight: &tooHeavy}},
-	}}
+	rejected.ClaudeKey = []cliproxyconfig.ClaudeKey{{APIKey: "k", Weight: &tooHeavy}}
 	require.Error(t, srv.gateway.PushConfig(rejected), "PushConfig accepted a configuration with an out-of-range credential weight")
 	require.Same(t, accepted, srv.gateway.CurrentConfig(), "CurrentConfig reports the rejected configuration")
 

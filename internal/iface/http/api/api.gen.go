@@ -245,6 +245,69 @@ type Catalog struct {
 	} `json:"providers"`
 }
 
+// CompatDiscoverRequest defines model for CompatDiscoverRequest.
+type CompatDiscoverRequest struct {
+	// AccountId An existing provider whose stored key is used when `apiKey` is absent.
+	AccountId *string `json:"accountId,omitempty"`
+	ApiKey    *string `json:"apiKey,omitempty"`
+	BaseURL   string  `json:"baseURL"`
+}
+
+// CompatDiscoverResult defines model for CompatDiscoverResult.
+type CompatDiscoverResult struct {
+	// Conflicts Per discovered model another provider already serves, those providers. A pooled model is admitted only to users granted it on every provider serving it.
+	Conflicts map[string][]string `json:"conflicts"`
+	Models    []string            `json:"models"`
+}
+
+// CompatModel defines model for CompatModel.
+type CompatModel struct {
+	// Alias The name clients request it by; absent serves it as `name`.
+	Alias *string `json:"alias,omitempty"`
+
+	// Name The model as the vendor names it.
+	Name string `json:"name"`
+}
+
+// CompatProviderDetails defines model for CompatProviderDetails.
+type CompatProviderDetails struct {
+	BaseURL string `json:"baseURL"`
+
+	// HasApiKey Whether a key is stored. The key itself is never returned.
+	HasApiKey bool          `json:"hasApiKey"`
+	Models    []CompatModel `json:"models"`
+	Name      string        `json:"name"`
+	Prefix    *string       `json:"prefix,omitempty"`
+}
+
+// CompatProviderRequest defines model for CompatProviderRequest.
+type CompatProviderRequest struct {
+	// ApiKey Optional; a local vendor may need none.
+	ApiKey *string `json:"apiKey,omitempty"`
+
+	// BaseURL Examples: https://api.example.com/v1
+	BaseURL string        `json:"baseURL"`
+	Models  []CompatModel `json:"models"`
+
+	// Name The policy provider name; immutable. Stored in lower case (upstream matches names case-insensitively), then it must match `^[a-z0-9][a-z0-9._-]{0,62}$`.
+	Name string `json:"name"`
+
+	// Prefix Optional model prefix: clients request `prefix/model`.
+	Prefix *string `json:"prefix,omitempty"`
+}
+
+// CompatProviderUpdate defines model for CompatProviderUpdate.
+type CompatProviderUpdate struct {
+	// ApiKey A new key. Absent keeps the stored one, but only at the same `baseURL`: a changed `baseURL` with a stored key and neither `apiKey` nor `clearApiKey` is `invalid_input` on `apiKey`, so a stored key never follows the provider to another host.
+	ApiKey  *string `json:"apiKey,omitempty"`
+	BaseURL string  `json:"baseURL"`
+
+	// ClearApiKey Remove the stored key. Ignored when `apiKey` is set.
+	ClearApiKey *bool         `json:"clearApiKey,omitempty"`
+	Models      []CompatModel `json:"models"`
+	Prefix      *string       `json:"prefix,omitempty"`
+}
+
 // ConnectInfo defines model for ConnectInfo.
 type ConnectInfo struct {
 	// ApiBaseURL Public base URL of the proxied API, without a trailing slash.
@@ -456,12 +519,14 @@ type PriceRates struct {
 
 // ProviderAccount defines model for ProviderAccount.
 type ProviderAccount struct {
-	Disabled        bool       `json:"disabled"`
-	Email           *string    `json:"email,omitempty"`
-	Id              string     `json:"id"`
-	Label           *string    `json:"label,omitempty"`
-	LastError       *string    `json:"lastError,omitempty"`
-	LastRefreshedAt *time.Time `json:"lastRefreshedAt,omitempty"`
+	// Compat Present for an OpenAI-compatible provider only.
+	Compat          *CompatProviderDetails `json:"compat,omitempty"`
+	Disabled        bool                   `json:"disabled"`
+	Email           *string                `json:"email,omitempty"`
+	Id              string                 `json:"id"`
+	Label           *string                `json:"label,omitempty"`
+	LastError       *string                `json:"lastError,omitempty"`
+	LastRefreshedAt *time.Time             `json:"lastRefreshedAt,omitempty"`
 
 	// Provider Policy-facing provider name.
 	Provider string `json:"provider"`
@@ -514,6 +579,9 @@ type Settings struct {
 		MaxRetryInterval *int    `json:"maxRetryInterval,omitempty"`
 		ProxyURL         *string `json:"proxyURL,omitempty"`
 		RequestRetry     *int    `json:"requestRetry,omitempty"`
+
+		// SessionAffinity Session-sticky routing (routing.session-affinity): a conversation stays on one vendor account. On unless the document turns it off. Applies to every provider.
+		SessionAffinity *bool `json:"sessionAffinity,omitempty"`
 	} `json:"fields"`
 
 	// Yaml The editable part of the upstream configuration as YAML. Fields the gateway owns (listen address, auth directory, management, config API keys) are absent and cannot be set.
@@ -529,6 +597,7 @@ type SettingsUpdateRequest struct {
 		MaxRetryInterval *int    `json:"maxRetryInterval,omitempty"`
 		ProxyURL         *string `json:"proxyURL,omitempty"`
 		RequestRetry     *int    `json:"requestRetry,omitempty"`
+		SessionAffinity  *bool   `json:"sessionAffinity,omitempty"`
 	} `json:"fields,omitempty"`
 
 	// Yaml Replaces the whole editable document. Mutually exclusive with `fields`.
@@ -663,6 +732,15 @@ type PreviewPolicyJSONRequestBody = PolicyPreviewRequest
 
 // ReplacePricesJSONRequestBody defines body for ReplacePrices for application/json ContentType.
 type ReplacePricesJSONRequestBody = ReplacePricesJSONBody
+
+// CreateCompatProviderJSONRequestBody defines body for CreateCompatProvider for application/json ContentType.
+type CreateCompatProviderJSONRequestBody = CompatProviderRequest
+
+// DiscoverCompatModelsJSONRequestBody defines body for DiscoverCompatModels for application/json ContentType.
+type DiscoverCompatModelsJSONRequestBody = CompatDiscoverRequest
+
+// UpdateCompatProviderJSONRequestBody defines body for UpdateCompatProvider for application/json ContentType.
+type UpdateCompatProviderJSONRequestBody = CompatProviderUpdate
 
 // CompleteProviderLoginJSONRequestBody defines body for CompleteProviderLogin for application/json ContentType.
 type CompleteProviderLoginJSONRequestBody = ProviderLoginCompleteRequest

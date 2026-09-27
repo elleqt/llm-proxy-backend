@@ -248,8 +248,10 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 
 	// Upstream loads the store itself but only warns when that fails, so a wrong
 	// LLMPROXY_CREDENTIALS_KEY would serve with no vendor accounts. One List here
-	// stops the boot instead, naming the account the key cannot open.
-	if _, err := store.List(ctx); err != nil {
+	// stops the boot instead, naming the account the key cannot open. The
+	// gateway derives the stored OpenAI-compatible providers' entries from it.
+	stored, err := store.List(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("vendor credentials: %w", err)
 	}
 
@@ -269,6 +271,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		// The gate's 401s and refusals are counted, a denial under its owner.
 		Observer: gateMetrics{meters},
 		Log:      logger,
+		Stored:   stored,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
@@ -321,7 +324,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Prices:   priceList,
 		// Removing an account forgets its quota snapshot in the sink and its
 		// series in these metrics (providers.Service.Remove).
-		Providers:    providers.New(gw, logins, sink, meters, audit, clock, logs),
+		Providers:    providers.New(gw, logins, gw.Catalog(), sink, meters, audit, clock, logs),
 		Clock:        clock,
 		Log:          logs,
 		PublicAPIURL: cfg.Web.PublicAPIURL,

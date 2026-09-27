@@ -47,6 +47,9 @@ const (
 	codeLoginFailed         = "login_failed"
 	codeTokenLimit          = "token_limit"
 	codeCatalogDisabled     = "catalog_disabled"
+	codeConflict            = "conflict"
+	codeProviderUnreachable = "provider_unreachable"
+	codeProviderAuthFailed  = "provider_auth_failed"
 )
 
 // appRefusals is how the administration API answers every refusal its application
@@ -86,6 +89,8 @@ var appRefusals = []struct {
 	{app.ErrLoginFailed, http.StatusUnprocessableEntity, codeLoginFailed, "", "the vendor sign-in was not accepted"},
 	{app.ErrTokenLimit, http.StatusConflict, codeTokenLimit, "", tokenLimitMessage},
 	{app.ErrCatalogDisabled, http.StatusConflict, codeCatalogDisabled, "", "no price catalog source is configured"},
+	{app.ErrProviderUnreachable, http.StatusBadGateway, codeProviderUnreachable, "", "the provider's model list could not be read"},
+	{app.ErrProviderAuthFailed, http.StatusUnprocessableEntity, codeProviderAuthFailed, "apiKey", "the provider refused the api key"},
 }
 
 // tokenLimitMessage explains token_limit on both routes that issue tokens.

@@ -45,7 +45,10 @@ func (rt *router) updateSettings(rw http.ResponseWriter, req *http.Request) {
 
 	update := settings.Update{YAML: body.Yaml, DryRun: body.DryRun != nil && *body.DryRun}
 	if f := body.Fields; f != nil {
-		update.Fields = &settings.Patch{ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval}
+		update.Fields = &settings.Patch{
+			ProxyURL: f.ProxyURL, RequestRetry: f.RequestRetry, MaxRetryInterval: f.MaxRetryInterval,
+			SessionAffinity: f.SessionAffinity,
+		}
 	}
 
 	res, err := rt.Settings.Update(req.Context(), actor.user, update)
@@ -64,6 +67,7 @@ func settingsOf(v settings.View) api.Settings {
 	out.Fields.ProxyURL = &f.ProxyURL
 	out.Fields.RequestRetry = &f.RequestRetry
 	out.Fields.MaxRetryInterval = &f.MaxRetryInterval
+	out.Fields.SessionAffinity = &f.SessionAffinity
 
 	return out
 }
