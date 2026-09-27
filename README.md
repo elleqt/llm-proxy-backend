@@ -2,13 +2,14 @@
 
 [![backend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-backend?sort=semver&label=backend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-backend) [![frontend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-frontend?sort=semver&label=frontend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) [![ci](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml)
 
-A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
+A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions, and any OpenAI-compatible API, through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
 
 > **llm-proxy is one system in two repositories:** [llm-proxy-backend](https://github.com/elleqt/llm-proxy-backend) — the gateway, web API and metrics (start here to run it) · [llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend) — the web interface: cabinet and admin panel.
 
 ## Contents
 
 - [What it is / why](#what-it-is--why)
+- [Supported providers](#supported-providers)
 - [Screenshots](#screenshots)
 - [How it works](#how-it-works)
 - [Quick start](#quick-start)
@@ -44,6 +45,16 @@ A plain CLIProxyAPI setup keeps API keys and access in one config file. Everythi
 | Nobody knows who changed what | Admin actions are written to an audit log |
 
 Clients: Claude Code, [omp](https://github.com/can1357/oh-my-pi), any OpenAI-compatible client, and Codex-style clients (`/backend-api/codex/responses`).
+
+## Supported providers
+
+| Provider | How it is added | Name in access rules |
+|---|---|---|
+| Claude (Pro/Max subscription) | Browser sign-in wizard ([Quick start](#7-add-a-vendor-account)) | `claude` |
+| ChatGPT (Plus/Pro subscription, Codex backend) | Browser sign-in wizard | `chatgpt` |
+| Any OpenAI-compatible API: a hosted vendor, a router, a local Ollama or vLLM | Base URL, optional API key and models in the admin panel ([details](#openai-compatible-providers)) | the name you give it |
+
+Each kind can be added as many times as needed: several subscription accounts, several OpenAI-compatible providers. OpenAI-compatible providers are tested end to end against [DeepSeek](https://api-docs.deepseek.com/) (model discovery, chat, streaming, and the Anthropic `/v1/messages` route translated to it); other vendors that speak the same `/models` and `/chat/completions` API are expected to work the same way.
 
 ## Screenshots
 
