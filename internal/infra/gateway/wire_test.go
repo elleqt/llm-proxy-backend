@@ -38,8 +38,7 @@ type onTheWire struct {
 // openai-compatibility provider. Access is by user token: the gateway admits
 // wireSecret unless the caller's Params carry another Resolver.
 //
-// The entry is in the boot configuration, not a pushed one, for two reasons
-// verified against upstream v7.3.20:
+// The entry is in the boot configuration, not a pushed one, for two reasons:
 //   - upstream synthesises credentials from configuration on Run and on its own
 //     file watcher's reload, never on the reload callback PushConfig drives
 //     (sdk/cliproxy/service_config.go: applyWatcherConfigUpdate passes

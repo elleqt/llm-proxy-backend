@@ -20,8 +20,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// These tests pin upstream behaviour the account methods depend on, measured
-// against v7.3.20: an upgrade that changes it must fail here.
+// These tests pin upstream behaviour the account methods depend on: an
+// upgrade that changes it must fail here.
 
 // claudeGrant is a Claude OAuth account. Claude models come from upstream's
 // static catalogue, so registering one needs no network; the token is valid
@@ -72,7 +72,7 @@ func startProduction(t *testing.T) (*running, *coreauth.Manager) {
 // startBooted is startWith for a test that changes accounts straight after
 // the gateway starts. Upstream goes on booting after the watcher exists:
 // it hands the watcher the configuration and then registers the models of
-// every account the manager holds (service_lifecycle.go:196-205,
+// every account the manager holds (service_lifecycle.go Service.Run,
 // syncPluginModelRuntime), reading the service configuration without its
 // lock, and reports nowhere when it is done. An account change re-applies the
 // configuration under the lock and would race it, and an account registered
@@ -504,9 +504,9 @@ func TestAccountsListsUnderPolicyNames(t *testing.T) {
 // TestNewRefusesAManagementEnvironment: MANAGEMENT_PASSWORD enables every
 // /v0/management route whatever the configuration says.
 func TestNewRefusesAManagementEnvironment(t *testing.T) {
-	// Every variable found in upstream v7.3.20 that enables management; listed
-	// here rather than read from managementEnv, so dropping one from the guard
-	// fails the test.
+	// Every variable upstream reads to enable management; listed here rather
+	// than read from managementEnv, so dropping one from the guard fails the
+	// test.
 	for _, name := range []string{"MANAGEMENT_PASSWORD"} {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv(name, "operator-secret")
@@ -542,8 +542,8 @@ func TestRunRefusesAManagementEnvironment(t *testing.T) {
 	require.ErrorIs(t, gw.WaitReload(ctx), ErrManagementEnv, "WaitReload after the refused Run")
 }
 
-// claudeBaselineUserAgent is the Claude CLI identity upstream v7.3.20 presents
-// for a Claude OAuth account when the client is not Claude Code itself
+// claudeBaselineUserAgent is the Claude CLI identity upstream presents for a
+// Claude OAuth account when the client is not Claude Code itself
 // (internal/runtime/executor/helps/claude_device_profile.go
 // defaultClaudeFingerprintUserAgent). Before v7.3.15 the baseline was older
 // than the vendor accepts, and only a claude-header-defaults user-agent in the

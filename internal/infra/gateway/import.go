@@ -192,7 +192,7 @@ func credentialFiles(authDir string) ([]importFile, error) {
 
 // fileStoreID is the id upstream's file store gives the account in the file
 // at path under authDir: the path relative to authDir, lower-cased on Windows
-// (FileTokenStore.idFor, sdk/auth/filestore.go:403-415, unexported).
+// (FileTokenStore.idFor in sdk/auth/filestore.go, unexported).
 //
 // COMPAT(credentials-import): part of the one-shot import; remove next release (RELEASING.md).
 func fileStoreID(authDir, path string) string {
@@ -211,7 +211,7 @@ func fileStoreID(authDir, path string) string {
 
 // geminiFile reports whether the file at path is JSON whose type is gemini:
 // the one kind of credential upstream's file store skips on purpose
-// (sdk/auth/filestore.go:246-250).
+// (sdk/auth/filestore.go FileTokenStore.readAuthFiles).
 //
 // COMPAT(credentials-import): part of the one-shot import; remove next release (RELEASING.md).
 func geminiFile(path string) bool {

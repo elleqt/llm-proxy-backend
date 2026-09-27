@@ -232,7 +232,7 @@ func TestThePlaceholderCredentialsKeyServesWithAWarning(t *testing.T) {
 }
 
 // catalogueHost is where upstream's model catalogue updaters fetch from first
-// (internal/registry model_updater.go modelsURLs, v7.3.20), as a CONNECT asks
+// (internal/registry model_updater.go modelsURLs), as a CONNECT asks
 // for it.
 const catalogueHost = "raw.githubusercontent.com:443"
 

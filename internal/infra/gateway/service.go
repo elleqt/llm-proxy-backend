@@ -187,7 +187,7 @@ var errNilAccount = errors.New("gateway: nil account")
 var errCredentialNotLoaded = errors.New("the token store does not load the saved credential")
 
 // managementEnv lists every environment variable the embedded upstream code
-// reads to enable /v0/management. Upstream v7.3.20 reads exactly one:
+// reads to enable /v0/management. Upstream reads exactly one:
 // MANAGEMENT_PASSWORD, in internal/api/server.go NewServer (route registration
 // on a non-blank value) and internal/api/handlers/management/handler.go
 // NewHandler (accepted as the management secret). Both trim whitespace, so a
@@ -233,7 +233,7 @@ func checkManagementEnv() error {
 // With SaveCooldownStatus set, upstream persists cooldown state through the
 // token store's cooldown store and, for a store that provides none — the
 // credential store does not — through a file store it creates in the auth
-// directory (sdk/cliproxy/service_auth.go:566-581 resolveCooldownStateStore).
+// directory (sdk/cliproxy/service_auth.go resolveCooldownStateStore).
 // Forced off, cooldown lives in memory only.
 //
 // With RequestLog set, upstream's handlers buffer failed requests' error
@@ -425,7 +425,7 @@ func noRequestLogger(*cliproxyconfig.Config, string) sdklogging.RequestLogger { 
 
 // NewCoreAuthManager builds the core auth manager for the boot configuration
 // cfg over store, the way the upstream builder builds its own
-// (sdk/cliproxy/builder.go:253-266): when store provides a cooldown store
+// (sdk/cliproxy/builder.go Builder.Build): when store provides a cooldown store
 // (coreauth.CooldownStateStoreProvider) it is returned, nil otherwise. The
 // caller points store at its backend; the manager only persists to it. Pass
 // store as Params.Store, the cooldown store as Params.Cooldown and cfg as
@@ -446,7 +446,7 @@ func NewCoreAuthManager(cfg *cliproxyconfig.Config, store coreauth.Store) (*core
 
 // routingSelector is the selector upstream builds for cfg's routing settings
 // (sdk/cliproxy/service_config.go normalizedRoutingRuntimeState and
-// newRoutingSelector, both unexported in v7.3.20): the strategy by its accepted
+// newRoutingSelector, both unexported): the strategy by its accepted
 // spellings, round-robin otherwise, wrapped in session affinity when that is on.
 // Upstream replaces it with its own on the first configuration it applies.
 func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
@@ -847,10 +847,10 @@ func (g *Gateway) CurrentConfig() *cliproxyconfig.Config {
 // watcher on an unusable auth directory or a provider load error — WaitReload
 // returns Run's error instead of waiting for ctx.
 //
-// It does not make a push race-free. Upstream creates the watcher
-// (sdk/cliproxy/service_lifecycle.go:187) before Run finishes booting: it then
-// registers models for every account it holds (syncPluginModelRuntime, :205),
-// and those registration workers read the service configuration without its
+// It does not make a push race-free. Upstream creates the watcher (Service.Run
+// in sdk/cliproxy/service_lifecycle.go) before Run finishes booting: it then
+// registers models for every account it holds (syncPluginModelRuntime), and
+// those registration workers read the service configuration without its
 // lock, while a push writes it under the lock. Nothing on the SDK surface
 // reports that boot has finished. The contract is therefore: production builds
 // the boot configuration before New, and neither pushes nor changes accounts

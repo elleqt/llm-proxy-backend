@@ -65,7 +65,7 @@ type tokenFileWriter interface {
 
 // metadataSetter is the optional interface through which FileTokenStore.Save
 // hands a login record's metadata to its storage before the write
-// (sdk/auth/filestore.go:108-121, v7.3.20).
+// (sdk/auth/filestore.go).
 type metadataSetter interface {
 	SetMetadata(metadata map[string]any)
 }
@@ -476,11 +476,11 @@ func stampCredential(auth *coreauth.Auth, key string) {
 }
 
 // authFromRow rebuilds a stored account as FileTokenStore.readAuthFiles
-// rebuilds one from its file (non-plugin branch, sdk/auth/filestore.go:312-361,
-// v7.3.20): the row's id where the file's relative path was, Postgres as the
-// source, the row's timestamps where the file's mtime was. No path
-// attribute: upstream reads it only as a cache key in executors this
-// gateway does not route to and in the file watcher, which is hollow here.
+// rebuilds one from its file (sdk/auth/filestore.go, non-plugin branch): the
+// row's id where the file's relative path was, Postgres as the source, the
+// row's timestamps where the file's mtime was. No path attribute: upstream
+// reads it only as a cache key in executors this gateway does not route to
+// and in the file watcher, which is hollow here.
 func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, error) {
 	metadata := make(map[string]any)
 	if err := json.Unmarshal(plaintext, &metadata); err != nil {

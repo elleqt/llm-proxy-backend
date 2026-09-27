@@ -141,7 +141,7 @@ func startWith(t *testing.T, params gateway.Params) *running {
 }
 
 // watcherStarted is what upstream logs right after handing the watcher its
-// configuration (service_lifecycle.go:204).
+// configuration (service_lifecycle.go Service.Run).
 const watcherStarted = "file watcher started for config and auth directory changes"
 
 // watchWatcherStarted returns a channel closed when upstream next logs
