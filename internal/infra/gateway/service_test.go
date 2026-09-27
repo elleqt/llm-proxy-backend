@@ -99,10 +99,10 @@ func startWith(t *testing.T, params Params) *running {
 	err = gw.WaitReload(waitCtx)
 	require.NoError(t, err, "watcher was never created")
 	// WaitReload returns as the watcher is created; Run then reads the
-	// service configuration unlocked to hand it to the watcher
-	// (service_lifecycle.go:196), and a push writing it would race that read
-	// however much later it came, with nothing ordering the two. Its next
-	// step logs, which orders everything before it ahead of a push.
+	// service configuration unlocked to hand it to the watcher (service_lifecycle.go
+	// Service.Run), and a push writing it would race that read however much
+	// later it came, with nothing ordering the two. Its next step logs, which
+	// orders everything before it ahead of a push.
 	select {
 	case <-booted:
 	case <-waitCtx.Done():
@@ -121,7 +121,7 @@ func startWith(t *testing.T, params Params) *running {
 }
 
 // watcherStarted is what upstream logs right after handing the watcher its
-// configuration (service_lifecycle.go:204).
+// configuration (service_lifecycle.go Service.Run).
 const watcherStarted = "file watcher started for config and auth directory changes"
 
 // watchWatcherStarted returns a channel closed when upstream next logs

@@ -28,13 +28,13 @@ import (
 // the running value is carried over from the configuration that owns it:
 //
 //   - host, port, tls: the proxied listener, fixed at boot behind the reverse proxy.
-//   - trusted-proxies (upstream v7.3.18): whose forwarded headers that listener
-//     believes for a client's address. Upstream applies it only when it builds
-//     its server (internal/api/server.go NewServer), never on a push, so an edit
-//     would be stored without running; and it uses the address only in its own
-//     logs — the gateway's rate limits and audit key on the web listener's
-//     X-Real-IP. It stays at upstream's default, an empty list, which believes
-//     no forwarded header.
+//   - trusted-proxies: whose forwarded headers that listener believes for a
+//     client's address. Upstream applies it only when it builds its server
+//     (internal/api/server.go NewServer), never on a push, so an edit would be
+//     stored without running; and it uses the address only in its own logs —
+//     the gateway's rate limits and audit key on the web listener's X-Real-IP.
+//     It stays at upstream's default, an empty list, which believes no
+//     forwarded header.
 //   - pprof, discovery: upstream applies both on every reload, starting an
 //     unauthenticated pprof server or mDNS advertising — listeners outside the
 //     deployment's three.

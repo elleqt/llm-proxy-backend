@@ -91,7 +91,7 @@ The full variable reference is in `internal/config/config.go` and the README.
 - **Unique violations** become `app.ErrConflict` through `postgres.AsConflict()`, so callers never import pgx.
 - **Time** always goes through `app.Clock`. The app layer logs through `app.Logger`, which takes `slog.Attr` values only (`slog.Any("err", err)`), never loose key/value pairs. Boot bridges upstream's logrus into the same slog handler (`internal/boot/logging.go`); logrus is there only for upstream.
 - **Config** is env-only with the `LLMPROXY_` prefix and fails fast in `config.Load()`. Errors name the variable and never echo its value. Secrets use the self-redacting `config.Secret`.
-- **Comments:** every package has a doc comment. Comments are full sentences that explain invariants and reasons; match that style.
+- **Comments:** every package has a doc comment. Comments are full sentences that explain invariants and reasons; match that style. A comment cites upstream by path and symbol (`sdk/auth/filestore.go FileTokenStore.Save`), never by version or line number: `go.mod` is the only place the upstream version is written, so a bump touches no comment. A version stays only in a historical note ("from v7.3.17 it closes every connection").
 - **Goroutines** belong to `serve()` in boot. Don't start unmanaged background work.
 
 ## Hard Rules
