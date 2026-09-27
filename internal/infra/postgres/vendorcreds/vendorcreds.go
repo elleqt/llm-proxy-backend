@@ -5,12 +5,10 @@ package vendorcreds
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,34 +29,6 @@ const (
 
 	deleteRow = `DELETE FROM vendor_credentials WHERE id = $1`
 )
-
-// COMPAT(credentials-import): the import marker and insertRow exist only for the one-shot import; remove next release (RELEASING.md).
-const (
-	// importMarkerKey is the settings row that records the one-shot import of the
-	// credential files: once it exists the files are never read again.
-	importMarkerKey = "vendor_credentials_import"
-
-	importMarkerExists = `SELECT EXISTS (SELECT 1 FROM settings WHERE key = $1)`
-
-	// insertImportMarker writes {"count": N} with no actor: the system imports, no
-	// administrator does; the column default records when. DO NOTHING on an
-	// existing marker is how Import tells a second run from the first: it affects
-	// no row.
-	insertImportMarker = `INSERT INTO settings (key, value, updated_by)
-		VALUES ($1, jsonb_build_object('count', $2::integer), NULL)
-		ON CONFLICT (key) DO NOTHING`
-
-	// insertRow is a plain insert: the table is empty before the import, so an
-	// existing id is an error and rolls the whole import back.
-	insertRow = `INSERT INTO vendor_credentials (id, provider, sealed, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)`
-)
-
-// errAlreadyImported rolls Import's transaction back when the marker is already set;
-// it never leaves this package.
-//
-// COMPAT(credentials-import): errAlreadyImported exists only for the one-shot import; remove next release (RELEASING.md).
-var errAlreadyImported = errors.New("postgres: vendor credentials already imported")
 
 type Repo struct{ pool *pgxpool.Pool }
 
@@ -113,57 +83,6 @@ func (r *Repo) Delete(ctx context.Context, id string) error {
 	}
 
 	return nil
-}
-
-// ImportDone reports whether the import marker is set.
-//
-// COMPAT(credentials-import): ImportDone exists only for the one-shot import; remove next release (RELEASING.md).
-func (r *Repo) ImportDone(ctx context.Context) (bool, error) {
-	var done bool
-
-	if err := r.pool.QueryRow(ctx, importMarkerExists, importMarkerKey).Scan(&done); err != nil {
-		return false, fmt.Errorf("postgres: read vendor credentials import marker: %w", err)
-	}
-
-	return done, nil
-}
-
-// Import writes the marker first: when it already exists nothing else runs and the
-// transaction is rolled back. A row whose id is already stored is app.ErrConflict and
-// rolls back the marker with every row.
-//
-// COMPAT(credentials-import): Import exists only for the one-shot import; remove next release (RELEASING.md).
-func (r *Repo) Import(ctx context.Context, rows []app.VendorCredential) (bool, error) {
-	err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, insertImportMarker, importMarkerKey, len(rows))
-		if err != nil {
-			return fmt.Errorf("postgres: set vendor credentials import marker: %w", err)
-		}
-
-		if tag.RowsAffected() == 0 {
-			return errAlreadyImported
-		}
-
-		batch := &pgx.Batch{}
-		for _, cred := range rows {
-			batch.Queue(insertRow, cred.ID, cred.Provider, cred.Sealed, cred.CreatedAt.UTC(), cred.UpdatedAt.UTC())
-		}
-
-		if err := tx.SendBatch(ctx, batch).Close(); err != nil {
-			return fmt.Errorf("postgres: insert %d vendor credentials: %w", len(rows), postgres.AsConflict(err))
-		}
-
-		return nil
-	})
-	if errors.Is(err, errAlreadyImported) {
-		return false, nil
-	}
-
-	if err != nil {
-		return false, fmt.Errorf("postgres: import vendor credentials: %w", err)
-	}
-
-	return true, nil
 }
 
 // credentialRow is one vendor_credentials row, scanned by column name.

@@ -324,6 +324,32 @@ func TestMigrations(t *testing.T) {
 				"row %d (%s/%s) backfilled", idx, row.ev.Provider, row.ev.Model)
 		}
 	})
+
+	// v0.2.0's credentials import left a marker row; 0005 drops it. A database
+	// with users but no marker skipped v0.2.0, so its vendor accounts are still
+	// only files in the grants volume: the migration refuses it rather than boot
+	// without them. Runs after the rebuild above.
+	t.Run("0005 refuses a used database the import never ran on, and drops the marker", func(t *testing.T) {
+		dsn := pool.Config().ConnString()
+		require.NoError(t, postgres.MigrateDown(ctx, dsn), "migrate down")
+		require.NoError(t, postgres.MigrateTo(ctx, dsn, 4), "migrate to 4")
+		insertUser(ctx, t, pool)
+
+		err := postgres.Migrate(ctx, dsn)
+		require.ErrorContains(t, err, "upgrade to v0.2.0 and start it once before this one", "migrate up without the marker")
+
+		_, err = pool.Exec(ctx,
+			`INSERT INTO settings (key, value, updated_by) VALUES ('vendor_credentials_import', '{"count": 0}', NULL)`)
+		require.NoError(t, err, "insert the import marker")
+		require.NoError(t, postgres.Migrate(ctx, dsn), "migrate up with the marker")
+
+		var marked bool
+
+		err = pool.QueryRow(ctx,
+			`SELECT EXISTS (SELECT 1 FROM settings WHERE key = 'vendor_credentials_import')`).Scan(&marked)
+		require.NoError(t, err, "read the import marker")
+		require.False(t, marked, "the import marker survived 0005")
+	})
 }
 
 // TestMigrateDoesNotLeakPasswordFromMalformedDSN pins the one migration failure that

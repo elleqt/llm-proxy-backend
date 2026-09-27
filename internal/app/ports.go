@@ -605,14 +605,6 @@ type VendorCredentialRepo interface {
 	Update(ctx context.Context, c VendorCredential) error
 	// Delete removes the row; a missing row is not an error.
 	Delete(ctx context.Context, id string) error
-
-	// COMPAT(credentials-import): ImportDone and Import exist only for the one-shot import; remove next release (RELEASING.md).
-	// ImportDone reports whether the import marker is set.
-	ImportDone(ctx context.Context) (bool, error)
-	// Import inserts the marker and every row in one transaction. It returns false,
-	// inserting nothing, when the marker is already set. A row whose id is already
-	// stored fails the whole import with ErrConflict, and nothing is written.
-	Import(ctx context.Context, rows []VendorCredential) (bool, error)
 }
 
 // ConfigPusher is the embedded gateway's configuration surface. PushConfig takes

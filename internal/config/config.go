@@ -32,8 +32,6 @@ type Config struct {
 	// AuthDir is LLMPROXY_AUTH_DIR: the vendor sign-in's scratch directory; in its
 	// .login subdirectory upstream hands the OAuth callback to the login for about a
 	// second. The vendor accounts themselves are in Postgres (gateway.CredentialStore).
-	// COMPAT(credentials-import): it is also the source of the one-shot import of the
-	// account files an earlier release kept here; remove next release (RELEASING.md).
 	AuthDir string
 	// BootstrapAdminEmail is LLMPROXY_BOOTSTRAP_ADMIN_EMAIL: the address of the first
 	// administrator, created with a one-time password when no administrator exists.

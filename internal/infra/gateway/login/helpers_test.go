@@ -57,10 +57,10 @@ func productionParams(t *testing.T) gateway.Params {
 	return paramsOver(authDir, authDir)
 }
 
-// grantsVolumeParams is productionParams as this release runs: the token
-// store (the database in production) lives apart from the auth directory,
-// which is the grants volume still holding the previous release's credential
-// files.
+// grantsVolumeParams is productionParams as an upgraded installation may run:
+// the token store (the database in production) lives apart from the auth
+// directory, which may still be an earlier release's grants volume holding its
+// credential files if the operator kept it mounted.
 func grantsVolumeParams(t *testing.T) gateway.Params {
 	t.Helper()
 

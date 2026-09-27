@@ -566,14 +566,14 @@ func answerCodexExchange(t *testing.T, email, accessToken string) {
 	t.Cleanup(func() { http.DefaultTransport = original })
 }
 
-// TestReloginKeepsTheHeldStateOverAStaleCredentialFile: in this release the
-// auth directory is still the grants volume, holding each account's file as
-// it was before the upgrade. Upstream's login handler merges the non-token
-// keys of the file named like the new record from its auth directory
-// (mergeExistingAuthFileMetadata) and falls back to the account the manager
-// holds only when there is no such file. Signing an account in again must
-// keep the state the gateway holds — enabled, as it was since the upgrade —
-// not revive the stale file's "disabled" or its other keys.
+// TestReloginKeepsTheHeldStateOverAStaleCredentialFile: an installation that
+// kept an earlier release's grants volume mounted as its auth directory still
+// holds each account's file as it was before the upgrade. Upstream's login
+// handler merges the non-token keys of the file named like the new record from
+// its auth directory (mergeExistingAuthFileMetadata) and falls back to the
+// account the manager holds only when there is no such file. Signing an
+// account in again must keep the state the gateway holds — enabled, as it was
+// since the upgrade — not revive the stale file's "disabled" or its other keys.
 func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
 	const email = "relogin@example.com"
 

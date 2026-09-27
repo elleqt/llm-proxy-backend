@@ -14,8 +14,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The compat test's parent hands each boot the vendor's URL through this variable.
-const compatVendorEnv = "LLMPROXY_E2E_COMPAT_VENDOR"
+// The restart test's parent owns the database and hands it, which boot it is,
+// and the vendor's URL to each child through these variables.
+const (
+	restartDatabaseEnv = "LLMPROXY_E2E_DATABASE_URL"
+	restartBootEnv     = "LLMPROXY_E2E_BOOT"
+	compatVendorEnv    = "LLMPROXY_E2E_COMPAT_VENDOR"
+)
+
+// restartPassword is the administrator's password from the first boot on.
+const restartPassword = "a password for both boots"
 
 // compatVendorKey is the key the provider is added with. It must never leave
 // the process: not in an answer, not in the output.

@@ -51,9 +51,6 @@ func TestSettingsAreTheStoredDocumentUnredacted(t *testing.T) {
 // no write (the mocks have no expectation for either).
 func TestADrySettingsRunAppliesNothing(t *testing.T) {
 	env := newEnv(t)
-	// COMPAT(credentials-import): the stored document a whole-document update replaces is read
-	// (replacedDocument); remove next release (RELEASING.md).
-	env.settings.EXPECT().UpstreamDocument(mock.Anything).Return("request-retry: 1\n", nil)
 	env.gateway.EXPECT().CurrentConfig().Return(runningConfig(t, "request-retry: 1\n"))
 
 	var got api.SettingsUpdateResult
