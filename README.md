@@ -466,7 +466,7 @@ claude:claude-opus-4-?       one character after "4-"
 *:*                          everything
 ```
 
-- **Providers** are `claude` and `chatgpt` (the Codex backend is called `chatgpt` in rules). Matching is case-insensitive.
+- **Providers** are `claude` and `chatgpt` (the Codex backend is called `chatgpt` in rules), plus each [OpenAI-compatible provider](#openai-compatible-providers) under its name. Matching is case-insensitive.
 - **Globs:** `*` matches any run of characters, including `/` and `:`. `?` matches exactly one character. Everything else is literal, and the pattern must match the whole model name. The rule splits on the first colon, so model names can contain colons.
 - **Wildcards are evaluated per request** against the live model catalog. `chatgpt:*` covers a model the vendor releases tomorrow.
 - **A model served by several providers** must be allowed on **all** of them. The router may choose any of them.
@@ -601,14 +601,27 @@ Checklist:
 
 **Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add account** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
+#### OpenAI-compatible providers
+
+**Add OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
+
+- **Name**: the provider name in access rules (`<name>:*`). Lower case letters, digits, `.`, `_` and `-`; it cannot be changed later, and names of built-in providers (`claude`, `chatgpt`, `gemini`, …) are refused.
+- **Base URL**: up to and including the API version, e.g. `https://api.example.com/v1`. Local addresses are allowed.
+- **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it.
+- **Models**: **Discover models** asks the vendor (`GET <base URL>/models`, through `proxy-url` when set) and lets you pick which to serve, each optionally under an alias. A model can also be typed by hand. The list does not follow the vendor by itself: discover again and save to change it.
+- **Prefix** (optional): clients then request `<prefix>/<model>`.
+
+Two providers may serve the same model name, for example two keys of one vendor: requests to it are spread across them. Such a model is admitted only to users allowed it on **every** provider serving it (see [Access control](#access-control)); the form warns when a discovered model is already served by another provider. Give one of them a prefix or aliases to keep them apart instead. Set prices for their models in **Admin → Prices**.
+
 ### Gateway settings
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval, sticky sessions) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
 
+- **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
-- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel.
+- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**.
 - **`save-cooldown-status`, `request-log` and `error-logs-max-files`** have no effect: cooldowns stay in memory and CLIProxyAPI writes no request or error log files. A document may not add one of them or change its value. A document saved by an earlier release that still sets one keeps working, and the backend logs a warning for each at start: remove them when you next edit the settings. <!-- COMPAT(credentials-import): the next release refuses these keys in any document, like the owned keys above. -->
 
 ### Prices

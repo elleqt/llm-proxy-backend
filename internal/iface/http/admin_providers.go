@@ -30,8 +30,100 @@ func (rt *router) registerAdminProviders(routes map[string]http.HandlerFunc) {
 	routes["GET /api/admin/providers"] = rt.listProviderAccounts
 	routes["POST /api/admin/providers/login/start"] = rt.startProviderLogin
 	routes["POST /api/admin/providers/login/complete"] = rt.completeProviderLogin
+	routes["POST /api/admin/providers/compat"] = rt.createCompatProvider
+	routes["PUT /api/admin/providers/compat/{accountId}"] = rt.updateCompatProvider
+	routes["POST /api/admin/providers/compat/discover"] = rt.discoverCompatModels
 	routes["PATCH /api/admin/providers/{accountId}"] = rt.updateProviderAccount
 	routes["DELETE /api/admin/providers/{accountId}"] = rt.removeProviderAccount
+}
+
+// createCompatProvider takes the provider's API key and never answers with it.
+func (rt *router) createCompatProvider(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	var body api.CompatProviderRequest
+	if !decodeJSON(rw, req, &body) {
+		return
+	}
+
+	account, err := rt.Providers.CreateCompat(req.Context(), actor.user, app.CompatProvider{
+		Name: body.Name, BaseURL: body.BaseURL, APIKey: deref(body.ApiKey), Prefix: deref(body.Prefix),
+		Models: compatModelsIn(body.Models),
+	})
+	if errors.Is(err, app.ErrConflict) {
+		writeFieldError(rw, http.StatusConflict, codeConflict, "name", "a provider of that name exists")
+
+		return
+	}
+
+	if err != nil {
+		rt.adminFailure(rw, req, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusCreated, providerAccountOf(account))
+}
+
+func (rt *router) updateCompatProvider(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	var body api.CompatProviderUpdate
+	if !decodeJSON(rw, req, &body) {
+		return
+	}
+
+	update := app.CompatProviderUpdate{
+		BaseURL: body.BaseURL, APIKey: body.ApiKey, Prefix: deref(body.Prefix), Models: compatModelsIn(body.Models),
+	}
+	if update.APIKey == nil && body.ClearApiKey != nil && *body.ClearApiKey {
+		cleared := ""
+		update.APIKey = &cleared
+	}
+
+	account, err := rt.Providers.UpdateCompat(req.Context(), actor.user, req.PathValue("accountId"), update)
+	if err != nil {
+		rt.adminFailure(rw, req, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, providerAccountOf(account))
+}
+
+func (rt *router) discoverCompatModels(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	var body api.CompatDiscoverRequest
+	if !decodeJSON(rw, req, &body) {
+		return
+	}
+
+	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId))
+	if err != nil {
+		rt.adminFailure(rw, req, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, api.CompatDiscoverResult{Models: found.Models, Conflicts: found.Conflicts})
+}
+
+func compatModelsIn(in []api.CompatModel) []app.CompatModel {
+	out := make([]app.CompatModel, 0, len(in))
+	for _, m := range in {
+		out = append(out, app.CompatModel{Name: m.Name, Alias: deref(m.Alias)})
+	}
+
+	return out
+}
+
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+
+	return *s
 }
 
 func (rt *router) listProviderAccounts(rw http.ResponseWriter, req *http.Request) {
@@ -159,6 +251,17 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 			ResetAt:    nonZero(q.ResetAt),
 			ObservedAt: nonZero(q.ObservedAt),
 		})
+	}
+
+	if compat := account.Compat; compat != nil {
+		models := make([]api.CompatModel, 0, len(compat.Models))
+		for _, m := range compat.Models {
+			models = append(models, api.CompatModel{Name: m.Name, Alias: nonEmpty(m.Alias)})
+		}
+
+		out.Compat = &api.CompatProviderDetails{
+			Name: compat.Name, BaseURL: compat.BaseURL, Prefix: nonEmpty(compat.Prefix), HasApiKey: compat.HasAPIKey, Models: models,
+		}
 	}
 
 	return out

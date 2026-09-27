@@ -224,7 +224,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	}
 
 	env.deps.Prices = prices.New(env.prices, env.priceCat, priceSrc, env.priceSet, env.priceMet, env.audit, env.clock, env.log)
-	env.deps.Providers = providers.New(env.accounts, env.logins, env.quota, env.acctMet, env.audit, env.clock, env.log)
+	env.deps.Providers = providers.New(env.accounts, env.logins, env.catalog, env.quota, env.acctMet, env.audit, env.clock, env.log)
 	env.audit.EXPECT().Record(mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	h, err := NewRouter(env.deps)

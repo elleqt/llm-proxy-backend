@@ -557,6 +557,92 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/admin/providers/compat:
+    post:
+      tags: [admin-providers]
+      operationId: createCompatProvider
+      summary: >
+        Add an OpenAI-compatible provider. It serves its models at once, under its name
+        as the policy provider name. The API key is never returned.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompatProviderRequest" }
+      responses:
+        "201":
+          description: The provider was added and is routable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderAccount" }
+        "409":
+          description: "`conflict` — a provider of that name exists."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`invalid_input` — `field` names what is wrong (a reserved name is `name`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/providers/compat/{accountId}:
+    put:
+      tags: [admin-providers]
+      operationId: updateCompatProvider
+      summary: Replace an OpenAI-compatible provider's definition. The name cannot change.
+      parameters: [{ $ref: "#/components/parameters/AccountId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompatProviderUpdate" }
+      responses:
+        "200":
+          description: Updated and serving.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProviderAccount" }
+        "404":
+          description: "`not_found` — no OpenAI-compatible provider has that id."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`invalid_input`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/providers/compat/discover:
+    post:
+      tags: [admin-providers]
+      operationId: discoverCompatModels
+      summary: >
+        List the models a vendor serves (GET {baseURL}/models). Nothing is saved. Without
+        `apiKey`, the stored key of `accountId` is used.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CompatDiscoverRequest" }
+      responses:
+        "200":
+          description: The vendor's models, and those another provider already serves.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompatDiscoverResult" }
+        "422":
+          description: "`invalid_input`, or `provider_auth_failed` — the vendor refused the key."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "502":
+          description: "`provider_unreachable` — the vendor could not be asked, or did not answer with a model list."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/admin/providers/{accountId}:
     patch:
       tags: [admin-providers]
@@ -1016,6 +1102,81 @@ components:
               usedRatio: { type: number, minimum: 0, maximum: 1 }
               resetAt: { type: [string, "null"], format: date-time }
               observedAt: { type: [string, "null"], format: date-time }
+        compat:
+          $ref: "#/components/schemas/CompatProviderDetails"
+          description: Present for an OpenAI-compatible provider only.
+
+    CompatModel:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, description: The model as the vendor names it. }
+        alias: { type: string, description: "The name clients request it by; absent serves it as `name`." }
+
+    CompatProviderDetails:
+      type: object
+      required: [name, baseURL, hasApiKey, models]
+      properties:
+        name: { type: string }
+        baseURL: { type: string }
+        prefix: { type: string }
+        hasApiKey: { type: boolean, description: Whether a key is stored. The key itself is never returned. }
+        models:
+          type: array
+          items: { $ref: "#/components/schemas/CompatModel" }
+
+    CompatProviderRequest:
+      type: object
+      required: [name, baseURL, models]
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9._-]{0,62}$"
+          description: The policy provider name; immutable.
+        baseURL: { type: string, examples: ["https://api.example.com/v1"] }
+        apiKey: { type: string, description: Optional; a local vendor may need none. }
+        prefix: { type: string, description: "Optional model prefix: clients request `prefix/model`." }
+        models:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CompatModel" }
+
+    CompatProviderUpdate:
+      type: object
+      required: [baseURL, models]
+      properties:
+        baseURL: { type: string }
+        apiKey: { type: string, description: A new key. Absent keeps the stored one. }
+        clearApiKey: { type: boolean, default: false, description: Remove the stored key. Ignored when `apiKey` is set. }
+        prefix: { type: string }
+        models:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/CompatModel" }
+
+    CompatDiscoverRequest:
+      type: object
+      required: [baseURL]
+      properties:
+        baseURL: { type: string }
+        apiKey: { type: string }
+        accountId: { type: string, description: An existing provider whose stored key is used when `apiKey` is absent. }
+
+    CompatDiscoverResult:
+      type: object
+      required: [models, conflicts]
+      properties:
+        models:
+          type: array
+          items: { type: string }
+        conflicts:
+          type: object
+          description: >
+            Per discovered model another provider already serves, those providers. A pooled
+            model is admitted only to users granted it on every provider serving it.
+          additionalProperties:
+            type: array
+            items: { type: string }
 
     ProviderLoginStartRequest:
       type: object
@@ -1055,6 +1216,11 @@ components:
             proxyURL: { type: string }
             requestRetry: { type: integer, minimum: 0 }
             maxRetryInterval: { type: integer, minimum: 0, description: Seconds. }
+            sessionAffinity:
+              type: boolean
+              description: >
+                Session-sticky routing (routing.session-affinity): a conversation stays on one
+                vendor account. On unless the document turns it off. Applies to every provider.
 
     SettingsUpdateRequest:
       type: object
@@ -1067,6 +1233,7 @@ components:
             proxyURL: { type: string }
             requestRetry: { type: integer, minimum: 0 }
             maxRetryInterval: { type: integer, minimum: 0 }
+            sessionAffinity: { type: boolean }
         dryRun: { type: boolean, default: false }
 
     SettingsUpdateResult:

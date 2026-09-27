@@ -24,6 +24,7 @@ type providersFixture struct {
 	quota    *mocks.VendorQuota
 	metrics  *mocks.AccountMetrics
 	audit    *mocks.AuditSink
+	catalog  *mocks.ModelCatalog
 	svc      *providers.Service
 	events   []app.AuditEvent
 }
@@ -37,8 +38,9 @@ func newProvidersFixture(t *testing.T) *providersFixture {
 		quota:    mocks.NewVendorQuota(t),
 		metrics:  mocks.NewAccountMetrics(t),
 		audit:    mocks.NewAuditSink(t),
+		catalog:  mocks.NewModelCatalog(t),
 	}
-	fixture.svc = providers.New(fixture.accounts, fixture.logins, fixture.quota, fixture.metrics, fixture.audit, systemClock{}, discardLogger{})
+	fixture.svc = providers.New(fixture.accounts, fixture.logins, fixture.catalog, fixture.quota, fixture.metrics, fixture.audit, systemClock{}, discardLogger{})
 
 	return fixture
 }
@@ -82,6 +84,9 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 			_, calls["StartLogin"] = fixture.svc.StartLogin(ctx, actor, "claude")
 			_, calls["CompleteLogin"] = fixture.svc.CompleteLogin(ctx, actor, "session", "http://localhost/callback?code=c&state=s")
 			_, calls["SetDisabled"] = fixture.svc.SetDisabled(ctx, actor, codexAccount.ID, true)
+			_, calls["CreateCompat"] = fixture.svc.CreateCompat(ctx, actor, app.CompatProvider{Name: "acme"})
+			_, calls["UpdateCompat"] = fixture.svc.UpdateCompat(ctx, actor, "openai-compatible-acme", app.CompatProviderUpdate{})
+			_, calls["DiscoverCompat"] = fixture.svc.DiscoverCompat(ctx, actor, "https://api.example.com/v1", "", "")
 
 			calls["Remove"] = fixture.svc.Remove(ctx, actor, codexAccount.ID)
 			for method, err := range calls {
@@ -262,7 +267,7 @@ func TestProvidersWithdrawsAnAccountWhoseAuditFails(t *testing.T) {
 func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	accounts, logins := mocks.NewVendorAccounts(t), mocks.NewVendorLogins(t)
 	audit, logger := mocks.NewAuditSink(t), mocks.NewLogger(t)
-	svc := providers.New(accounts, logins, mocks.NewVendorQuota(t), mocks.NewAccountMetrics(t), audit, systemClock{}, logger)
+	svc := providers.New(accounts, logins, mocks.NewModelCatalog(t), mocks.NewVendorQuota(t), mocks.NewAccountMetrics(t), audit, systemClock{}, logger)
 	logins.EXPECT().CompleteLogin(mock.Anything, "session", "cb").Return(codexAccount, nil)
 
 	auditDown := errors.New("audit store down")

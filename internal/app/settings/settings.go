@@ -53,7 +53,9 @@ import (
 //   - home: runtime-only in upstream (no YAML tag); named so the key is refused
 //     rather than dropped.
 //   - openai-compatibility and every "*-api-key" family: config-derived
-//     credentials PushConfig cannot add, so they are boot-only.
+//     credentials PushConfig cannot add, so they are boot-only. The gateway
+//     builds the openai-compatibility list itself, from the boot entries and
+//     the OpenAI-compatible providers added as accounts (gateway.withCompat).
 var ownedKeys = []string{
 	"host", "port", "tls", "trusted-proxies", "pprof", "discovery", "debug", "auth-dir",
 	"logging-to-file", "logs-max-total-size-mb",
@@ -191,6 +193,9 @@ type Fields struct {
 	ProxyURL         string
 	RequestRetry     int
 	MaxRetryInterval int // seconds
+	// SessionAffinity is routing.session-affinity: on unless the document
+	// turns it off (applySessionAffinityDefault).
+	SessionAffinity bool
 }
 
 // View is the stored editable document and its typed fields.
@@ -204,6 +209,7 @@ type Patch struct {
 	ProxyURL         *string
 	RequestRetry     *int
 	MaxRetryInterval *int
+	SessionAffinity  *bool
 }
 
 // Update replaces the whole document (YAML) or patches typed fields
@@ -548,6 +554,7 @@ func view(doc string, cfg *sdkconfig.Config) View {
 		ProxyURL:         cfg.ProxyURL,
 		RequestRetry:     cfg.RequestRetry,
 		MaxRetryInterval: cfg.MaxRetryInterval,
+		SessionAffinity:  cfg.Routing.SessionAffinity,
 	}}
 }
 
@@ -596,7 +603,7 @@ func patchDocument(doc string, patch Patch) (string, error) {
 	// A block mapping, so an empty document patched does not come out as "{...}".
 	root.Style = 0
 	if patch.ProxyURL != nil {
-		setScalar(root, "proxy-url", "!!str", *patch.ProxyURL)
+		setScalar(root, "proxy-url", yamlStrTag, *patch.ProxyURL)
 	}
 
 	if patch.RequestRetry != nil {
@@ -607,7 +614,67 @@ func patchDocument(doc string, patch Patch) (string, error) {
 		setScalar(root, "max-retry-interval", "!!int", strconv.Itoa(*patch.MaxRetryInterval))
 	}
 
+	if patch.SessionAffinity != nil {
+		setScalar(childMapping(root, routingKey), sessionAffinityKey, "!!bool", strconv.FormatBool(*patch.SessionAffinity))
+	}
+
 	return encodeYAML(&yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{root}})
+}
+
+// childMapping returns the mapping that mapping holds under key, creating it
+// (or replacing a scalar such as an empty "routing:") when there is none.
+func childMapping(mapping *yaml.Node, key string) *yaml.Node {
+	child := &yaml.Node{Kind: yaml.MappingNode, Tag: yamlMapTag}
+
+	for at := 0; at+1 < len(mapping.Content); at += 2 {
+		if mapping.Content[at].Value != key {
+			continue
+		}
+
+		if held := mapping.Content[at+1]; held.Kind == yaml.MappingNode {
+			held.Style = 0
+
+			return held
+		}
+
+		mapping.Content[at+1] = child
+
+		return child
+	}
+
+	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: key}, child)
+
+	return child
+}
+
+// The document keys of upstream's session-sticky routing, and the YAML tags
+// of the nodes patchDocument adds.
+const (
+	routingKey         = "routing"
+	sessionAffinityKey = "session-affinity"
+	yamlMapTag         = "!!map"
+	yamlStrTag         = "!!str"
+)
+
+// applySessionAffinityDefault turns session-sticky routing on when the
+// document does not set routing.session-affinity. Upstream's field is a bool
+// with omitempty, so "unset" is told apart from an administrator's false only
+// on the document node, never on the parsed struct.
+func applySessionAffinityDefault(root *yaml.Node, cfg *sdkconfig.Config) {
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != routingKey || root.Content[i+1].Kind != yaml.MappingNode {
+			continue
+		}
+
+		routing := root.Content[i+1]
+		for j := 0; j+1 < len(routing.Content); j += 2 {
+			if routing.Content[j].Value == sessionAffinityKey {
+				return
+			}
+		}
+	}
+
+	cfg.Routing.SessionAffinity = true
 }
 
 func setScalar(mapping *yaml.Node, key, tag, value string) {
@@ -623,7 +690,7 @@ func setScalar(mapping *yaml.Node, key, tag, value string) {
 		}
 	}
 
-	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, scalar)
+	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: key}, scalar)
 }
 
 // documentRoot parses doc and returns its top-level mapping; an empty document is
@@ -717,6 +784,8 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 	if _, err := proxyutil.Parse(cfg.ProxyURL); err != nil {
 		return nil, app.InvalidSetting("proxy-url", err.Error())
 	}
+
+	applySessionAffinityDefault(root, cfg)
 
 	return cfg, nil
 }
@@ -844,7 +913,7 @@ func redactStructFields(t reflect.Type, node *yaml.Node) {
 			value.Value = proxyutil.Redact(value.Value)
 		case field.Tag.Get("json") == "-" || slices.Contains(secretKeys, key):
 			if value.Kind != yaml.ScalarNode || value.Value != "" {
-				node.Content[keyAt+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: redacted}
+				node.Content[keyAt+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: redacted}
 			}
 		default:
 			redactSecrets(field.Type, value)

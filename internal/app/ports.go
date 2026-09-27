@@ -331,6 +331,12 @@ var (
 	// ErrLoginsBusy: as many logins as the gateway allows are in progress.
 	// 409 login_busy.
 	ErrLoginsBusy = errors.New("app: too many pending logins")
+	// ErrProviderUnreachable: an OpenAI-compatible vendor's model listing could
+	// not be read (network, timeout, a redirect to another host, an answer too
+	// large or not a model list). 502 provider_unreachable.
+	ErrProviderUnreachable = errors.New("app: provider unreachable")
+	// ErrProviderAuthFailed: the vendor refused the API key. 422 provider_auth_failed.
+	ErrProviderAuthFailed = errors.New("app: provider refused the api key")
 )
 
 // VendorAccount is one vendor account the gateway holds. Provider is the
@@ -347,6 +353,45 @@ type VendorAccount struct {
 	LastRefreshedAt time.Time // zero when never refreshed
 	// Quota is filled by providers.Service from the QuotaReader.
 	Quota []QuotaSignal
+	// Compat describes an OpenAI-compatible provider; nil for every other account.
+	Compat *CompatDetails
+}
+
+// CompatModel is one model an OpenAI-compatible provider serves: Name as the
+// vendor knows it, and the Alias clients request it by ("" serves it as Name).
+type CompatModel struct {
+	Name  string
+	Alias string
+}
+
+// CompatProvider is an OpenAI-compatible vendor as the administrator defines it.
+// Name is its policy name, immutable once created; APIKey is optional (a local
+// vendor needs none).
+type CompatProvider struct {
+	Name    string
+	BaseURL string
+	APIKey  string
+	Prefix  string
+	Models  []CompatModel
+}
+
+// CompatProviderUpdate replaces an OpenAI-compatible provider's definition. A
+// nil APIKey keeps the stored key, "" removes it, anything else replaces it.
+type CompatProviderUpdate struct {
+	BaseURL string
+	APIKey  *string
+	Prefix  string
+	Models  []CompatModel
+}
+
+// CompatDetails is an OpenAI-compatible provider as the admin API shows it:
+// whether it has a key, never the key.
+type CompatDetails struct {
+	Name      string
+	BaseURL   string
+	Prefix    string
+	HasAPIKey bool
+	Models    []CompatModel
 }
 
 // VendorAccounts is the gateway's account surface. Account changes go through
@@ -355,6 +400,17 @@ type VendorAccounts interface {
 	Accounts() []VendorAccount
 	SetAccountDisabled(ctx context.Context, id string, disabled bool) error
 	RemoveAccount(ctx context.Context, id string) error
+	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
+	// at once: ErrConflict when its name is taken, an *InvalidInputError on
+	// field "name" when the name is reserved for a built-in provider.
+	AddCompatProvider(ctx context.Context, p CompatProvider) (VendorAccount, error)
+	// UpdateCompatProvider replaces the definition of provider id: ErrNotFound
+	// when id is not an OpenAI-compatible provider.
+	UpdateCompatProvider(ctx context.Context, id string, u CompatProviderUpdate) (VendorAccount, error)
+	// DiscoverModels lists the model ids the vendor at baseURL serves, asked with
+	// apiKey or, when that is empty and accountID names an OpenAI-compatible
+	// provider, with its stored key (ErrProviderUnreachable, ErrProviderAuthFailed).
+	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string) ([]string, error)
 }
 
 // VendorLogin is a pending vendor sign-in: the administrator opens AuthURL in

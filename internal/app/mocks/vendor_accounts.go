@@ -93,6 +93,152 @@ func (_c *VendorAccounts_Accounts_Call) RunAndReturn(run func() []app.VendorAcco
 	return _c
 }
 
+// AddCompatProvider provides a mock function for the type VendorAccounts
+func (_mock *VendorAccounts) AddCompatProvider(ctx context.Context, p app.CompatProvider) (app.VendorAccount, error) {
+	ret := _mock.Called(ctx, p)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddCompatProvider")
+	}
+
+	var r0 app.VendorAccount
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, app.CompatProvider) (app.VendorAccount, error)); ok {
+		return returnFunc(ctx, p)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, app.CompatProvider) app.VendorAccount); ok {
+		r0 = returnFunc(ctx, p)
+	} else {
+		r0 = ret.Get(0).(app.VendorAccount)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, app.CompatProvider) error); ok {
+		r1 = returnFunc(ctx, p)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// VendorAccounts_AddCompatProvider_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddCompatProvider'
+type VendorAccounts_AddCompatProvider_Call struct {
+	*mock.Call
+}
+
+// AddCompatProvider is a helper method to define mock.On call
+//   - ctx context.Context
+//   - p app.CompatProvider
+func (_e *VendorAccounts_Expecter) AddCompatProvider(ctx any, p any) *VendorAccounts_AddCompatProvider_Call {
+	return &VendorAccounts_AddCompatProvider_Call{Call: _e.mock.On("AddCompatProvider", ctx, p)}
+}
+
+func (_c *VendorAccounts_AddCompatProvider_Call) Run(run func(ctx context.Context, p app.CompatProvider)) *VendorAccounts_AddCompatProvider_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 app.CompatProvider
+		if args[1] != nil {
+			arg1 = args[1].(app.CompatProvider)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *VendorAccounts_AddCompatProvider_Call) Return(vendorAccount app.VendorAccount, err error) *VendorAccounts_AddCompatProvider_Call {
+	_c.Call.Return(vendorAccount, err)
+	return _c
+}
+
+func (_c *VendorAccounts_AddCompatProvider_Call) RunAndReturn(run func(ctx context.Context, p app.CompatProvider) (app.VendorAccount, error)) *VendorAccounts_AddCompatProvider_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DiscoverModels provides a mock function for the type VendorAccounts
+func (_mock *VendorAccounts) DiscoverModels(ctx context.Context, baseURL string, apiKey string, accountID string) ([]string, error) {
+	ret := _mock.Called(ctx, baseURL, apiKey, accountID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DiscoverModels")
+	}
+
+	var r0 []string
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string) ([]string, error)); ok {
+		return returnFunc(ctx, baseURL, apiKey, accountID)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string) []string); ok {
+		r0 = returnFunc(ctx, baseURL, apiKey, accountID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]string)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string) error); ok {
+		r1 = returnFunc(ctx, baseURL, apiKey, accountID)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// VendorAccounts_DiscoverModels_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DiscoverModels'
+type VendorAccounts_DiscoverModels_Call struct {
+	*mock.Call
+}
+
+// DiscoverModels is a helper method to define mock.On call
+//   - ctx context.Context
+//   - baseURL string
+//   - apiKey string
+//   - accountID string
+func (_e *VendorAccounts_Expecter) DiscoverModels(ctx any, baseURL any, apiKey any, accountID any) *VendorAccounts_DiscoverModels_Call {
+	return &VendorAccounts_DiscoverModels_Call{Call: _e.mock.On("DiscoverModels", ctx, baseURL, apiKey, accountID)}
+}
+
+func (_c *VendorAccounts_DiscoverModels_Call) Run(run func(ctx context.Context, baseURL string, apiKey string, accountID string)) *VendorAccounts_DiscoverModels_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 string
+		if args[2] != nil {
+			arg2 = args[2].(string)
+		}
+		var arg3 string
+		if args[3] != nil {
+			arg3 = args[3].(string)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *VendorAccounts_DiscoverModels_Call) Return(strings []string, err error) *VendorAccounts_DiscoverModels_Call {
+	_c.Call.Return(strings, err)
+	return _c
+}
+
+func (_c *VendorAccounts_DiscoverModels_Call) RunAndReturn(run func(ctx context.Context, baseURL string, apiKey string, accountID string) ([]string, error)) *VendorAccounts_DiscoverModels_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // RemoveAccount provides a mock function for the type VendorAccounts
 func (_mock *VendorAccounts) RemoveAccount(ctx context.Context, id string) error {
 	ret := _mock.Called(ctx, id)
@@ -209,6 +355,78 @@ func (_c *VendorAccounts_SetAccountDisabled_Call) Return(err error) *VendorAccou
 }
 
 func (_c *VendorAccounts_SetAccountDisabled_Call) RunAndReturn(run func(ctx context.Context, id string, disabled bool) error) *VendorAccounts_SetAccountDisabled_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateCompatProvider provides a mock function for the type VendorAccounts
+func (_mock *VendorAccounts) UpdateCompatProvider(ctx context.Context, id string, u app.CompatProviderUpdate) (app.VendorAccount, error) {
+	ret := _mock.Called(ctx, id, u)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateCompatProvider")
+	}
+
+	var r0 app.VendorAccount
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, app.CompatProviderUpdate) (app.VendorAccount, error)); ok {
+		return returnFunc(ctx, id, u)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, app.CompatProviderUpdate) app.VendorAccount); ok {
+		r0 = returnFunc(ctx, id, u)
+	} else {
+		r0 = ret.Get(0).(app.VendorAccount)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, app.CompatProviderUpdate) error); ok {
+		r1 = returnFunc(ctx, id, u)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// VendorAccounts_UpdateCompatProvider_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateCompatProvider'
+type VendorAccounts_UpdateCompatProvider_Call struct {
+	*mock.Call
+}
+
+// UpdateCompatProvider is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id string
+//   - u app.CompatProviderUpdate
+func (_e *VendorAccounts_Expecter) UpdateCompatProvider(ctx any, id any, u any) *VendorAccounts_UpdateCompatProvider_Call {
+	return &VendorAccounts_UpdateCompatProvider_Call{Call: _e.mock.On("UpdateCompatProvider", ctx, id, u)}
+}
+
+func (_c *VendorAccounts_UpdateCompatProvider_Call) Run(run func(ctx context.Context, id string, u app.CompatProviderUpdate)) *VendorAccounts_UpdateCompatProvider_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 app.CompatProviderUpdate
+		if args[2] != nil {
+			arg2 = args[2].(app.CompatProviderUpdate)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *VendorAccounts_UpdateCompatProvider_Call) Return(vendorAccount app.VendorAccount, err error) *VendorAccounts_UpdateCompatProvider_Call {
+	_c.Call.Return(vendorAccount, err)
+	return _c
+}
+
+func (_c *VendorAccounts_UpdateCompatProvider_Call) RunAndReturn(run func(ctx context.Context, id string, u app.CompatProviderUpdate) (app.VendorAccount, error)) *VendorAccounts_UpdateCompatProvider_Call {
 	_c.Call.Return(run)
 	return _c
 }
