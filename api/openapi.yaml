@@ -1133,8 +1133,9 @@ components:
       properties:
         name:
           type: string
-          pattern: "^[a-z0-9][a-z0-9._-]{0,62}$"
-          description: The policy provider name; immutable.
+          description: >
+            The policy provider name; immutable. Stored in lower case (upstream matches
+            names case-insensitively), then it must match `^[a-z0-9][a-z0-9._-]{0,62}$`.
         baseURL: { type: string, examples: ["https://api.example.com/v1"] }
         apiKey: { type: string, description: Optional; a local vendor may need none. }
         prefix: { type: string, description: "Optional model prefix: clients request `prefix/model`." }

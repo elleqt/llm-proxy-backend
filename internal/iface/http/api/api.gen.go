@@ -289,7 +289,7 @@ type CompatProviderRequest struct {
 	BaseURL string        `json:"baseURL"`
 	Models  []CompatModel `json:"models"`
 
-	// Name The policy provider name; immutable.
+	// Name The policy provider name; immutable. Stored in lower case (upstream matches names case-insensitively), then it must match `^[a-z0-9][a-z0-9._-]{0,62}$`.
 	Name string `json:"name"`
 
 	// Prefix Optional model prefix: clients request `prefix/model`.
