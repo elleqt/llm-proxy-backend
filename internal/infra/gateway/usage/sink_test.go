@@ -121,12 +121,18 @@ func knownPrincipal(users *mocks.UserRepo, tokens *mocks.TokenRepo) {
 	tokens.EXPECT().TouchLastUsed(mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
 }
 
+// noModels is a catalogue serving no model, for sinks no alias is priced through.
+type noModels struct{}
+
+func (noModels) ProvidersFor(string) []string     { return nil }
+func (noModels) KnownModel(string) (string, bool) { return "", false }
+
 // newMeteredSink builds a sink on the wall clock reporting to real metric families.
 func newMeteredSink(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, log app.Logger) (*Sink, *metrics.Metrics, *prometheus.Registry) {
 	reg := prometheus.NewRegistry()
 	m := metrics.New(reg)
 
-	return New(events, tokens, users, &app.PriceTable{}, m, wallClock{}, log), m, reg
+	return New(events, tokens, users, &app.PriceTable{}, noModels{}, m, wallClock{}, log), m, reg
 }
 
 // flushed waits until every record handed to sink so far has been processed.
@@ -353,7 +359,7 @@ func TestSinkReconstructsARawBreakdown(t *testing.T) {
 		{Provider: "gemini", Model: "gemini-3", Input: 1, Output: 8, CacheRead: 0.25},
 		{Provider: "mystery", Model: "m", Input: 1, Output: 1},
 	})
-	sink := New(events, tokens, users, prices, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
+	sink := New(events, tokens, users, prices, noModels{}, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
 
 	for _, rec := range []cliproxyusage.Record{
 		{Provider: "codex", Model: "gpt-6", Detail: cliproxyusage.Detail{
@@ -419,7 +425,7 @@ func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
 
 	prices := &app.PriceTable{}
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := New(events, tokens, users, prices, meter, wallClock{}, discardLog{})
+	sink := New(events, tokens, users, prices, noModels{}, meter, wallClock{}, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{
 			Provider: "claude", Model: "claude-sonnet-5", APIKey: sinkKey,
@@ -447,6 +453,128 @@ func TestSinkPricesAtTheTimeOfRecording(t *testing.T) {
 	require.Contains(t, scrape(t, meter),
 		`llmproxy_cost_usd_total{kind="input",model="claude-sonnet-5",provider="claude",user="alice@example.com"} 8`,
 		"want the metrics to count the rows' $3 + $5")
+}
+
+// aliasRecord is a vendora request for the alias E2E-Alias, with a thinking
+// suffix, that upstream mapped to the upstream name upstream-x: 3 input and 4
+// output tokens.
+func aliasRecord(key string) cliproxyusage.Record {
+	return cliproxyusage.Record{
+		Provider: "openai-compatible-vendora", Model: "upstream-x", Alias: "E2E-Alias(high)", APIKey: key,
+		Detail: cliproxyusage.Detail{InputTokens: 3, OutputTokens: 4, TotalTokens: 7},
+	}
+}
+
+// TestAliasPriceCoversAnUnpricedUpstreamName: the gate admits a spend-limited
+// request by the price of the name the client asked for, so when the upstream
+// name it was mapped to has none, the sink prices the row at the alias's rates.
+func TestAliasPriceCoversAnUnpricedUpstreamName(t *testing.T) {
+	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
+	events.accept()
+	knownPrincipal(users, tokens)
+
+	catalog := mocks.NewModelCatalog(t)
+	catalog.EXPECT().ProvidersFor("E2E-Alias").Return([]string{"vendora"})
+	catalog.EXPECT().KnownModel("E2E-Alias").Return("e2e-alias", true)
+
+	prices := &app.PriceTable{}
+	prices.SetPrices([]app.ModelPrice{{Provider: "vendora", Model: "e2e-alias", Input: 2, Output: 10}})
+
+	sink := New(events, tokens, users, prices, catalog, metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
+	sink.HandleUsage(context.Background(), aliasRecord(sinkKey))
+	flushed(t, sink)
+
+	got := events.written()
+	require.Len(t, got, 1, "ledger")
+	require.True(t, got[0].Cost.Priced, "want the row priced at the alias's price")
+	require.InDelta(t, (3*2+4*10)/1e6, got[0].Cost.TotalUSD(), 1e-15, "cost at the alias's rates")
+}
+
+// TestUpstreamPriceWinsOverTheAlias: a price for the upstream name is what the
+// vendor bills, so the alias is not consulted.
+func TestUpstreamPriceWinsOverTheAlias(t *testing.T) {
+	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
+	events.accept()
+	knownPrincipal(users, tokens)
+
+	prices := &app.PriceTable{}
+	prices.SetPrices([]app.ModelPrice{
+		{Provider: "vendora", Model: "upstream-x", Input: 5, Output: 20},
+		{Provider: "vendora", Model: "e2e-alias", Input: 2, Output: 10},
+	})
+
+	// No expectation: a call to the catalogue fails the test.
+	sink := New(events, tokens, users, prices, mocks.NewModelCatalog(t), metrics.New(prometheus.NewRegistry()), wallClock{}, discardLog{})
+	sink.HandleUsage(context.Background(), aliasRecord(sinkKey))
+	flushed(t, sink)
+
+	got := events.written()
+	require.Len(t, got, 1, "ledger")
+	require.InDelta(t, (3*5+4*20)/1e6, got[0].Cost.TotalUSD(), 1e-15, "cost at the upstream name's rates")
+}
+
+// limitUnpriced is one ObserveLimitUnpriced call.
+type limitUnpriced struct {
+	provider, model string
+	tokens          int64
+}
+
+// limitSpy is an Observer keeping every ObserveLimitUnpriced call.
+type limitSpy struct {
+	mu    sync.Mutex
+	calls []limitUnpriced
+}
+
+func (*limitSpy) ObserveUsage(app.UsageEvent, string)                           {}
+func (*limitSpy) ObserveVendorQuota(string, string, string, float64, time.Time) {}
+func (*limitSpy) ObserveAccountFailure(string, string)                          {}
+
+func (s *limitSpy) ObserveLimitUnpriced(provider, model string, tokens int64) {
+	s.mu.Lock()
+	s.calls = append(s.calls, limitUnpriced{provider, model, tokens})
+	s.mu.Unlock()
+}
+
+func (s *limitSpy) observed() []limitUnpriced {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return append([]limitUnpriced(nil), s.calls...)
+}
+
+// TestUnpricedTokensOfALimitedOwnerAlert: tokens no price covered are missing
+// from a spend-limited owner's windows, so they are counted and logged by owner
+// id; an owner without limits is left alone.
+func TestUnpricedTokensOfALimitedOwnerAlert(t *testing.T) {
+	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
+	knownPrincipal(users, tokens)
+
+	free := uuid.MustParse("5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a")
+	freeKey := app.Principal{UserID: free, TokenID: uuid.MustParse("1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d")}.String()
+	users.EXPECT().ByID(mock.Anything, free).Return(identity.User{ID: free, Email: "bob@example.com"}, nil).Maybe()
+	// Only sinkUser has spend limits.
+	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).
+		Run(func(_ context.Context, evs []app.UsageEvent) { events.keep(evs) }).
+		Return(map[uuid.UUID]struct{}{sinkUser: {}}, nil)
+
+	spy, log := &limitSpy{}, &recordingLog{}
+	limited, unlimited := aliasRecord(sinkKey), aliasRecord(freeKey)
+	limited.Alias, unlimited.Alias = "", ""
+
+	sink := New(events, tokens, users, &app.PriceTable{}, mocks.NewModelCatalog(t), spy, wallClock{}, log)
+	sink.HandleUsage(context.Background(), limited)
+	sink.HandleUsage(context.Background(), unlimited)
+	flushed(t, sink)
+
+	require.Len(t, events.written(), 2, "ledger")
+	require.Equal(t, []limitUnpriced{{"vendora", "upstream-x", 7}}, spy.observed(), "unpriced tokens of limited owners")
+
+	logged := log.logged()
+	require.Len(t, logged, 1, "warnings")
+	assert.Contains(t, logged[0], "spend-limited request has unpriced tokens", "warning")
+	assert.Contains(t, logged[0], "user_id="+sinkUser.String(), "want the owner named by id")
+	assert.NotContains(t, logged[0], sinkKey, "the warning carries the principal")
+	assert.NotContains(t, logged[0], sinkToken.String(), "the warning carries the token")
 }
 
 // TestSinkLabelsMetricsWithEmail: the user label is the owner's email (a
@@ -493,7 +621,7 @@ func TestSinkLabelCacheExpires(t *testing.T) {
 
 	clock := &manualClock{now: time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)}
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := New(events, tokens, users, &app.PriceTable{}, meter, clock, discardLog{})
+	sink := New(events, tokens, users, &app.PriceTable{}, noModels{}, meter, clock, discardLog{})
 	send := func() {
 		sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "m", APIKey: sinkKey})
 		flushed(t, sink)
@@ -541,6 +669,7 @@ func (panickyObserver) ObserveUsage(ev app.UsageEvent, _ string) {
 }
 func (panickyObserver) ObserveVendorQuota(string, string, string, float64, time.Time) {}
 func (panickyObserver) ObserveAccountFailure(string, string)                          {}
+func (panickyObserver) ObserveLimitUnpriced(string, string, int64)                    {}
 
 // TestSinkSurvivesPanic: a panic while handling one record is recovered,
 // counted and logged without the principal; the worker goes on and the next
@@ -552,7 +681,7 @@ func TestSinkSurvivesPanic(t *testing.T) {
 
 	log := &recordingLog{}
 
-	sink := New(events, tokens, users, &app.PriceTable{}, panickyObserver{}, wallClock{}, log)
+	sink := New(events, tokens, users, &app.PriceTable{}, noModels{}, panickyObserver{}, wallClock{}, log)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "boom", APIKey: sinkKey})
 	flushed(t, sink)
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "fine", APIKey: sinkKey})

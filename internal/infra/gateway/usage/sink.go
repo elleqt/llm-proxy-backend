@@ -30,6 +30,9 @@ type Observer interface {
 	ObserveVendorQuota(account, provider, window string, ratio float64, resetAt time.Time)
 	// ObserveAccountFailure counts a failed request served by a vendor account.
 	ObserveAccountFailure(account, provider string)
+	// ObserveLimitUnpriced counts tokens of a spend-limited owner's request
+	// that no price covered, so they are missing from the owner's windows.
+	ObserveLimitUnpriced(provider, model string, tokens int64)
 }
 
 const (
@@ -70,6 +73,7 @@ type Sink struct {
 	tokens   app.TokenRepo
 	users    app.UserRepo
 	prices   app.PriceLookup
+	catalog  app.PricingCatalog
 	observer Observer
 	clock    app.Clock
 	log      app.Logger
@@ -94,15 +98,17 @@ var (
 )
 
 // New starts the sink's worker; it runs for the life of the process.
-// prices must answer from memory: it is read for every record.
+// prices must answer from memory: it is read for every record. catalog prices
+// a record by the name the client asked for when its upstream name has none.
 func New(events app.UsageRepo, tokens app.TokenRepo, users app.UserRepo, prices app.PriceLookup,
-	observer Observer, clock app.Clock, log app.Logger,
+	catalog app.PricingCatalog, observer Observer, clock app.Clock, log app.Logger,
 ) *Sink {
 	sink := &Sink{
 		events:     events,
 		tokens:     tokens,
 		users:      users,
 		prices:     prices,
+		catalog:    catalog,
 		observer:   observer,
 		clock:      clock,
 		log:        log,
@@ -403,7 +409,8 @@ func (s *Sink) take(batch []cliproxyusage.Record, n int) []cliproxyusage.Record 
 }
 
 // process handles one batch: map and observe every record, write the ledger
-// rows, then stamp the tokens and owners the batch used.
+// rows, alert on unpriced tokens of spend-limited owners, then stamp the tokens
+// and owners the batch used.
 func (s *Sink) process(records []cliproxyusage.Record) {
 	events := make([]app.UsageEvent, 0, len(records))
 	for _, record := range records {
@@ -423,12 +430,33 @@ func (s *Sink) process(records []cliproxyusage.Record) {
 		ctx, cancel := context.WithTimeout(context.Background(), usageWriteTimeout)
 		defer cancel()
 
-		if _, err := s.events.AppendBatch(ctx, events); err != nil {
+		limited, err := s.events.AppendBatch(ctx, events)
+		if err != nil {
 			s.log.Warn("usage ledger rows lost", slog.Int("rows", len(events)), slog.Any("err", err))
 		}
 
+		s.alertUnpriced(events, limited)
 		s.touch(ctx, events)
 	})
+}
+
+// alertUnpriced reports tokens of spend-limited owners no price covered: their
+// cost is missing from the owner's windows, which must not pass silently.
+func (s *Sink) alertUnpriced(events []app.UsageEvent, limited map[uuid.UUID]struct{}) {
+	for _, ev := range events {
+		if ev.Cost.UnpricedTokens == 0 {
+			continue
+		}
+
+		if _, ok := limited[ev.UserID]; !ok {
+			continue
+		}
+
+		s.observer.ObserveLimitUnpriced(ev.Provider, ev.Model, ev.Cost.UnpricedTokens)
+		s.log.Warn("spend-limited request has unpriced tokens",
+			slog.String("user_id", ev.UserID.String()), slog.String("provider", ev.Provider),
+			slog.String("model", ev.Model), slog.Int64("unpriced_tokens", ev.Cost.UnpricedTokens))
+	}
 }
 
 // guard runs fn, and on a panic counts it and hands the value to report.
@@ -505,6 +533,14 @@ func (s *Sink) eventOf(record cliproxyusage.Record) app.UsageEvent {
 	}
 
 	price, ok := s.prices.Price(ev.Provider, ev.Model)
+	if !ok && record.Alias != "" {
+		// record.Model is the upstream name after alias mapping; the gate checked
+		// the name the client asked for, so a price there prices the request.
+		if name, _, known := app.PricedName(s.catalog, record.Alias); known {
+			price, ok = s.prices.Price(ev.Provider, name)
+		}
+	}
+
 	ev.Cost = app.PriceUsage(ev, price, ok)
 
 	return ev

@@ -198,8 +198,12 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		// gw is set below, before anything is served.
 		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
+	catalog, err := gateway.NewCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
 	//nolint:contextcheck // the sink's goroutine lives until Drain, not for a boot context
-	sink := gwusage.New(usage, tokens, users, prices, meters, clock, logs)
+	sink := gwusage.New(usage, tokens, users, prices, catalog, meters, clock, logs)
 
 	registerSinkCounters(registry, sink)
 	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
