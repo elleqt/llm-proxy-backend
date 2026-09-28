@@ -38,7 +38,7 @@ const catalogDoc = `{
     "claude-\ttab":    {"cost": {"input": 3, "output": 15}}
   },
   "openai-codex": {
-    "gpt-5.5": {"cost": {"input": 5, "output": 30, "cacheRead": 0.5}},
+    "gpt-5.5": {"cost": {"input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 6.25}},
     "gpt-codex-nocost": {"cost": null}
   },
   "openai": {
@@ -51,6 +51,8 @@ const catalogDoc = `{
   }
 }`
 
+// The anthropic section's cache writes cost the one-hour rate, twice the input
+// rate, whatever the catalog states; the others' are taken as stated.
 func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 	got, err := pricecatalog.Parse([]byte(catalogDoc))
 	require.NoError(t, err, "Parse")
@@ -58,10 +60,10 @@ func TestParseMapsSectionsOntoOurProviders(t *testing.T) {
 	want := []app.ModelPrice{
 		// openai fills what openai-codex lacks a price for, and nothing else.
 		{Provider: "chatgpt", Model: "gpt-4.1", Input: 2, Output: 8, CacheRead: 0.5},
-		{Provider: "chatgpt", Model: "gpt-5.5", Input: 5, Output: 30, CacheRead: 0.5},
+		{Provider: "chatgpt", Model: "gpt-5.5", Input: 5, Output: 30, CacheRead: 0.5, CacheWrite: 6.25},
 		{Provider: "chatgpt", Model: "gpt-codex-nocost", Input: 1, Output: 4},
 		{Provider: "claude", Model: "claude-free"},
-		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 3.75},
+		{Provider: "claude", Model: "claude-sonnet-5", Input: 3, Output: 15, CacheRead: 0.3, CacheWrite: 6},
 	}
 	require.Len(t, got, len(want), "Parse = %+v", got)
 
