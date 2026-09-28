@@ -81,8 +81,9 @@ func (rt *router) getUserLimits(rw http.ResponseWriter, req *http.Request) {
 }
 
 // setUserLimits reads the mode as the contract pairs it with limits: custom
-// needs the list (an empty one meaning no limits), default refuses it. Anything
-// else is refused as the field limits before the service is asked.
+// needs the list (an empty one meaning no limits), default refuses it. A missing
+// or unknown mode, or limits wrongly paired with it, is refused before the
+// service is asked.
 func (rt *router) setUserLimits(rw http.ResponseWriter, req *http.Request) {
 	actor, _ := callerFrom(req.Context())
 
@@ -98,13 +99,24 @@ func (rt *router) setUserLimits(rw http.ResponseWriter, req *http.Request) {
 
 	var custom *limits.Set
 
-	switch {
-	case body.Mode == api.SpendLimitsUpdateModeCustom && body.Limits != nil:
+	switch body.Mode {
+	case api.SpendLimitsUpdateModeCustom:
+		if body.Limits == nil {
+			writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "limits", "custom mode needs limits")
+
+			return
+		}
+
 		set := setOf(*body.Limits)
 		custom = &set
-	case body.Mode == api.SpendLimitsUpdateModeDefault && body.Limits == nil:
+	case api.SpendLimitsUpdateModeDefault:
+		if body.Limits != nil {
+			writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "limits", "default mode takes no limits")
+
+			return
+		}
 	default:
-		writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "limits", "a field is missing or not acceptable")
+		writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "mode", "mode must be custom or default")
 
 		return
 	}

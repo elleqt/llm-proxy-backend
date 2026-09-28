@@ -122,14 +122,15 @@ func TestReplaceDefaultLimits(t *testing.T) {
 }
 
 // The mode decides whether limits is required: custom needs it (an empty list
-// means no limits), default refuses it.
+// means no limits), default refuses it; a missing or unknown mode names mode.
 func TestSetUserLimitsModes(t *testing.T) {
 	path := func(u identity.User) string { return "/api/admin/users/" + u.ID.String() + "/limits" }
 
 	for name, tc := range map[string]struct{ body, field string }{
 		"custom without limits": {`{"mode":"custom"}`, "limits"},
 		"default with limits":   {`{"mode":"default","limits":[]}`, "limits"},
-		"unknown mode":          {`{"mode":"strict","limits":[]}`, "limits"},
+		"unknown mode":          {`{"mode":"strict","limits":[]}`, "mode"},
+		"missing mode":          {`{"limits":[]}`, "mode"},
 		"invalid rule":          {`{"mode":"custom","limits":[{"windowMinutes":0,"amountUsd":1}]}`, "[0].windowMinutes"},
 	} {
 		t.Run(name, func(t *testing.T) {
