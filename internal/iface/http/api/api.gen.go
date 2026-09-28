@@ -135,6 +135,42 @@ func (e Role) Valid() bool {
 	}
 }
 
+// Defines values for SpendLimitsMode.
+const (
+	SpendLimitsModeCustom  SpendLimitsMode = "custom"
+	SpendLimitsModeDefault SpendLimitsMode = "default"
+)
+
+// Valid indicates whether the value is a known member of the SpendLimitsMode enum.
+func (e SpendLimitsMode) Valid() bool {
+	switch e {
+	case SpendLimitsModeCustom:
+		return true
+	case SpendLimitsModeDefault:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SpendLimitsUpdateMode.
+const (
+	SpendLimitsUpdateModeCustom  SpendLimitsUpdateMode = "custom"
+	SpendLimitsUpdateModeDefault SpendLimitsUpdateMode = "default"
+)
+
+// Valid indicates whether the value is a known member of the SpendLimitsUpdateMode enum.
+func (e SpendLimitsUpdateMode) Valid() bool {
+	switch e {
+	case SpendLimitsUpdateModeCustom:
+		return true
+	case SpendLimitsUpdateModeDefault:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Status.
 const (
 	Active  Status = "active"
@@ -242,6 +278,9 @@ type Catalog struct {
 
 		// Name The provider name as written in policy rules.
 		Name string `json:"name"`
+
+		// Unpriced GET /api/me/models only: models the policy admits but the caller's spend limits block for want of a price. Disjoint from models.
+		Unpriced *[]string `json:"unpriced,omitempty"`
 	} `json:"providers"`
 }
 
@@ -613,6 +652,62 @@ type SettingsUpdateResult struct {
 	Settings Settings `json:"settings"`
 }
 
+// SpendLimit defines model for SpendLimit.
+type SpendLimit struct {
+	// AmountUsd US dollars the account may spend within one window: above 0, at most 1000000.
+	AmountUsd float64 `json:"amountUsd"`
+
+	// WindowMinutes The window in whole minutes.
+	WindowMinutes int `json:"windowMinutes"`
+}
+
+// SpendLimitReset defines model for SpendLimitReset.
+type SpendLimitReset struct {
+	// WindowMinutes The window to reset; absent resets every window.
+	WindowMinutes *int `json:"windowMinutes,omitempty"`
+}
+
+// SpendLimits defines model for SpendLimits.
+type SpendLimits struct {
+	// Custom The account's own set; empty in `default` mode, and in `custom` mode for an account without limits.
+	Custom []SpendLimit `json:"custom"`
+
+	// Mode `default` inherits the global set; `custom` is the account's own.
+	Mode SpendLimitsMode `json:"mode"`
+
+	// Windows Every rule in force with its window, shortest window first.
+	Windows []SpendWindow `json:"windows"`
+}
+
+// SpendLimitsMode `default` inherits the global set; `custom` is the account's own.
+type SpendLimitsMode string
+
+// SpendLimitsUpdate defines model for SpendLimitsUpdate.
+type SpendLimitsUpdate struct {
+	// Limits Required with `custom` (empty means no limits); refused with `default`.
+	Limits *[]SpendLimit         `json:"limits,omitempty"`
+	Mode   SpendLimitsUpdateMode `json:"mode"`
+}
+
+// SpendLimitsUpdateMode defines model for SpendLimitsUpdate.Mode.
+type SpendLimitsUpdateMode string
+
+// SpendWindow defines model for SpendWindow.
+type SpendWindow struct {
+	AmountUsd float64 `json:"amountUsd"`
+
+	// Exhausted Requests are refused until resetsAt.
+	Exhausted bool       `json:"exhausted"`
+	ResetsAt  *time.Time `json:"resetsAt"`
+
+	// SpentUsd Spent in the live window; 0 when none is live.
+	SpentUsd float64 `json:"spentUsd"`
+
+	// StartedAt Null: no live window; the next request opens one.
+	StartedAt     *time.Time `json:"startedAt"`
+	WindowMinutes int        `json:"windowMinutes"`
+}
+
 // Status defines model for Status.
 type Status string
 
@@ -695,6 +790,9 @@ type TokenId = openapi_types.UUID
 // UserId defines model for UserId.
 type UserId = openapi_types.UUID
 
+// ReplaceDefaultLimitsJSONBody defines parameters for ReplaceDefaultLimits.
+type ReplaceDefaultLimitsJSONBody = []SpendLimit
+
 // ReplacePricesJSONBody defines parameters for ReplacePrices.
 type ReplacePricesJSONBody = []ModelPrice
 
@@ -726,6 +824,9 @@ type GetMyUsageParams struct {
 	// To Defaults to now.
 	To *To `form:"to,omitempty" json:"to,omitempty"`
 }
+
+// ReplaceDefaultLimitsJSONRequestBody defines body for ReplaceDefaultLimits for application/json ContentType.
+type ReplaceDefaultLimitsJSONRequestBody = ReplaceDefaultLimitsJSONBody
 
 // PreviewPolicyJSONRequestBody defines body for PreviewPolicy for application/json ContentType.
 type PreviewPolicyJSONRequestBody = PolicyPreviewRequest
@@ -759,6 +860,12 @@ type CreateUserJSONRequestBody = CreateUserRequest
 
 // UpdateUserJSONRequestBody defines body for UpdateUser for application/json ContentType.
 type UpdateUserJSONRequestBody = UpdateUserRequest
+
+// SetUserLimitsJSONRequestBody defines body for SetUserLimits for application/json ContentType.
+type SetUserLimitsJSONRequestBody = SpendLimitsUpdate
+
+// ResetUserLimitsJSONRequestBody defines body for ResetUserLimits for application/json ContentType.
+type ResetUserLimitsJSONRequestBody = SpendLimitReset
 
 // IssueUserTokenJSONRequestBody defines body for IssueUserToken for application/json ContentType.
 type IssueUserTokenJSONRequestBody = IssueTokenRequest

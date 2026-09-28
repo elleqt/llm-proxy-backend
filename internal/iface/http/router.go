@@ -13,6 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/spendlimits"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 )
@@ -33,6 +34,8 @@ type Deps struct {
 	Usage *usage.Service
 	// Models serves the cabinet's list of the models the caller may use.
 	Models *models.Service
+	// Limits serves the cabinet's and the administrators' spend limits.
+	Limits *spendlimits.Service
 
 	// The administration API's services.
 	AdminUsers *adminusers.Service
@@ -131,7 +134,7 @@ type router struct {
 // administrator guard.
 func NewRouter(deps Deps) (http.Handler, error) {
 	if deps.Auth == nil || deps.Tokens == nil || deps.Usage == nil || deps.Models == nil || deps.Clock == nil || deps.Log == nil ||
-		deps.AdminUsers == nil || deps.Settings == nil || deps.Prices == nil || deps.Providers == nil {
+		deps.AdminUsers == nil || deps.Settings == nil || deps.Prices == nil || deps.Providers == nil || deps.Limits == nil {
 		return nil, errMissingDependency
 	}
 
@@ -215,6 +218,7 @@ func (rt *router) routes() map[string]http.HandlerFunc {
 	rt.registerAdminUsers(routes)
 	rt.registerAdminSettings(routes)
 	rt.registerAdminProviders(routes)
+	rt.registerLimits(routes)
 
 	return routes
 }

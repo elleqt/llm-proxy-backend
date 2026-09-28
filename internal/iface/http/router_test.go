@@ -119,6 +119,7 @@ func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
 		"settings":  func(d *Deps) { d.Settings = nil },
 		"prices":    func(d *Deps) { d.Prices = nil },
 		"providers": func(d *Deps) { d.Providers = nil },
+		"limits":    func(d *Deps) { d.Limits = nil },
 	} {
 		d := env.deps
 		drop(&d)

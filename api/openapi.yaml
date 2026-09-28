@@ -252,11 +252,23 @@ paths:
       responses:
         "200":
           description: >
-            Providers in name order, models sorted within each; a provider with no allowed
-            model is absent. Empty when the policy allows nothing today.
+            Providers in name order, models sorted within each; a provider with neither an
+            allowed nor an unpriced model is absent. Empty when the policy allows nothing today.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Catalog" }
+
+  /api/me/limits:
+    get:
+      tags: [cabinet]
+      operationId: getMyLimits
+      summary: The caller's spend limits in force and the state of each window.
+      responses:
+        "200":
+          description: Every rule in force, shortest window first; `windows` is empty when none applies.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpendLimits" }
 
   /api/connect:
     get:
@@ -457,6 +469,80 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Activity" }
+
+  /api/admin/users/{userId}/limits:
+    get:
+      tags: [admin-users]
+      operationId: getUserLimits
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      responses:
+        "200":
+          description: The account's mode, own set and windows.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpendLimits" }
+        "404":
+          description: "`not_found`: no such account."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    put:
+      tags: [admin-users]
+      operationId: setUserLimits
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpendLimitsUpdate" }
+      responses:
+        "200":
+          description: Applied from the account's next request.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpendLimits" }
+        "404":
+          description: "`not_found`: no such account."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: >
+            `invalid_input`: `field` is `limits` (missing with `custom`, present with `default`,
+            or more than 10 entries) or an entry of it relative to `limits`, e.g. `[1].windowMinutes`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/admin/users/{userId}/limits/reset:
+    post:
+      tags: [admin-users]
+      operationId: resetUserLimits
+      summary: >
+        Close one window of the account, or all of them. The next request opens a new
+        window with nothing spent; the usage history is kept.
+      parameters: [{ $ref: "#/components/parameters/UserId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SpendLimitReset" }
+      responses:
+        "200":
+          description: Reset.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SpendLimits" }
+        "404":
+          description: "`not_found`: no such account."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: "`invalid_input` on `windowMinutes`: no rule in force has that window."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
 
   /api/admin/catalog:
     get:
@@ -767,6 +853,40 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/admin/limits:
+    get:
+      tags: [admin-settings]
+      operationId: getDefaultLimits
+      responses:
+        "200":
+          description: The global spend limits every account without its own set inherits.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SpendLimit" } }
+    put:
+      tags: [admin-settings]
+      operationId: replaceDefaultLimits
+      summary: Replace the global defaults. An empty list means no limits by default.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: array, items: { $ref: "#/components/schemas/SpendLimit" } }
+      responses:
+        "200":
+          description: Replaced; applies from the next request.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/SpendLimit" } }
+        "422":
+          description: >
+            `invalid_input` with `field` naming the entry, e.g. `[1].windowMinutes` (outside
+            1..525600 or repeated), `[0].amountUsd` (not above 0, or above 1000000), or
+            `limits` (more than 10 entries). Nothing is replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     session:
@@ -1052,6 +1172,10 @@ components:
               models:
                 type: array
                 items: { type: string }
+              unpriced:
+                type: array
+                items: { type: string }
+                description: "GET /api/me/models only: models the policy admits but the caller's spend limits block for want of a price. Disjoint from models."
 
     PolicyPreviewRequest:
       type: object
@@ -1316,6 +1440,53 @@ components:
           description: Ordered by provider, then model.
           items: { $ref: "#/components/schemas/PriceEntry" }
         catalog: { $ref: "#/components/schemas/PriceCatalog" }
+
+    SpendLimit:
+      type: object
+      required: [windowMinutes, amountUsd]
+      properties:
+        windowMinutes: { type: integer, minimum: 1, maximum: 525600, description: The window in whole minutes. }
+        amountUsd: { type: number, format: double, description: "US dollars the account may spend within one window: above 0, at most 1000000." }
+
+    SpendWindow:
+      type: object
+      required: [windowMinutes, amountUsd, spentUsd, startedAt, resetsAt, exhausted]
+      properties:
+        windowMinutes: { type: integer }
+        amountUsd: { type: number, format: double }
+        spentUsd: { type: number, format: double, description: Spent in the live window; 0 when none is live. }
+        startedAt: { type: [string, "null"], format: date-time, description: "Null: no live window; the next request opens one." }
+        resetsAt: { type: [string, "null"], format: date-time }
+        exhausted: { type: boolean, description: Requests are refused until resetsAt. }
+
+    SpendLimits:
+      type: object
+      required: [mode, custom, windows]
+      properties:
+        mode: { type: string, enum: [default, custom], description: "`default` inherits the global set; `custom` is the account's own." }
+        custom:
+          type: array
+          description: The account's own set; empty in `default` mode, and in `custom` mode for an account without limits.
+          items: { $ref: "#/components/schemas/SpendLimit" }
+        windows:
+          type: array
+          description: Every rule in force with its window, shortest window first.
+          items: { $ref: "#/components/schemas/SpendWindow" }
+
+    SpendLimitsUpdate:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [default, custom] }
+        limits:
+          type: array
+          description: Required with `custom` (empty means no limits); refused with `default`.
+          items: { $ref: "#/components/schemas/SpendLimit" }
+
+    SpendLimitReset:
+      type: object
+      properties:
+        windowMinutes: { type: integer, description: The window to reset; absent resets every window. }
 
 security:
   - session: []

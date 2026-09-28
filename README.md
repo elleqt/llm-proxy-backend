@@ -444,7 +444,7 @@ curl https://llm-proxy.example.com/v1/chat/completions \
   -d '{"model": "gpt-5", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-The gateway accepts the key as `Authorization: Bearer`, `X-Api-Key` or `X-Goog-Api-Key`. A `401` means the key is wrong, revoked, or its owner is blocked. A `403` means the key works but your rules do not cover that model.
+The gateway accepts the key as `Authorization: Bearer`, `X-Api-Key` or `X-Goog-Api-Key`. A `401` means the key is wrong, revoked, or its owner is blocked. A `403` means the key works but your rules do not cover that model, or, while spend limits apply to you, that the model `has no price` (the cabinet lists such models as unpriced). A `429` naming a spend limit means a window of yours is exhausted: it says when it resets, and `Retry-After` counts down to then.
 
 ## Access control
 

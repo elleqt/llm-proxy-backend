@@ -37,8 +37,9 @@ type (
 		Target  *string         `json:"target,omitempty"`
 	}
 	catalogProvider = struct {
-		Models []string `json:"models"`
-		Name   string   `json:"name"`
+		Models   []string  `json:"models"`
+		Name     string    `json:"name"`
+		Unpriced *[]string `json:"unpriced,omitempty"`
 	}
 	previewError = struct {
 		Code string `json:"code"`
@@ -389,7 +390,7 @@ func (rt *router) getCatalog(rw http.ResponseWriter, req *http.Request) {
 }
 
 // catalogOf writes providers as the contract's Catalog; a provider's models are []
-// rather than null.
+// rather than null, and unpriced is present only when it lists a model.
 func catalogOf(providers []app.CatalogProvider) api.Catalog {
 	out := api.Catalog{Providers: make([]catalogProvider, 0, len(providers))}
 	for _, provider := range providers {
@@ -398,7 +399,12 @@ func catalogOf(providers []app.CatalogProvider) api.Catalog {
 			models = []string{}
 		}
 
-		out.Providers = append(out.Providers, catalogProvider{Name: provider.Name, Models: models})
+		entry := catalogProvider{Name: provider.Name, Models: models}
+		if len(provider.Unpriced) > 0 {
+			entry.Unpriced = &provider.Unpriced
+		}
+
+		out.Providers = append(out.Providers, entry)
 	}
 
 	return out

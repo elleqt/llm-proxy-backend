@@ -20,6 +20,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/spendlimits"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -116,6 +117,7 @@ type testEnv struct {
 	activity *mocks.ActivityRepo
 	catalog  *mocks.ModelCatalog
 	settings *mocks.SettingsRepo
+	windows  *mocks.SpendWindowRepo
 	gateway  *mocks.ConfigPusher
 	prices   *mocks.PriceRepo
 	priceSet *mocks.PriceSink
@@ -186,6 +188,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		activity: mocks.NewActivityRepo(t),
 		catalog:  mocks.NewModelCatalog(t),
 		settings: mocks.NewSettingsRepo(t),
+		windows:  mocks.NewSpendWindowRepo(t),
 		gateway:  mocks.NewConfigPusher(t),
 		prices:   mocks.NewPriceRepo(t),
 		priceSet: mocks.NewPriceSink(t),
@@ -198,12 +201,15 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		acctMet:  mocks.NewAccountMetrics(t),
 	}
 
+	spend := spendlimits.New(env.users, env.settings, env.windows, env.audit, env.clock)
+
 	env.deps = Deps{
 		Auth: auth.New(env.users, env.pwds, auth.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
 		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
 		Usage:        usage.New(env.usage),
-		Models:       models.New(env.catalog),
+		Models:       models.New(env.catalog, &app.PriceTable{}, spend),
+		Limits:       spend,
 		LocalLogin:   true,
 		Clock:        env.clock,
 		Log:          env.log,

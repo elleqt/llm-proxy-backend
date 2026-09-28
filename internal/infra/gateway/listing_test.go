@@ -10,12 +10,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -275,7 +279,10 @@ func TestListingThroughTheWire(t *testing.T) {
 func TestCabinetListsWhatTheListingLists(t *testing.T) {
 	policy := &switchableResolver{}
 	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
-	cabinet := models.New(srv.gateway.Catalog())
+	// No spend limits are in force, so nothing is withheld for want of a price.
+	unlimited := mocks.NewSpendGate(t)
+	unlimited.EXPECT().Effective(mock.Anything).Return(limits.Set{}).Maybe()
+	cabinet := models.New(srv.gateway.Catalog(), &app.PriceTable{}, unlimited)
 
 	seq := strconv.FormatInt(wireSeq.Add(1), 10)
 	claudeOnly, codexOnly, shared := "cab-claude-"+seq, "cab-codex-"+seq, "cab-shared-"+seq
