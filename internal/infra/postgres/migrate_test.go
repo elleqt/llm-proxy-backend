@@ -23,6 +23,7 @@ var expectedTables = []string{
 	"audit_events",
 	"catalog_prices",
 	"catalog_state",
+	"limit_windows",
 	"login_attempts",
 	"model_prices",
 	"pending_identities",

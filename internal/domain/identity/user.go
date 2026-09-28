@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 )
 
@@ -36,14 +37,18 @@ const (
 )
 
 type User struct {
-	ID                 uuid.UUID
-	Kind               Kind
-	Email              string
-	DisplayName        string
-	Role               Role
-	Status             Status
-	Policy             access.Policy
-	PolicySource       PolicySource
+	ID           uuid.UUID
+	Kind         Kind
+	Email        string
+	DisplayName  string
+	Role         Role
+	Status       Status
+	Policy       access.Policy
+	PolicySource PolicySource
+	// SpendLimits is the account's own spend-limit set: nil inherits the global
+	// defaults, an empty set means no limits. Administrator-owned; an IdP login
+	// never touches it.
+	SpendLimits        *limits.Set
 	MustChangePassword bool
 	LastSeenAt         *time.Time
 	CreatedAt          time.Time

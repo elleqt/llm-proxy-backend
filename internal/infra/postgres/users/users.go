@@ -11,6 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres"
 	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
@@ -25,7 +26,7 @@ import (
 // column added here and not there fails every read rather than silently dropping a
 // field.
 const userColumns = `id, kind, email, display_name, role, status, policy,
-	policy_managed_by, must_change_password, last_seen_at, created_at`
+	policy_managed_by, must_change_password, last_seen_at, created_at, spend_limits`
 
 type Repo struct{ pool *pgxpool.Pool }
 
@@ -166,6 +167,33 @@ func (r *Repo) SetMustChangePassword(ctx context.Context, id uuid.UUID, must boo
 	tag, err := r.pool.Exec(ctx, `UPDATE users SET must_change_password = $2 WHERE id = $1`, id, must)
 	if err != nil {
 		return fmt.Errorf("postgres: set must change password: %w", err)
+	}
+
+	if tag.RowsAffected() == 0 {
+		return app.ErrNotFound
+	}
+
+	return nil
+}
+
+// UpdateSpendLimits writes spend_limits and nothing else. Like SetMustChangePassword
+// it has an owner of its own, the administrator, so Create leaves the column NULL
+// (a new account inherits the defaults) and SaveIdentityState never names it. An
+// unknown user is app.ErrNotFound: an edit that landed nowhere must not read as
+// success in the admin UI.
+func (r *Repo) UpdateSpendLimits(ctx context.Context, id uuid.UUID, custom *limits.Set) error {
+	var raw []byte // stays nil, written as NULL: inherit
+
+	if custom != nil {
+		var err error
+		if raw, err = postgres.EncodeLimits(*custom); err != nil {
+			return err
+		}
+	}
+
+	tag, err := r.pool.Exec(ctx, `UPDATE users SET spend_limits = $2::jsonb WHERE id = $1`, id, raw)
+	if err != nil {
+		return fmt.Errorf("postgres: update spend limits of %s: %w", id, err)
 	}
 
 	if tag.RowsAffected() == 0 {
@@ -377,6 +405,7 @@ type userRow struct {
 	MustChangePassword bool       `db:"must_change_password"`
 	LastSeenAt         *time.Time `db:"last_seen_at"`
 	CreatedAt          time.Time  `db:"created_at"`
+	SpendLimits        []byte     `db:"spend_limits"`
 }
 
 func (row userRow) user() (identity.User, error) {
@@ -402,6 +431,13 @@ func (row userRow) user() (identity.User, error) {
 	}
 
 	user.Policy = policy
+
+	spendLimits, err := decodeSpendLimits(row.SpendLimits)
+	if err != nil {
+		return identity.User{}, err
+	}
+
+	user.SpendLimits = spendLimits
 
 	return user, nil
 }
@@ -444,7 +480,7 @@ func scanUser(row pgx.Row) (identity.User, error) {
 
 	err := row.Scan(&scanned.ID, &scanned.Kind, &scanned.Email, &scanned.DisplayName, &scanned.Role,
 		&scanned.Status, &scanned.Policy, &scanned.PolicyManagedBy, &scanned.MustChangePassword,
-		&scanned.LastSeenAt, &scanned.CreatedAt)
+		&scanned.LastSeenAt, &scanned.CreatedAt, &scanned.SpendLimits)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return identity.User{}, app.ErrNotFound
 	}
@@ -454,6 +490,20 @@ func scanUser(row pgx.Row) (identity.User, error) {
 	}
 
 	return scanned.user()
+}
+
+// decodeSpendLimits reads users.spend_limits: NULL inherits the defaults (nil).
+func decodeSpendLimits(raw []byte) (*limits.Set, error) {
+	if raw == nil {
+		return nil, nil //nolint:nilnil // NULL is "inherit the defaults", not an error
+	}
+
+	set, err := postgres.DecodeLimits(raw)
+	if err != nil {
+		return nil, err
+	}
+
+	return &set, nil
 }
 
 // encodePolicy renders a policy as the JSON array of rule strings the column holds.

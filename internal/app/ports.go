@@ -13,6 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -53,6 +54,9 @@ type UserRepo interface {
 	// not folded into SaveIdentityState, which an IdP login calls and which must never
 	// touch an administrator-owned field.
 	SetMustChangePassword(ctx context.Context, id uuid.UUID, must bool) error
+	// UpdateSpendLimits writes the account's own spend limits and nothing else:
+	// nil makes it inherit the defaults again. An unknown user is ErrNotFound.
+	UpdateSpendLimits(ctx context.Context, id uuid.UUID, custom *limits.Set) error
 	// AdminExists reports whether any administrator exists, blocked ones included.
 	// Bootstrap reads it to decide whether a first administrator is still owed.
 	AdminExists(ctx context.Context) (bool, error)
@@ -573,13 +577,18 @@ type InfoLogger interface {
 }
 
 // SettingsRepo stores the editable upstream configuration document, verbatim as the
-// administrator wrote it. Postgres is its source of truth: the gateway's boot
-// configuration is built from it (settings.LoadBootConfig).
+// administrator wrote it, and the global spend-limit defaults. Postgres is its
+// source of truth: the gateway's boot configuration is built from it
+// (settings.LoadBootConfig).
 type SettingsRepo interface {
 	// UpstreamDocument returns the stored YAML document, or ErrNotFound when none
 	// was ever saved.
 	UpstreamDocument(ctx context.Context) (string, error)
 	SetUpstreamDocument(ctx context.Context, doc string, by uuid.UUID, at time.Time) error
+	// SpendLimitDefaults returns the global spend-limit set, empty when none was
+	// ever saved.
+	SpendLimitDefaults(ctx context.Context) (limits.Set, error)
+	SetSpendLimitDefaults(ctx context.Context, set limits.Set, by uuid.UUID, at time.Time) error
 }
 
 // VendorCredential is a vendor account's stored credential. Sealed is opaque to the

@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -46,6 +47,75 @@ type SettingsRepo_Expecter struct {
 
 func (_m *SettingsRepo) EXPECT() *SettingsRepo_Expecter {
 	return &SettingsRepo_Expecter{mock: &_m.Mock}
+}
+
+// SetSpendLimitDefaults provides a mock function for the type SettingsRepo
+func (_mock *SettingsRepo) SetSpendLimitDefaults(ctx context.Context, set limits.Set, by uuid.UUID, at time.Time) error {
+	ret := _mock.Called(ctx, set, by, at)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetSpendLimitDefaults")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, limits.Set, uuid.UUID, time.Time) error); ok {
+		r0 = returnFunc(ctx, set, by, at)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// SettingsRepo_SetSpendLimitDefaults_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetSpendLimitDefaults'
+type SettingsRepo_SetSpendLimitDefaults_Call struct {
+	*mock.Call
+}
+
+// SetSpendLimitDefaults is a helper method to define mock.On call
+//   - ctx context.Context
+//   - set limits.Set
+//   - by uuid.UUID
+//   - at time.Time
+func (_e *SettingsRepo_Expecter) SetSpendLimitDefaults(ctx any, set any, by any, at any) *SettingsRepo_SetSpendLimitDefaults_Call {
+	return &SettingsRepo_SetSpendLimitDefaults_Call{Call: _e.mock.On("SetSpendLimitDefaults", ctx, set, by, at)}
+}
+
+func (_c *SettingsRepo_SetSpendLimitDefaults_Call) Run(run func(ctx context.Context, set limits.Set, by uuid.UUID, at time.Time)) *SettingsRepo_SetSpendLimitDefaults_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 limits.Set
+		if args[1] != nil {
+			arg1 = args[1].(limits.Set)
+		}
+		var arg2 uuid.UUID
+		if args[2] != nil {
+			arg2 = args[2].(uuid.UUID)
+		}
+		var arg3 time.Time
+		if args[3] != nil {
+			arg3 = args[3].(time.Time)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *SettingsRepo_SetSpendLimitDefaults_Call) Return(err error) *SettingsRepo_SetSpendLimitDefaults_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *SettingsRepo_SetSpendLimitDefaults_Call) RunAndReturn(run func(ctx context.Context, set limits.Set, by uuid.UUID, at time.Time) error) *SettingsRepo_SetSpendLimitDefaults_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // SetUpstreamDocument provides a mock function for the type SettingsRepo
@@ -113,6 +183,68 @@ func (_c *SettingsRepo_SetUpstreamDocument_Call) Return(err error) *SettingsRepo
 }
 
 func (_c *SettingsRepo_SetUpstreamDocument_Call) RunAndReturn(run func(ctx context.Context, doc string, by uuid.UUID, at time.Time) error) *SettingsRepo_SetUpstreamDocument_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SpendLimitDefaults provides a mock function for the type SettingsRepo
+func (_mock *SettingsRepo) SpendLimitDefaults(ctx context.Context) (limits.Set, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SpendLimitDefaults")
+	}
+
+	var r0 limits.Set
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (limits.Set, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) limits.Set); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(limits.Set)
+		}
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// SettingsRepo_SpendLimitDefaults_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SpendLimitDefaults'
+type SettingsRepo_SpendLimitDefaults_Call struct {
+	*mock.Call
+}
+
+// SpendLimitDefaults is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *SettingsRepo_Expecter) SpendLimitDefaults(ctx any) *SettingsRepo_SpendLimitDefaults_Call {
+	return &SettingsRepo_SpendLimitDefaults_Call{Call: _e.mock.On("SpendLimitDefaults", ctx)}
+}
+
+func (_c *SettingsRepo_SpendLimitDefaults_Call) Run(run func(ctx context.Context)) *SettingsRepo_SpendLimitDefaults_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *SettingsRepo_SpendLimitDefaults_Call) Return(set limits.Set, err error) *SettingsRepo_SpendLimitDefaults_Call {
+	_c.Call.Return(set, err)
+	return _c
+}
+
+func (_c *SettingsRepo_SpendLimitDefaults_Call) RunAndReturn(run func(ctx context.Context) (limits.Set, error)) *SettingsRepo_SpendLimitDefaults_Call {
 	_c.Call.Return(run)
 	return _c
 }
