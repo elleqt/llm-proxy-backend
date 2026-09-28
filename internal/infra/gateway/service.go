@@ -86,6 +86,9 @@ type Params struct {
 	Limits app.SpendGate
 	// Prices is the price list in force. Required with Limits.
 	Prices app.PriceLookup
+	// Costs says whether a spend-limit refusal names the limit's amount in US
+	// dollars. Nil never names it.
+	Costs app.CostVisibility
 	// Observer is told what the policy gate refuses. Nil observes nothing.
 	Observer gate.Observer
 	// Log receives the policy gate's own failures. Nil discards them.
@@ -465,7 +468,7 @@ func newSpendCheck(params Params, catalog *Catalog) (*spendCheck, error) {
 		return nil, ErrNoPrices
 	}
 
-	return &spendCheck{limits: params.Limits, prices: params.Prices, catalog: catalog}, nil
+	return &spendCheck{limits: params.Limits, prices: params.Prices, catalog: catalog, costs: params.Costs}, nil
 }
 
 // noRequestLogger is the request logger factory New installs. It returns no

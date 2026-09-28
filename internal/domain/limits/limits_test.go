@@ -126,6 +126,27 @@ func TestStatesListEveryRuleInWindowOrder(t *testing.T) {
 	}, limits.States(limits.Set{long, short, mid}, rows, t0.Add(time.Hour)))
 }
 
+// The owner's share never reads 100 before the window refuses, nor below it once
+// it does: 99.99% of the amount is 99, the amount or an overshoot is 100.
+func TestSpentPercent(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spent     float64
+		exhausted bool
+		want      int
+	}{
+		"none live":              {0, false, 0},
+		"float just under 29%":   {0.29, false, 29},
+		"a hair under the limit": {0.9999, false, 99},
+		"exactly the limit":      {1, true, 100},
+		"overshoot":              {1.7, true, 100},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := limits.WindowState{Rule: rule(time.Hour, 1), SpentUSD: tc.spent, Exhausted: tc.exhausted}
+			require.Equal(t, tc.want, state.SpentPercent())
+		})
+	}
+}
+
 func TestLabel(t *testing.T) {
 	for window, want := range map[time.Duration]string{
 		90 * time.Minute: "90m", 2 * time.Hour: "2h", 24 * time.Hour: "1d", 7 * 24 * time.Hour: "7d", 25 * time.Hour: "25h",

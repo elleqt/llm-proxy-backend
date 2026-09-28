@@ -52,3 +52,24 @@ func TestSpendLimitDefaults(t *testing.T) {
 	_, err = repo.UpstreamDocument(ctx)
 	require.ErrorIs(t, err, app.ErrNotFound, "UpstreamDocument after saving spend limits")
 }
+
+// Never saved shows the least: costs stay hidden until an administrator turns
+// them on, and a save round-trips both ways.
+func TestDisplayConfig(t *testing.T) {
+	ctx := context.Background()
+	pool := pgtest.NewTestPool(t)
+	repo := settings.New(pool)
+
+	got, err := repo.DisplayConfig(ctx)
+	require.NoError(t, err, "DisplayConfig before any save")
+	require.Equal(t, app.DisplayConfig{}, got, "DisplayConfig before any save")
+
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	for _, want := range []app.DisplayConfig{{CostsVisible: true}, {CostsVisible: false}} {
+		require.NoError(t, repo.SetDisplayConfig(ctx, want, uuid.Nil, at), "save %+v", want)
+
+		got, err = repo.DisplayConfig(ctx)
+		require.NoError(t, err, "DisplayConfig after saving %+v", want)
+		require.Equal(t, want, got, "DisplayConfig after save")
+	}
+}

@@ -624,6 +624,25 @@ type SettingsRepo interface {
 	// ever saved.
 	SpendLimitDefaults(ctx context.Context) (limits.Set, error)
 	SetSpendLimitDefaults(ctx context.Context, set limits.Set, by uuid.UUID, at time.Time) error
+	// DisplayConfig returns what administrators let users see, the zero value
+	// (nothing extra) when it was never saved.
+	DisplayConfig(ctx context.Context) (DisplayConfig, error)
+	SetDisplayConfig(ctx context.Context, cfg DisplayConfig, by uuid.UUID, at time.Time) error
+}
+
+// DisplayConfig is what administrators let users see of the deployment. The zero
+// value shows the least.
+type DisplayConfig struct {
+	// CostsVisible shows users their costs in US dollars: in the cabinet, and the
+	// amount in a spend-limit refusal. Without it they see tokens and each
+	// limit's share only.
+	CostsVisible bool
+}
+
+// CostVisibility answers from memory whether users are shown their costs in US
+// dollars (DisplayConfig.CostsVisible).
+type CostVisibility interface {
+	CostsVisible() bool
 }
 
 // VendorCredential is a vendor account's stored credential. Sealed is opaque to the

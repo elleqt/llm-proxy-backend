@@ -44,22 +44,30 @@ func TestSpendLimitRefusesAndAdminResets(t *testing.T) {
 	require.True(t, proc.models(t, secret)[proc.a.alias], "priced model listed")
 
 	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "first request")
-	awaitSpent(t, proc, 0.7)
+	awaitSpent(t, proc, limitsPath, 0.7)
+
+	// The owner sees the share, never the dollars.
+	var mine api.MySpendLimits
+	proc.webJSON(t, http.MethodGet, "/api/me/limits", "", http.StatusOK, &mine)
+	require.Len(t, mine.Windows, 1, "the cabinet's windows")
+	require.Equal(t, 70, mine.Windows[0].SpentPercent, "the cabinet's share of $0.70 of $1")
+
 	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "second request: $0.70 < $1")
-	awaitSpent(t, proc, 1.4)
+	awaitSpent(t, proc, limitsPath, 1.4)
 	require.Equal(t, http.StatusTooManyRequests, proc.chat(t, secret, proc.a.alias), "third request over the limit")
 
 	proc.webJSON(t, http.MethodPost, limitsPath+"/reset", `{}`, http.StatusOK, nil)
 	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "after the reset")
 }
 
-// awaitSpent waits until the usage sink has charged the caller's one window up to
-// want: the charge lands after the response, so the next request must not race it.
-func awaitSpent(t *testing.T, proc *process, want float64) {
+// awaitSpent waits until the usage sink has charged the account's one window up
+// to want, read from the administrators' view of it at limitsPath: the charge
+// lands after the response, so the next request must not race it.
+func awaitSpent(t *testing.T, proc *process, limitsPath string, want float64) {
 	t.Helper()
 	eventually(t, fmt.Sprintf("the window has charged $%.2f", want), func() bool {
 		var got api.SpendLimits
-		proc.webJSON(t, http.MethodGet, "/api/me/limits", "", http.StatusOK, &got)
+		proc.webJSON(t, http.MethodGet, limitsPath, "", http.StatusOK, &got)
 
 		return len(got.Windows) == 1 && math.Abs(got.Windows[0].SpentUsd-want) < 1e-9
 	})

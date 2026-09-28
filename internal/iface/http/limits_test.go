@@ -23,8 +23,8 @@ func (e *testEnv) withDefaults(set limits.Set) {
 }
 
 // The cabinet shows the rules in force, shortest window first, each with its
-// live window or nulls when none is live; an account inheriting no defaults
-// has none.
+// live window or nulls when none is live, as a share of the limit; the amounts
+// only while users may see costs. An account inheriting no defaults has none.
 func TestGetMyLimits(t *testing.T) {
 	t.Run("no limits", func(t *testing.T) {
 		env := newEnv(t)
@@ -33,24 +33,50 @@ func TestGetMyLimits(t *testing.T) {
 
 		rec := env.do(http.MethodGet, "/api/me/limits", "", withCookie(env.signedIn(user)))
 		require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
-		assert.JSONEq(t, `{"mode":"default","custom":[],"windows":[]}`, rec.Body.String())
+		assert.JSONEq(t, `{"windows":[]}`, rec.Body.String())
 	})
 
-	t.Run("defaults with a live window", func(t *testing.T) {
-		env := newEnv(t)
-		env.withDefaults(limits.Set{{Window: 7 * 24 * time.Hour, AmountUSD: 50}, {Window: 2 * time.Hour, AmountUSD: 10}})
-
-		user := person("p@example.com")
+	live := func(env *testEnv, user identity.User) {
+		env.withDefaults(limits.Set{
+			{Window: 7 * 24 * time.Hour, AmountUSD: 50}, {Window: 2 * time.Hour, AmountUSD: 10}, {Window: 24 * time.Hour, AmountUSD: 30},
+		})
 		env.windows.EXPECT().Windows(mock.Anything, user.ID).Return([]limits.Window{
 			{Length: 2 * time.Hour, StartedAt: env.clock.Now().Add(-30 * time.Minute), SpentUSD: 10.5},
+			{Length: 24 * time.Hour, StartedAt: env.clock.Now().Add(-time.Hour), SpentUSD: 12.34},
 		}, nil)
+	}
+
+	t.Run("costs hidden: shares only", func(t *testing.T) {
+		env := newEnv(t)
+		user := person("p@example.com")
+		live(env, user)
 
 		rec := env.do(http.MethodGet, "/api/me/limits", "", withCookie(env.signedIn(user)))
 		require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
-		assert.JSONEq(t, `{"mode":"default","custom":[],"windows":[
-			{"windowMinutes":120,"amountUsd":10,"spentUsd":10.5,
+		assert.JSONEq(t, `{"windows":[
+			{"windowMinutes":120,"spentPercent":100,
 			 "startedAt":"2026-09-22T11:30:00Z","resetsAt":"2026-09-22T13:30:00Z","exhausted":true},
-			{"windowMinutes":10080,"amountUsd":50,"spentUsd":0,"startedAt":null,"resetsAt":null,"exhausted":false}
+			{"windowMinutes":1440,"spentPercent":41,
+			 "startedAt":"2026-09-22T11:00:00Z","resetsAt":"2026-09-23T11:00:00Z","exhausted":false},
+			{"windowMinutes":10080,"spentPercent":0,"startedAt":null,"resetsAt":null,"exhausted":false}
+		]}`, rec.Body.String())
+	})
+
+	t.Run("costs visible: amounts too", func(t *testing.T) {
+		env := newEnv(t)
+		env.withCostsVisible()
+
+		user := person("p@example.com")
+		live(env, user)
+
+		rec := env.do(http.MethodGet, "/api/me/limits", "", withCookie(env.signedIn(user)))
+		require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
+		assert.JSONEq(t, `{"windows":[
+			{"windowMinutes":120,"spentPercent":100,"amountUsd":10,"spentUsd":10.5,
+			 "startedAt":"2026-09-22T11:30:00Z","resetsAt":"2026-09-22T13:30:00Z","exhausted":true},
+			{"windowMinutes":1440,"spentPercent":41,"amountUsd":30,"spentUsd":12.34,
+			 "startedAt":"2026-09-22T11:00:00Z","resetsAt":"2026-09-23T11:00:00Z","exhausted":false},
+			{"windowMinutes":10080,"spentPercent":0,"amountUsd":50,"spentUsd":0,"startedAt":null,"resetsAt":null,"exhausted":false}
 		]}`, rec.Body.String())
 	})
 }
@@ -188,7 +214,7 @@ func TestGetUserLimits(t *testing.T) {
 		rec := env.do(http.MethodGet, path(target), "", withCookie(env.signedIn(admin())))
 		require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
 		assert.JSONEq(t, `{"mode":"custom","custom":[{"windowMinutes":60,"amountUsd":5}],"windows":[
-			{"windowMinutes":60,"amountUsd":5,"spentUsd":1.25,
+			{"windowMinutes":60,"amountUsd":5,"spentUsd":1.25,"spentPercent":25,
 			 "startedAt":"2026-09-22T11:45:00Z","resetsAt":"2026-09-22T12:45:00Z","exhausted":false}
 		]}`, rec.Body.String())
 	})
@@ -227,7 +253,7 @@ func TestResetUserLimits(t *testing.T) {
 				withCookie(env.signedIn(admin())))
 			require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
 			assert.JSONEq(t, `{"mode":"custom","custom":[{"windowMinutes":120,"amountUsd":10}],"windows":[
-				{"windowMinutes":120,"amountUsd":10,"spentUsd":0,"startedAt":null,"resetsAt":null,"exhausted":false}
+				{"windowMinutes":120,"amountUsd":10,"spentUsd":0,"spentPercent":0,"startedAt":null,"resetsAt":null,"exhausted":false}
 			]}`, rec.Body.String())
 		})
 	}

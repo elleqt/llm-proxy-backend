@@ -120,6 +120,7 @@ func TestNewRouterRefusesAMissingAdminService(t *testing.T) {
 		"prices":    func(d *Deps) { d.Prices = nil },
 		"providers": func(d *Deps) { d.Providers = nil },
 		"limits":    func(d *Deps) { d.Limits = nil },
+		"display":   func(d *Deps) { d.Display = nil },
 	} {
 		d := env.deps
 		drop(&d)
@@ -159,7 +160,7 @@ func TestEveryMiddlewareRefusalIsAJSONError(t *testing.T) {
 			u := person("restricted@example.com")
 			u.MustChangePassword = true
 
-			return e.do(http.MethodGet, "/api/connect", "", withCookie(e.signedIn(u)))
+			return e.do(http.MethodGet, "/api/config", "", withCookie(e.signedIn(u)))
 		}, http.StatusForbidden, codePasswordChangeRequired},
 		{"unknown path", func(e *testEnv) *httptest.ResponseRecorder {
 			return e.do(http.MethodGet, "/api/nothing-here", "")

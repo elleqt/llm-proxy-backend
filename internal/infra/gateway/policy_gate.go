@@ -21,11 +21,13 @@ import (
 )
 
 // spendCheck is the gate's spend-limit step (Params.Limits); nil enforces no
-// limits. catalog is the one prices are resolved in (app.PricedName).
+// limits. catalog is the one prices are resolved in (app.PricedName); costs, when
+// set and on, lets a refusal name the limit's amount.
 type spendCheck struct {
 	limits  app.SpendGate
 	prices  app.PriceLookup
 	catalog app.PricingCatalog
+	costs   app.CostVisibility
 }
 
 // effective is the owner's set in force; empty when limits are not enforced.
@@ -216,9 +218,15 @@ func admitSpend(ginCtx *gin.Context, spend *spendCheck, grant app.Grant, princip
 	// Honoured by the Anthropic and OpenAI SDKs: a window resets in hours, so an
 	// automatic retry would only repeat the refusal.
 	ginCtx.Header("X-Should-Retry", "false")
-	abortWithError(ginCtx, http.StatusTooManyRequests, "rate_limit_error", fmt.Sprintf(
-		"spend limit $%.2f per %s reached; resets at %s",
-		decision.Rule.AmountUSD, limits.Label(decision.Rule.Window), decision.ResetsAt.UTC().Format(time.RFC3339)))
+	// The amount only while administrators let users see costs; the window and
+	// the reset always.
+	limit := "spend limit per " + limits.Label(decision.Rule.Window)
+	if spend.costs != nil && spend.costs.CostsVisible() {
+		limit = fmt.Sprintf("spend limit $%.2f per %s", decision.Rule.AmountUSD, limits.Label(decision.Rule.Window))
+	}
+
+	abortWithError(ginCtx, http.StatusTooManyRequests, "rate_limit_error",
+		limit+" reached; resets at "+decision.ResetsAt.UTC().Format(time.RFC3339))
 
 	return false
 }

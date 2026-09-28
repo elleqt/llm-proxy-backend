@@ -171,6 +171,21 @@ type WindowState struct {
 	Exhausted bool
 }
 
+// SpentPercent is the share of the rule's amount spent in the live window, in
+// whole percent rounded down: 100 exactly when the window is exhausted, at most 99
+// otherwise, 0 when none is live. It is what the account's owner sees instead of
+// the amounts.
+func (s WindowState) SpentPercent() int {
+	if s.Exhausted {
+		return 100
+	}
+	// The epsilon keeps a share that float arithmetic lands just under a whole
+	// percent (0.29/1 is 28.999…) from losing it.
+	share := math.Floor(s.SpentUSD/s.Rule.AmountUSD*100 + 1e-9)
+
+	return int(min(max(share, 0), 99))
+}
+
 // States is every rule of set with its live window at now, shortest window first.
 func States(set Set, rows []Window, now time.Time) []WindowState {
 	stored := make(map[time.Duration]Window, len(rows))

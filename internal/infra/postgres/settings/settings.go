@@ -1,9 +1,10 @@
-// Package settings stores the editable upstream configuration document and the
-// global spend-limit defaults (app.SettingsRepo).
+// Package settings stores the editable upstream configuration document, the
+// global spend-limit defaults and what users are shown (app.SettingsRepo).
 package settings
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,6 +24,15 @@ const upstreamSettingsKey = "upstream"
 // spendLimitsKey is the settings row holding the global spend-limit defaults, as
 // postgres.EncodeLimits writes them.
 const spendLimitsKey = "spend_limits"
+
+// displayKey is the settings row holding app.DisplayConfig as displayRow.
+const displayKey = "display"
+
+// displayRow is the stored form of app.DisplayConfig; a field missing from a
+// row saved by an older build reads as its zero value, which shows the least.
+type displayRow struct {
+	CostsVisible bool `json:"costs_visible"`
+}
 
 type Repo struct{ pool *pgxpool.Pool }
 
@@ -89,6 +99,46 @@ func (r *Repo) SetSpendLimitDefaults(ctx context.Context, set limits.Set, by uui
 		   SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
 		spendLimitsKey, raw, at.UTC(), postgres.NullUUID(by)); err != nil {
 		return fmt.Errorf("postgres: save spend limit defaults: %w", err)
+	}
+
+	return nil
+}
+
+// DisplayConfig reads a missing row as the zero value: until an administrator
+// saves it, users are shown nothing extra.
+func (r *Repo) DisplayConfig(ctx context.Context) (app.DisplayConfig, error) {
+	var raw []byte
+
+	err := r.pool.QueryRow(ctx, `SELECT value FROM settings WHERE key = $1`, displayKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return app.DisplayConfig{}, nil
+	}
+
+	if err != nil {
+		return app.DisplayConfig{}, fmt.Errorf("postgres: read display config: %w", err)
+	}
+
+	var row displayRow
+	if err := json.Unmarshal(raw, &row); err != nil {
+		return app.DisplayConfig{}, fmt.Errorf("postgres: decode display config: %w", err)
+	}
+
+	return app.DisplayConfig(row), nil
+}
+
+func (r *Repo) SetDisplayConfig(ctx context.Context, cfg app.DisplayConfig, by uuid.UUID, at time.Time) error {
+	raw, err := json.Marshal(displayRow(cfg))
+	if err != nil {
+		return fmt.Errorf("postgres: encode display config: %w", err)
+	}
+
+	if _, err := r.pool.Exec(ctx,
+		`INSERT INTO settings (key, value, updated_at, updated_by)
+		 VALUES ($1, $2::jsonb, $3, $4)
+		 ON CONFLICT (key) DO UPDATE
+		   SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by`,
+		displayKey, raw, at.UTC(), postgres.NullUUID(by)); err != nil {
+		return fmt.Errorf("postgres: save display config: %w", err)
 	}
 
 	return nil

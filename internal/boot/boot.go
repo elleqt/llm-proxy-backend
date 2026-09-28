@@ -23,6 +23,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
@@ -225,6 +226,11 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("spend limits: %w", err)
 	}
 
+	shown := display.New(settings, audit, clock)
+	if err := shown.Load(ctx); err != nil {
+		return nil, fmt.Errorf("display config: %w", err)
+	}
+
 	// The vendor accounts' credentials live in the database, sealed under
 	// LLMPROXY_CREDENTIALS_KEY. The store is registered process-wide before the
 	// gateway exists, so upstream code that asks sdkauth.GetTokenStore gets it,
@@ -277,6 +283,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Resolver:    app.NewTokenResolver(users, tokens),
 		Limits:      spend,
 		Prices:      prices,
+		Costs:       shown,
 		// The gate's 401s and refusals are counted, a denial under its owner.
 		Observer: gateMetrics{meters},
 		Log:      logger,
@@ -325,6 +332,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Usage:           appusage.New(usage),
 		Models:          models.New(gw.Catalog(), prices, spend),
 		Limits:          spend,
+		Display:         shown,
 		AdminUsers: adminusers.New(users, passwords, idents, sessions, pgactivity.New(pool),
 			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,

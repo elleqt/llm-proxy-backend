@@ -8,6 +8,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 	mock "github.com/stretchr/testify/mock"
@@ -47,6 +48,135 @@ type SettingsRepo_Expecter struct {
 
 func (_m *SettingsRepo) EXPECT() *SettingsRepo_Expecter {
 	return &SettingsRepo_Expecter{mock: &_m.Mock}
+}
+
+// DisplayConfig provides a mock function for the type SettingsRepo
+func (_mock *SettingsRepo) DisplayConfig(ctx context.Context) (app.DisplayConfig, error) {
+	ret := _mock.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DisplayConfig")
+	}
+
+	var r0 app.DisplayConfig
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context) (app.DisplayConfig, error)); ok {
+		return returnFunc(ctx)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context) app.DisplayConfig); ok {
+		r0 = returnFunc(ctx)
+	} else {
+		r0 = ret.Get(0).(app.DisplayConfig)
+	}
+	if returnFunc, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = returnFunc(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
+}
+
+// SettingsRepo_DisplayConfig_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DisplayConfig'
+type SettingsRepo_DisplayConfig_Call struct {
+	*mock.Call
+}
+
+// DisplayConfig is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *SettingsRepo_Expecter) DisplayConfig(ctx any) *SettingsRepo_DisplayConfig_Call {
+	return &SettingsRepo_DisplayConfig_Call{Call: _e.mock.On("DisplayConfig", ctx)}
+}
+
+func (_c *SettingsRepo_DisplayConfig_Call) Run(run func(ctx context.Context)) *SettingsRepo_DisplayConfig_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *SettingsRepo_DisplayConfig_Call) Return(displayConfig app.DisplayConfig, err error) *SettingsRepo_DisplayConfig_Call {
+	_c.Call.Return(displayConfig, err)
+	return _c
+}
+
+func (_c *SettingsRepo_DisplayConfig_Call) RunAndReturn(run func(ctx context.Context) (app.DisplayConfig, error)) *SettingsRepo_DisplayConfig_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SetDisplayConfig provides a mock function for the type SettingsRepo
+func (_mock *SettingsRepo) SetDisplayConfig(ctx context.Context, cfg app.DisplayConfig, by uuid.UUID, at time.Time) error {
+	ret := _mock.Called(ctx, cfg, by, at)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetDisplayConfig")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, app.DisplayConfig, uuid.UUID, time.Time) error); ok {
+		r0 = returnFunc(ctx, cfg, by, at)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// SettingsRepo_SetDisplayConfig_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetDisplayConfig'
+type SettingsRepo_SetDisplayConfig_Call struct {
+	*mock.Call
+}
+
+// SetDisplayConfig is a helper method to define mock.On call
+//   - ctx context.Context
+//   - cfg app.DisplayConfig
+//   - by uuid.UUID
+//   - at time.Time
+func (_e *SettingsRepo_Expecter) SetDisplayConfig(ctx any, cfg any, by any, at any) *SettingsRepo_SetDisplayConfig_Call {
+	return &SettingsRepo_SetDisplayConfig_Call{Call: _e.mock.On("SetDisplayConfig", ctx, cfg, by, at)}
+}
+
+func (_c *SettingsRepo_SetDisplayConfig_Call) Run(run func(ctx context.Context, cfg app.DisplayConfig, by uuid.UUID, at time.Time)) *SettingsRepo_SetDisplayConfig_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 app.DisplayConfig
+		if args[1] != nil {
+			arg1 = args[1].(app.DisplayConfig)
+		}
+		var arg2 uuid.UUID
+		if args[2] != nil {
+			arg2 = args[2].(uuid.UUID)
+		}
+		var arg3 time.Time
+		if args[3] != nil {
+			arg3 = args[3].(time.Time)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+			arg3,
+		)
+	})
+	return _c
+}
+
+func (_c *SettingsRepo_SetDisplayConfig_Call) Return(err error) *SettingsRepo_SetDisplayConfig_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *SettingsRepo_SetDisplayConfig_Call) RunAndReturn(run func(ctx context.Context, cfg app.DisplayConfig, by uuid.UUID, at time.Time) error) *SettingsRepo_SetDisplayConfig_Call {
+	_c.Call.Return(run)
+	return _c
 }
 
 // SetSpendLimitDefaults provides a mock function for the type SettingsRepo

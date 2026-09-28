@@ -15,6 +15,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
@@ -210,6 +211,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		Usage:        usage.New(env.usage),
 		Models:       models.New(env.catalog, &app.PriceTable{}, spend),
 		Limits:       spend,
+		Display:      display.New(env.settings, env.audit, env.clock),
 		LocalLogin:   true,
 		Clock:        env.clock,
 		Log:          env.log,
@@ -239,6 +241,14 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	env.handler = h
 
 	return env
+}
+
+// withCostsVisible makes the display settings the service holds show users their
+// costs, as boot's Load reads them.
+func (e *testEnv) withCostsVisible() {
+	e.t.Helper()
+	e.settings.EXPECT().DisplayConfig(mock.Anything).Return(app.DisplayConfig{CostsVisible: true}, nil).Once()
+	require.NoError(e.t, e.deps.Display.Load(e.t.Context()), "Load")
 }
 
 func person(email string) identity.User {

@@ -20,8 +20,10 @@ import (
 
 // spendEngine is a gated engine enforcing spend limits through a strict
 // SpendGate mock, for an owner whose own set is custom and whose policy admits
-// everything; reached reports whether a chat request got past the gate.
-func spendEngine(t *testing.T, custom *limits.Set, catalog catalogFunc, prices *app.PriceTable) (*gin.Engine, *bool, *mocks.SpendGate) {
+// everything; reached reports whether a chat request got past the gate. costs is
+// the step's cost visibility; none (nil) never names an amount.
+func spendEngine(t *testing.T, custom *limits.Set, catalog catalogFunc, prices *app.PriceTable, costs ...app.CostVisibility,
+) (*gin.Engine, *bool, *mocks.SpendGate) {
 	t.Helper()
 
 	limited := mocks.NewSpendGate(t)
@@ -32,7 +34,13 @@ func spendEngine(t *testing.T, custom *limits.Set, catalog catalogFunc, prices *
 
 		return gatePrincipal, app.Grant{Policy: mustPolicy("*:*"), SpendLimits: custom}, nil
 	})
-	engine := gateEngineWith(resolver, catalog, &spendCheck{limits: limited, prices: prices, catalog: catalog}, nil)
+
+	check := &spendCheck{limits: limited, prices: prices, catalog: catalog}
+	if len(costs) > 0 {
+		check.costs = costs[0]
+	}
+
+	engine := gateEngineWith(resolver, catalog, check, nil)
 	reached := new(bool)
 
 	engine.POST("/v1/chat/completions", func(c *gin.Context) { *reached = true; c.Status(http.StatusOK) })
@@ -66,22 +74,35 @@ var blockedUntilNoon = limits.Decision{
 }
 
 // TestSpendLimitRefusesWithRetryAfter: an exhausted window is a 429 naming the
-// rule and when it resets, with a Retry-After rounded up to whole seconds and
-// X-Should-Retry: false so SDKs do not retry a refusal that lasts hours.
+// window and when it resets, and the amount only while users may see costs, with
+// a Retry-After rounded up to whole seconds and X-Should-Retry: false so SDKs do
+// not retry a refusal that lasts hours.
 func TestSpendLimitRefusesWithRetryAfter(t *testing.T) {
-	engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
-	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
-	limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(blockedUntilNoon, nil)
+	for _, tc := range []struct {
+		name    string
+		visible bool
+		message string
+	}{
+		{"costs hidden", false, "spend limit per 2h reached; resets at 2026-09-28T12:00:00Z"},
+		{"costs visible", true, "spend limit $10.00 per 2h reached; resets at 2026-09-28T12:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			costs := mocks.NewCostVisibility(t)
+			costs.EXPECT().CostsVisible().Return(tc.visible)
 
-	rec := chat(engine, gateSecret, "m")
+			engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"), costs)
+			limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+			limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(blockedUntilNoon, nil)
 
-	require.Equal(t, http.StatusTooManyRequests, rec.Code)
-	assert.JSONEq(t,
-		`{"error":{"message":"spend limit $10.00 per 2h reached; resets at 2026-09-28T12:00:00Z","type":"rate_limit_error"}}`,
-		rec.Body.String())
-	assert.Equal(t, "91", rec.Header().Get("Retry-After"))
-	assert.Equal(t, "false", rec.Header().Get("X-Should-Retry"))
-	assert.False(t, *reached, "a refused request reached the handler")
+			rec := chat(engine, gateSecret, "m")
+
+			require.Equal(t, http.StatusTooManyRequests, rec.Code)
+			assert.JSONEq(t, `{"error":{"message":"`+tc.message+`","type":"rate_limit_error"}}`, rec.Body.String())
+			assert.Equal(t, "91", rec.Header().Get("Retry-After"))
+			assert.Equal(t, "false", rec.Header().Get("X-Should-Retry"))
+			assert.False(t, *reached, "a refused request reached the handler")
+		})
+	}
 }
 
 // TestUnpricedModelRefusedOnlyWithLimits: a model without a price cannot be

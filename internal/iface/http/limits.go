@@ -18,6 +18,8 @@ func (rt *router) registerLimits(routes map[string]http.HandlerFunc) {
 	routes["POST /api/admin/users/{userId}/limits/reset"] = rt.resetUserLimits
 }
 
+// getMyLimits shows the caller each window's share of its limit, and the amounts
+// in US dollars only when the caller may see costs.
 func (rt *router) getMyLimits(rw http.ResponseWriter, req *http.Request) {
 	actor, _ := callerFrom(req.Context())
 
@@ -28,7 +30,24 @@ func (rt *router) getMyLimits(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	writeJSON(rw, http.StatusOK, spendLimitsOf(view))
+	costs := rt.Display.CostsVisibleTo(actor.user)
+
+	out := api.MySpendLimits{Windows: make([]api.MySpendWindow, 0, len(view.Windows))}
+	for _, state := range view.Windows {
+		started, resets := liveSpan(state)
+
+		window := api.MySpendWindow{
+			WindowMinutes: int(state.Rule.Window / time.Minute), SpentPercent: state.SpentPercent(),
+			StartedAt: started, ResetsAt: resets, Exhausted: state.Exhausted,
+		}
+		if costs {
+			window.AmountUsd, window.SpentUsd = &state.Rule.AmountUSD, &state.SpentUSD
+		}
+
+		out.Windows = append(out.Windows, window)
+	}
+
+	writeJSON(rw, http.StatusOK, out)
 }
 
 func (rt *router) getDefaultLimits(rw http.ResponseWriter, req *http.Request) {
@@ -205,17 +224,24 @@ func spendLimitsOf(view spendlimits.View) api.SpendLimits {
 	}
 
 	for _, state := range view.Windows {
-		sw := api.SpendWindow{
+		started, resets := liveSpan(state)
+		out.Windows = append(out.Windows, api.SpendWindow{
 			WindowMinutes: int(state.Rule.Window / time.Minute), AmountUsd: state.Rule.AmountUSD,
-			SpentUsd: state.SpentUSD, Exhausted: state.Exhausted,
-		}
-		if !state.StartedAt.IsZero() {
-			started, resets := state.StartedAt.UTC(), state.ResetsAt.UTC()
-			sw.StartedAt, sw.ResetsAt = &started, &resets
-		}
-
-		out.Windows = append(out.Windows, sw)
+			SpentUsd: state.SpentUSD, SpentPercent: state.SpentPercent(), StartedAt: started, ResetsAt: resets,
+			Exhausted: state.Exhausted,
+		})
 	}
 
 	return out
+}
+
+// liveSpan is a window's start and reset in UTC, both nil when none is live.
+func liveSpan(state limits.WindowState) (*time.Time, *time.Time) {
+	if state.StartedAt.IsZero() {
+		return nil, nil
+	}
+
+	started, resets := state.StartedAt.UTC(), state.ResetsAt.UTC()
+
+	return &started, &resets
 }

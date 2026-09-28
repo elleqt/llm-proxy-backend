@@ -9,6 +9,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
@@ -36,6 +37,9 @@ type Deps struct {
 	Models *models.Service
 	// Limits serves the cabinet's and the administrators' spend limits.
 	Limits *spendlimits.Service
+	// Display holds what users are shown (costs in US dollars or not) and serves
+	// its administration.
+	Display *display.Service
 
 	// The administration API's services.
 	AdminUsers *adminusers.Service
@@ -123,7 +127,7 @@ type router struct {
 	sealer  *challengeSealer // nil without OIDC
 }
 
-// NewRouter builds the web API: /api/auth/*, the cabinet (/api/me/*), /api/connect
+// NewRouter builds the web API: /api/auth/*, the cabinet (/api/me/*), /api/config
 // and the administration API (/api/admin/*). It is served on its own listener
 // (config.Web.Addr), never on the proxied API's.
 //
@@ -133,8 +137,7 @@ type router struct {
 // then per route the rate limit, the session guard and, on /api/admin/*, the
 // administrator guard.
 func NewRouter(deps Deps) (http.Handler, error) {
-	if deps.Auth == nil || deps.Tokens == nil || deps.Usage == nil || deps.Models == nil || deps.Clock == nil || deps.Log == nil ||
-		deps.AdminUsers == nil || deps.Settings == nil || deps.Prices == nil || deps.Providers == nil || deps.Limits == nil {
+	if !deps.complete() {
 		return nil, errMissingDependency
 	}
 
@@ -192,6 +195,13 @@ func NewRouter(deps Deps) (http.Handler, error) {
 	return recoverPanics(deps.Log, limitBody(requireJSON(loadSession(deps.Auth, deps.Log, mux)))), nil
 }
 
+// complete reports whether every required service is set.
+func (d *Deps) complete() bool {
+	return d.Auth != nil && d.Tokens != nil && d.Usage != nil && d.Models != nil && d.Clock != nil && d.Log != nil &&
+		d.AdminUsers != nil && d.Settings != nil && d.Prices != nil && d.Providers != nil && d.Limits != nil &&
+		d.Display != nil
+}
+
 // routes is every endpoint by its ServeMux pattern. Access is not decided here:
 // NewRouter applies anonymous, restrictedAllowed, signInLimited and adminOnly to
 // these keys.
@@ -209,7 +219,9 @@ func (rt *router) routes() map[string]http.HandlerFunc {
 		"DELETE /api/me/tokens/{tokenId}": rt.revokeMyToken,
 		"GET /api/me/usage":               rt.getMyUsage,
 		"GET /api/me/models":              rt.listMyModels,
-		"GET /api/connect":                rt.getConnectInfo,
+		"GET /api/config":                 rt.getConfig,
+		"GET /api/admin/config":           rt.getAdminConfig,
+		"PUT /api/admin/config":           rt.replaceAdminConfig,
 	}
 	if !rt.LocalLogin {
 		delete(routes, routeLogin)

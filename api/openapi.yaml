@@ -236,7 +236,10 @@ paths:
         - $ref: "#/components/parameters/To"
       responses:
         "200":
-          description: Aggregated consumption for the caller.
+          description: >
+            Aggregated consumption for the caller. `totals.cost` and every `points[].costUSD`
+            are present only while `Config.costsVisible` is true; otherwise the answer
+            carries tokens and requests alone.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Usage" }
@@ -263,24 +266,30 @@ paths:
       tags: [cabinet]
       operationId: getMyLimits
       summary: The caller's spend limits in force and the state of each window.
+      description: >
+        Each window's share of its limit always; the amounts in US dollars only while
+        `Config.costsVisible` is true. Administrators see the amounts on the account's
+        limits either way.
       responses:
         "200":
           description: Every rule in force, shortest window first; `windows` is empty when none applies.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/SpendLimits" }
+              schema: { $ref: "#/components/schemas/MySpendLimits" }
 
-  /api/connect:
+  /api/config:
     get:
       tags: [cabinet]
-      operationId: getConnectInfo
-      summary: Addresses the connection instructions are rendered from.
+      operationId: getConfig
+      summary: >
+        The deployment's settings a signed-in user's interface is rendered with: where the
+        proxied API is, and what the cabinet may show. Every such value lives here.
       responses:
         "200":
-          description: Deployment addresses. The client holds the per-tool templates.
+          description: The settings in force.
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/ConnectInfo" }
+              schema: { $ref: "#/components/schemas/Config" }
 
   /api/admin/users:
     get:
@@ -888,6 +897,32 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/admin/config:
+    get:
+      tags: [admin-settings]
+      operationId: getAdminConfig
+      responses:
+        "200":
+          description: The settings an administrator edits for what users are shown.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminConfig" }
+    put:
+      tags: [admin-settings]
+      operationId: replaceAdminConfig
+      summary: Replace them. Applies to every user from their next request; the change is audited.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminConfig" }
+      responses:
+        "200":
+          description: Replaced.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminConfig" }
+
 components:
   securitySchemes:
     session:
@@ -1012,7 +1047,7 @@ components:
         bucket: { type: string, enum: [hour, day] }
         totals:
           type: object
-          required: [requests, tokensTotal, cost]
+          required: [requests, tokensTotal]
           properties:
             requests: { type: integer, description: "Served model calls. Failed attempts, including ones the gateway retried on another account, are not counted. A request that also made a side call to another model (for example an image model behind a chat request) counts once per model served." }
             tokensTotal: { type: integer, description: "Every token spent, including tokens of failed or retried attempts." }
@@ -1021,7 +1056,7 @@ components:
           type: array
           items:
             type: object
-            required: [at, model, requests, tokensTotal, costUSD]
+            required: [at, model, requests, tokensTotal]
             properties:
               at: { type: string, format: date-time, description: Start of the bucket. }
               model: { type: string }
@@ -1052,13 +1087,30 @@ components:
             rate). Negative when writes cost more than reads saved.
         unpricedTokens: { type: integer, minimum: 0, description: "Tokens with no price when served (a model missing from the price list, or tokens the vendor did not classify). They are not in `totalUSD`, not counted as free." }
 
-    ConnectInfo:
+    Config:
       type: object
-      required: [apiBaseURL]
+      required: [apiBaseURL, costsVisible]
       properties:
         apiBaseURL:
           type: string
           description: Public base URL of the proxied API, without a trailing slash.
+        costsVisible:
+          type: boolean
+          description: >
+            Whether the cabinet shows the caller costs in US dollars, in usage and in spend
+            limits. Always true for an administrator; for everyone else it is
+            `AdminConfig.costsVisible`. When false the caller is shown tokens and each
+            limit's share only.
+
+    AdminConfig:
+      type: object
+      required: [costsVisible]
+      properties:
+        costsVisible:
+          type: boolean
+          description: >
+            Show users their costs in US dollars: in the cabinet, and the amount in the proxied
+            API's spend-limit refusal. Off by default.
 
     AdminUser:
       type: object
@@ -1451,14 +1503,23 @@ components:
 
     SpendWindow:
       type: object
-      required: [windowMinutes, amountUsd, spentUsd, startedAt, resetsAt, exhausted]
+      required: [windowMinutes, amountUsd, spentUsd, spentPercent, startedAt, resetsAt, exhausted]
       properties:
         windowMinutes: { type: integer }
         amountUsd: { type: number, format: double }
         spentUsd: { type: number, format: double, description: Spent in the live window; 0 when none is live. }
+        spentPercent: { $ref: "#/components/schemas/SpentPercent" }
         startedAt: { type: [string, "null"], format: date-time, description: "Null: no live window; the next request opens one." }
         resetsAt: { type: [string, "null"], format: date-time }
         exhausted: { type: boolean, description: Requests are refused until resetsAt. }
+
+    SpentPercent:
+      type: integer
+      minimum: 0
+      maximum: 100
+      description: >
+        Share of the limit spent in the live window, in whole percent rounded down: 100
+        exactly when the window is exhausted, 0 when none is live.
 
     SpendLimits:
       type: object
@@ -1473,6 +1534,27 @@ components:
           type: array
           description: Every rule in force with its window, shortest window first.
           items: { $ref: "#/components/schemas/SpendWindow" }
+
+    MySpendWindow:
+      type: object
+      required: [windowMinutes, spentPercent, startedAt, resetsAt, exhausted]
+      properties:
+        windowMinutes: { type: integer }
+        spentPercent: { $ref: "#/components/schemas/SpentPercent" }
+        amountUsd: { type: number, format: double, description: "The limit; present only while `Config.costsVisible` is true." }
+        spentUsd: { type: number, format: double, description: "Spent in the live window, 0 when none is live; present only while `Config.costsVisible` is true." }
+        startedAt: { type: [string, "null"], format: date-time, description: "Null: no live window; the next request opens one." }
+        resetsAt: { type: [string, "null"], format: date-time }
+        exhausted: { type: boolean, description: Requests are refused until resetsAt. }
+
+    MySpendLimits:
+      type: object
+      required: [windows]
+      properties:
+        windows:
+          type: array
+          description: Every rule in force with its window, shortest window first.
+          items: { $ref: "#/components/schemas/MySpendWindow" }
 
     SpendLimitsUpdate:
       type: object
