@@ -8,6 +8,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -25,10 +26,16 @@ import (
 // handed a controller whose deadlines are accepted and ignored. Tests of the
 // deadline itself serve the real engine (startWith).
 func gateEngine(resolver Resolver, catalog access.Catalog) *gin.Engine {
+	return gateEngineWith(resolver, catalog, nil, nil)
+}
+
+// gateEngineWith is gateEngine with the spend-limit step, telling observe of
+// every refusal; a nil observe observes nothing.
+func gateEngineWith(resolver Resolver, catalog access.Catalog, spend *spendCheck, observe gate.Observer) *gin.Engine {
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) {
 		c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
-	}, policyGate(resolver, catalog, nil, nil))
+	}, policyGate(resolver, catalog, spend, observe, nil))
 
 	return engine
 }
@@ -40,9 +47,9 @@ func (deadlineIgnored) SetReadDeadline(time.Time) error { return nil }
 
 // resolverFunc is a Resolver stub. It is not a mock: tests assert on what the
 // gateway does with its answer, not on how it was called.
-type resolverFunc func(ctx context.Context, secret string) (app.Principal, access.Policy, error)
+type resolverFunc func(ctx context.Context, secret string) (app.Principal, app.Grant, error)
 
-func (f resolverFunc) Resolve(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+func (f resolverFunc) Resolve(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 	return f(ctx, secret)
 }
 
@@ -64,14 +71,14 @@ func mustPolicy(rules ...string) access.Policy {
 // staticResolver accepts exactly secret, as principal whose owner's policy is rules,
 // and refuses everything else the way app.TokenResolver refuses.
 func staticResolver(secret string, principal app.Principal, rules ...string) resolverFunc {
-	policy := mustPolicy(rules...)
+	grant := app.Grant{Policy: mustPolicy(rules...)}
 
-	return func(_ context.Context, presented string) (app.Principal, access.Policy, error) {
+	return func(_ context.Context, presented string) (app.Principal, app.Grant, error) {
 		if presented != secret {
-			return app.Principal{}, nil, app.ErrInvalidCredentials
+			return app.Principal{}, app.Grant{}, app.ErrInvalidCredentials
 		}
 
-		return principal, policy, nil
+		return principal, grant, nil
 	}
 }
 
@@ -82,7 +89,7 @@ type switchableResolver struct {
 	rules []string
 }
 
-func (r *switchableResolver) Resolve(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+func (r *switchableResolver) Resolve(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 	r.mu.Lock()
 	rules := r.rules
 	r.mu.Unlock()

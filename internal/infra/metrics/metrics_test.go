@@ -263,6 +263,7 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 	metricSet.ObserveAccountFailure("a", "claude")
 	metricSet.SetPriceCatalog(35, time.Unix(1_790_000_000, 0))
 	metricSet.ObservePriceCatalogFailure()
+	metricSet.ObserveLimitUnpriced("claude", "unpriced", 1)
 
 	body := scrape(t, metricSet)
 
@@ -280,7 +281,7 @@ func TestHandlerServesPrefixedFamilies(t *testing.T) {
 		"llmproxy_cache_savings_usd_total", "llmproxy_cache_write_premium_usd_total",
 		"llmproxy_vendor_quota_burned_ratio_total",
 		"llmproxy_price_catalog_checked_timestamp_seconds", "llmproxy_price_catalog_models",
-		"llmproxy_price_catalog_check_failures_total",
+		"llmproxy_price_catalog_check_failures_total", "llmproxy_spend_limit_unpriced_tokens_total",
 	} {
 		assert.Contains(t, fams, name, "family missing from handler output")
 	}

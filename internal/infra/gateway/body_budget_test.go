@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -48,7 +47,7 @@ func userKey(user string, token int) string {
 
 // usersResolver admits gateSecret as gatePrincipal and every userKey as its
 // user, all allowed chatgpt's models.
-var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 	rest, ok := strings.CutPrefix(secret, "sk-user-")
 	if !ok {
 		return staticResolver(gateSecret, gatePrincipal, "chatgpt:*")(ctx, secret)
@@ -59,7 +58,7 @@ var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.P
 	return app.Principal{
 		UserID:  uuid.NewSHA1(uuid.NameSpaceOID, []byte(user)),
 		TokenID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(secret)),
-	}, mustPolicy("chatgpt:*"), nil
+	}, app.Grant{Policy: mustPolicy("chatgpt:*")}, nil
 }
 
 // heldEngine is a gated engine whose handlers signal entered with what they
@@ -417,7 +416,7 @@ func TestBodilessRequestGetsNoReadDeadline(t *testing.T) {
 
 	engine := gin.New()
 	engine.Use(readDeadlineControl(), policyGate(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"),
-		fixedCatalog(map[string][]string{"gemini-3-pro": {"chatgpt"}}), nil, nil))
+		fixedCatalog(map[string][]string{"gemini-3-pro": {"chatgpt"}}), nil, nil, nil))
 	engine.POST("/v1beta/models/*action", func(c *gin.Context) {
 		select {
 		case <-c.Request.Context().Done():
@@ -450,10 +449,10 @@ func TestBodyIsRefusedWithoutAReadDeadline(t *testing.T) {
 	resolver := staticResolver(gateSecret, gatePrincipal, "chatgpt:*")
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}})
 	withoutControl := gin.New()
-	withoutControl.Use(policyGate(resolver, catalog, nil, nil))
+	withoutControl.Use(policyGate(resolver, catalog, nil, nil, nil))
 
 	overRecorder := gin.New()
-	overRecorder.Use(readDeadlineControl(), policyGate(resolver, catalog, nil, nil))
+	overRecorder.Use(readDeadlineControl(), policyGate(resolver, catalog, nil, nil, nil))
 
 	for what, engine := range map[string]*gin.Engine{"no controller": withoutControl, "no deadline on the writer": overRecorder} {
 		reached := false
@@ -519,7 +518,7 @@ func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
 
 	engine := gin.New()
 	engine.Use(readDeadlineControl(), policyGate(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"),
-		fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}), nil, nil))
+		fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}), nil, nil, nil))
 	engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	inner, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
@@ -40,8 +39,8 @@ var bootSeq atomic.Int64
 // request: it refuses every credential, as app.TokenResolver refuses.
 type refuseAll struct{}
 
-func (refuseAll) Resolve(context.Context, string) (app.Principal, access.Policy, error) {
-	return app.Principal{}, nil, app.ErrInvalidCredentials
+func (refuseAll) Resolve(context.Context, string) (app.Principal, app.Grant, error) {
+	return app.Principal{}, app.Grant{}, app.ErrInvalidCredentials
 }
 
 // productionParams builds Params the way the production entry point does: the

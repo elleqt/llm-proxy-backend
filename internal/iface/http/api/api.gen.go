@@ -135,6 +135,42 @@ func (e Role) Valid() bool {
 	}
 }
 
+// Defines values for SpendLimitsMode.
+const (
+	SpendLimitsModeCustom  SpendLimitsMode = "custom"
+	SpendLimitsModeDefault SpendLimitsMode = "default"
+)
+
+// Valid indicates whether the value is a known member of the SpendLimitsMode enum.
+func (e SpendLimitsMode) Valid() bool {
+	switch e {
+	case SpendLimitsModeCustom:
+		return true
+	case SpendLimitsModeDefault:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SpendLimitsUpdateMode.
+const (
+	SpendLimitsUpdateModeCustom  SpendLimitsUpdateMode = "custom"
+	SpendLimitsUpdateModeDefault SpendLimitsUpdateMode = "default"
+)
+
+// Valid indicates whether the value is a known member of the SpendLimitsUpdateMode enum.
+func (e SpendLimitsUpdateMode) Valid() bool {
+	switch e {
+	case SpendLimitsUpdateModeCustom:
+		return true
+	case SpendLimitsUpdateModeDefault:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Status.
 const (
 	Active  Status = "active"
@@ -196,6 +232,12 @@ type Activity struct {
 	} `json:"requests"`
 }
 
+// AdminConfig defines model for AdminConfig.
+type AdminConfig struct {
+	// CostsVisible Show users their costs in US dollars: in the cabinet, and the amount in the proxied API's spend-limit refusal. Off by default.
+	CostsVisible bool `json:"costsVisible"`
+}
+
 // AdminUser defines model for AdminUser.
 type AdminUser struct {
 	CreatedAt   time.Time          `json:"createdAt"`
@@ -242,6 +284,9 @@ type Catalog struct {
 
 		// Name The provider name as written in policy rules.
 		Name string `json:"name"`
+
+		// Unpriced GET /api/me/models only: models the policy admits but the caller's spend limits block for want of a price. Disjoint from models.
+		Unpriced *[]string `json:"unpriced,omitempty"`
 	} `json:"providers"`
 }
 
@@ -308,10 +353,13 @@ type CompatProviderUpdate struct {
 	Prefix      *string       `json:"prefix,omitempty"`
 }
 
-// ConnectInfo defines model for ConnectInfo.
-type ConnectInfo struct {
+// Config defines model for Config.
+type Config struct {
 	// ApiBaseURL Public base URL of the proxied API, without a trailing slash.
 	ApiBaseURL string `json:"apiBaseURL"`
+
+	// CostsVisible Whether the cabinet shows the caller costs in US dollars, in usage and in spend limits. Always true for an administrator; for everyone else it is `AdminConfig.costsVisible`. When false the caller is shown tokens and each limit's share only.
+	CostsVisible bool `json:"costsVisible"`
 }
 
 // CostSummary What the tokens would have cost at the vendor's list prices, in US dollars: an estimate of work done, not a bill. Each request is priced when it is served, at the prices in force then, so a later price change does not rewrite history.
@@ -425,6 +473,32 @@ type ModelPrice struct {
 	Model      string  `json:"model"`
 	Output     float64 `json:"output"`
 	Provider   string  `json:"provider"`
+}
+
+// MySpendLimits defines model for MySpendLimits.
+type MySpendLimits struct {
+	// Windows Every rule in force with its window, shortest window first.
+	Windows []MySpendWindow `json:"windows"`
+}
+
+// MySpendWindow defines model for MySpendWindow.
+type MySpendWindow struct {
+	// AmountUsd The limit; present only while `Config.costsVisible` is true.
+	AmountUsd *float64 `json:"amountUsd,omitempty"`
+
+	// Exhausted Requests are refused until resetsAt.
+	Exhausted bool       `json:"exhausted"`
+	ResetsAt  *time.Time `json:"resetsAt"`
+
+	// SpentPercent Share of the limit spent in the live window, in whole percent rounded down: 100 exactly when the window is exhausted, 0 when none is live.
+	SpentPercent SpentPercent `json:"spentPercent"`
+
+	// SpentUsd Spent in the live window, 0 when none is live; present only while `Config.costsVisible` is true.
+	SpentUsd *float64 `json:"spentUsd,omitempty"`
+
+	// StartedAt Null: no live window; the next request opens one.
+	StartedAt     *time.Time `json:"startedAt"`
+	WindowMinutes int        `json:"windowMinutes"`
 }
 
 // PasswordChangeRequest defines model for PasswordChangeRequest.
@@ -613,6 +687,68 @@ type SettingsUpdateResult struct {
 	Settings Settings `json:"settings"`
 }
 
+// SpendLimit defines model for SpendLimit.
+type SpendLimit struct {
+	// AmountUsd US dollars the account may spend within one window: above 0, at most 1000000.
+	AmountUsd float64 `json:"amountUsd"`
+
+	// WindowMinutes The window in whole minutes.
+	WindowMinutes int `json:"windowMinutes"`
+}
+
+// SpendLimitReset defines model for SpendLimitReset.
+type SpendLimitReset struct {
+	// WindowMinutes The window to reset; absent resets every window.
+	WindowMinutes *int `json:"windowMinutes,omitempty"`
+}
+
+// SpendLimits defines model for SpendLimits.
+type SpendLimits struct {
+	// Custom The account's own set; empty in `default` mode, and in `custom` mode for an account without limits.
+	Custom []SpendLimit `json:"custom"`
+
+	// Mode `default` inherits the global set; `custom` is the account's own.
+	Mode SpendLimitsMode `json:"mode"`
+
+	// Windows Every rule in force with its window, shortest window first.
+	Windows []SpendWindow `json:"windows"`
+}
+
+// SpendLimitsMode `default` inherits the global set; `custom` is the account's own.
+type SpendLimitsMode string
+
+// SpendLimitsUpdate defines model for SpendLimitsUpdate.
+type SpendLimitsUpdate struct {
+	// Limits Required with `custom` (empty means no limits); refused with `default`.
+	Limits *[]SpendLimit         `json:"limits,omitempty"`
+	Mode   SpendLimitsUpdateMode `json:"mode"`
+}
+
+// SpendLimitsUpdateMode defines model for SpendLimitsUpdate.Mode.
+type SpendLimitsUpdateMode string
+
+// SpendWindow defines model for SpendWindow.
+type SpendWindow struct {
+	AmountUsd float64 `json:"amountUsd"`
+
+	// Exhausted Requests are refused until resetsAt.
+	Exhausted bool       `json:"exhausted"`
+	ResetsAt  *time.Time `json:"resetsAt"`
+
+	// SpentPercent Share of the limit spent in the live window, in whole percent rounded down: 100 exactly when the window is exhausted, 0 when none is live.
+	SpentPercent SpentPercent `json:"spentPercent"`
+
+	// SpentUsd Spent in the live window; 0 when none is live.
+	SpentUsd float64 `json:"spentUsd"`
+
+	// StartedAt Null: no live window; the next request opens one.
+	StartedAt     *time.Time `json:"startedAt"`
+	WindowMinutes int        `json:"windowMinutes"`
+}
+
+// SpentPercent Share of the limit spent in the live window, in whole percent rounded down: 100 exactly when the window is exhausted, 0 when none is live.
+type SpentPercent = int
+
 // Status defines model for Status.
 type Status string
 
@@ -657,8 +793,8 @@ type Usage struct {
 		At time.Time `json:"at"`
 
 		// CostUSD The priced part of this bucket's spend, as in `totals.cost.totalUSD`.
-		CostUSD float64 `json:"costUSD"`
-		Model   string  `json:"model"`
+		CostUSD *float64 `json:"costUSD,omitempty"`
+		Model   string   `json:"model"`
 
 		// Requests Served requests in this bucket, as in `totals.requests`.
 		Requests    int `json:"requests"`
@@ -667,7 +803,7 @@ type Usage struct {
 	To     time.Time `json:"to"`
 	Totals struct {
 		// Cost What the tokens would have cost at the vendor's list prices, in US dollars: an estimate of work done, not a bill. Each request is priced when it is served, at the prices in force then, so a later price change does not rewrite history.
-		Cost CostSummary `json:"cost"`
+		Cost *CostSummary `json:"cost,omitempty"`
 
 		// Requests Served model calls. Failed attempts, including ones the gateway retried on another account, are not counted. A request that also made a side call to another model (for example an image model behind a chat request) counts once per model served.
 		Requests int `json:"requests"`
@@ -694,6 +830,9 @@ type TokenId = openapi_types.UUID
 
 // UserId defines model for UserId.
 type UserId = openapi_types.UUID
+
+// ReplaceDefaultLimitsJSONBody defines parameters for ReplaceDefaultLimits.
+type ReplaceDefaultLimitsJSONBody = []SpendLimit
 
 // ReplacePricesJSONBody defines parameters for ReplacePrices.
 type ReplacePricesJSONBody = []ModelPrice
@@ -727,6 +866,12 @@ type GetMyUsageParams struct {
 	To *To `form:"to,omitempty" json:"to,omitempty"`
 }
 
+// ReplaceAdminConfigJSONRequestBody defines body for ReplaceAdminConfig for application/json ContentType.
+type ReplaceAdminConfigJSONRequestBody = AdminConfig
+
+// ReplaceDefaultLimitsJSONRequestBody defines body for ReplaceDefaultLimits for application/json ContentType.
+type ReplaceDefaultLimitsJSONRequestBody = ReplaceDefaultLimitsJSONBody
+
 // PreviewPolicyJSONRequestBody defines body for PreviewPolicy for application/json ContentType.
 type PreviewPolicyJSONRequestBody = PolicyPreviewRequest
 
@@ -759,6 +904,12 @@ type CreateUserJSONRequestBody = CreateUserRequest
 
 // UpdateUserJSONRequestBody defines body for UpdateUser for application/json ContentType.
 type UpdateUserJSONRequestBody = UpdateUserRequest
+
+// SetUserLimitsJSONRequestBody defines body for SetUserLimits for application/json ContentType.
+type SetUserLimitsJSONRequestBody = SpendLimitsUpdate
+
+// ResetUserLimitsJSONRequestBody defines body for ResetUserLimits for application/json ContentType.
+type ResetUserLimitsJSONRequestBody = SpendLimitReset
 
 // IssueUserTokenJSONRequestBody defines body for IssueUserToken for application/json ContentType.
 type IssueUserTokenJSONRequestBody = IssueTokenRequest

@@ -210,18 +210,15 @@ func TestRevokeAnswersForTokensThatCannotBeRevoked(t *testing.T) {
 }
 
 // Without from and to the window is the seven days up to now; the range reaches the
-// ledger as given, and the series comes back in the contract's shape.
+// ledger as given, and the series comes back in the contract's shape, dollars
+// included while users may see costs.
 func TestUsageDefaultsToTheLastSevenDays(t *testing.T) {
 	env := newEnv(t)
+	env.withCostsVisible()
+
 	user := person("person@example.com")
 	now := env.clock.Now()
-	env.usage.EXPECT().SeriesForUser(mock.Anything, user.ID, now.Add(-7*24*time.Hour), now).Return(app.UsageSeries{
-		Bucket: app.UsageBucketDay,
-		Totals: app.UsageTotals{Requests: 3, TokensTotal: 70, Cost: app.UsageCost{
-			InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: -0.75, UnpricedTokens: 9, Priced: true,
-		}},
-		Points: []app.UsagePoint{{At: now.Truncate(24 * time.Hour), Model: "m", Requests: 3, TokensTotal: 70, CostUSD: 3.75}},
-	}, nil)
+	env.usage.EXPECT().SeriesForUser(mock.Anything, user.ID, now.Add(-7*24*time.Hour), now).Return(usageSeries(now), nil)
 
 	var out api.Usage
 	decodeBody(t, env.do(http.MethodGet, "/api/me/usage", "", withCookie(env.signedIn(user))), http.StatusOK, &out)
@@ -238,8 +235,38 @@ func TestUsageDefaultsToTheLastSevenDays(t *testing.T) {
 		TotalUSD: 3.75, InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5,
 		CacheSavingsUSD: -0.75, UnpricedTokens: 9,
 	}
-	require.Equal(t, want, out.Totals.Cost, "total cost")
-	require.Equal(t, 3.75, out.Points[0].CostUSD, "point cost")
+	require.Equal(t, &want, out.Totals.Cost, "total cost")
+	require.Equal(t, new(3.75), out.Points[0].CostUSD, "point cost")
+}
+
+// While users may not see costs, the usage answer carries no dollar figure at
+// all, to users; an administrator's own cabinet still has them.
+func TestUsageHidesDollarsUnlessCostsAreVisible(t *testing.T) {
+	env := newEnv(t)
+	now := env.clock.Now()
+	env.usage.EXPECT().SeriesForUser(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(usageSeries(now), nil)
+
+	rec := env.do(http.MethodGet, "/api/me/usage", "", withCookie(env.signedIn(person("p@example.com"))))
+	require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
+	assert.JSONEq(t, `{"from":"2026-09-15T12:00:00Z","to":"2026-09-22T12:00:00Z","bucket":"day",
+		"totals":{"requests":3,"tokensTotal":70},
+		"points":[{"at":"2026-09-22T00:00:00Z","model":"m","requests":3,"tokensTotal":70}]}`, rec.Body.String())
+
+	var out api.Usage
+	decodeBody(t, env.do(http.MethodGet, "/api/me/usage", "", withCookie(env.signedIn(admin()))), http.StatusOK, &out)
+	require.NotNil(t, out.Totals.Cost, "an administrator's total cost")
+	require.Equal(t, new(3.75), out.Points[0].CostUSD, "an administrator's point cost")
+}
+
+// usageSeries is one day's priced usage ending at now.
+func usageSeries(now time.Time) app.UsageSeries {
+	return app.UsageSeries{
+		Bucket: app.UsageBucketDay,
+		Totals: app.UsageTotals{Requests: 3, TokensTotal: 70, Cost: app.UsageCost{
+			InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: -0.75, UnpricedTokens: 9, Priced: true,
+		}},
+		Points: []app.UsagePoint{{At: now.Truncate(24 * time.Hour), Model: "m", Requests: 3, TokensTotal: 70, CostUSD: 3.75}},
+	}
 }
 
 func TestUsageTakesAnExplicitRangeAndRefusesABadOne(t *testing.T) {
@@ -277,13 +304,27 @@ func TestUsageLedgerFailureIsInternal(t *testing.T) {
 		http.StatusInternalServerError, codeInternal)
 }
 
-func TestConnectNamesThePublicAPI(t *testing.T) {
-	e := newEnv(t)
+// The config names the public API and whether the caller sees costs: off by
+// default for a user, always on for an administrator, and on for everyone once an
+// administrator turns it on.
+func TestConfigNamesThePublicAPIAndCostVisibility(t *testing.T) {
+	env := newEnv(t)
+	config := func(u identity.User) api.Config {
+		var out api.Config
+		decodeBody(t, env.do(http.MethodGet, "/api/config", "", withCookie(env.signedIn(u))), http.StatusOK, &out)
 
-	var out api.ConnectInfo
-	decodeBody(t, e.do(http.MethodGet, "/api/connect", "", withCookie(e.signedIn(person("p@example.com")))), http.StatusOK, &out)
+		return out
+	}
 
-	require.Equal(t, testAPIURL, out.ApiBaseURL, "apiBaseURL")
+	require.Equal(t, api.Config{ApiBaseURL: testAPIURL, CostsVisible: false}, config(person("p@example.com")), "a user by default")
+	require.Equal(t, api.Config{ApiBaseURL: testAPIURL, CostsVisible: true}, config(admin()), "an administrator")
+
+	env.settings.EXPECT().SetDisplayConfig(mock.Anything, app.DisplayConfig{CostsVisible: true}, mock.Anything, env.clock.Now()).Return(nil)
+
+	var saved api.AdminConfig
+	decodeBody(t, env.do(http.MethodPut, "/api/admin/config", `{"costsVisible":true}`, withCookie(env.signedIn(admin()))), http.StatusOK, &saved)
+	require.True(t, saved.CostsVisible, "the saved setting")
+	require.True(t, config(person("p@example.com")).CostsVisible, "a user once turned on")
 }
 
 // The caller's models follow the policy the session loads with each request: an

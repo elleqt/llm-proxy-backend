@@ -26,6 +26,11 @@ const (
 	DenyUnknownModel
 	// DenyRouteNotAllowed: the path is not on the proxied listener's allow-list.
 	DenyRouteNotAllowed
+	// DenySpendLimit: an exhausted spend-limit window.
+	DenySpendLimit
+	// DenyUnpricedModel: a model without a price, for an owner with spend
+	// limits.
+	DenyUnpricedModel
 )
 
 // Observer is told what the policy gate refuses. The composition root adapts

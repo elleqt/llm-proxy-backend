@@ -21,7 +21,7 @@ const defaultUsageWindow = 7 * 24 * time.Hour
 // generated type: a contract change to the point breaks the build here.
 type usagePoint = struct {
 	At          time.Time `json:"at"`
-	CostUSD     float64   `json:"costUSD"`
+	CostUSD     *float64  `json:"costUSD,omitempty"`
 	Model       string    `json:"model"`
 	Requests    int       `json:"requests"`
 	TokensTotal int       `json:"tokensTotal"`
@@ -164,7 +164,8 @@ func utcPtr(t *time.Time) *time.Time {
 }
 
 // getMyUsage answers the caller's consumption over [from, to). to defaults to now,
-// from to seven days before to.
+// from to seven days before to. The dollar figures are left out unless the caller
+// may see costs.
 func (rt *router) getMyUsage(rw http.ResponseWriter, req *http.Request) {
 	actor, _ := callerFrom(req.Context())
 	query := req.URL.Query()
@@ -207,17 +208,25 @@ func (rt *router) getMyUsage(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	costs := rt.Display.CostsVisibleTo(actor.user)
+
 	out := api.Usage{From: from, To: to, Bucket: api.UsageBucket(series.Bucket)}
 	out.Totals.Requests = int(series.Totals.Requests)
 	out.Totals.TokensTotal = int(series.Totals.TokensTotal)
-	out.Totals.Cost = costSummaryOf(series.Totals.Cost)
+
+	if costs {
+		cost := costSummaryOf(series.Totals.Cost)
+		out.Totals.Cost = &cost
+	}
 
 	out.Points = make([]usagePoint, 0, len(series.Points))
 	for _, p := range series.Points {
-		out.Points = append(out.Points, usagePoint{
-			At: p.At.UTC(), Model: p.Model, Requests: int(p.Requests), TokensTotal: int(p.TokensTotal),
-			CostUSD: p.CostUSD,
-		})
+		point := usagePoint{At: p.At.UTC(), Model: p.Model, Requests: int(p.Requests), TokensTotal: int(p.TokensTotal)}
+		if costs {
+			point.CostUSD = &p.CostUSD
+		}
+
+		out.Points = append(out.Points, point)
 	}
 
 	writeJSON(rw, http.StatusOK, out)

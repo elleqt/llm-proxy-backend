@@ -28,7 +28,7 @@ const MaxBody = 64 << 20
 
 // parserVersion changes whenever Parse or sections would read the same document
 // into different prices, so validators stored by an older build are not sent.
-const parserVersion = 2
+const parserVersion = 3
 
 // The sentinels below carry the fixed part of each error message; where a call
 // site appends detail, the full text still reads as one sentence. The messages
@@ -48,10 +48,24 @@ var (
 // precedence order: a model an earlier section prices is not taken from a later
 // one. openai-codex is what the chatgpt accounts serve; openai only fills in the
 // models it lacks.
-var sections = [...]struct{ section, provider string }{
-	{"anthropic", "claude"},
-	{"openai-codex", "chatgpt"},
-	{"openai", "chatgpt"},
+//
+// oneHourCache marks a section whose cache writes are priced at Anthropic's
+// one-hour rate, twice the input rate, instead of the catalog's five-minute one.
+// Upstream asks for the one-hour cache on every request whose cache breakpoints
+// it places for a subscription (OAuth) account (internal/runtime/executor
+// shouldEnsureCacheControl and upgradeClaudeCacheControlTTL), and its usage record
+// carries a single cache-write count without the vendor's split by lifetime
+// (internal/runtime/executor/helps parseClaudeUsageNode), so every write is taken
+// as a one-hour one: the few five-minute writes (subagents, probes, a client's
+// explicit ttl) are overestimated rather than all one-hour ones underestimated.
+// Recheck both on an upstream bump.
+var sections = [...]struct {
+	section, provider string
+	oneHourCache      bool
+}{
+	{"anthropic", "claude", true},
+	{"openai-codex", "chatgpt", false},
+	{"openai", "chatgpt", false},
 }
 
 // Source fetches the catalog from one URL. It is an app.PriceCatalogSource.
@@ -168,7 +182,8 @@ type entry struct {
 // Only the mapped sections are decoded. A model is skipped when its id is blank or
 // carries a control character, when it has no cost, no input or no output rate,
 // when a rate is negative or not a finite number, or when its entry does not
-// decode; a missing cache rate is 0. Rates are taken as the catalog states them.
+// decode; a missing cache rate is 0. Rates are taken as the catalog states them,
+// except a oneHourCache section's cache-write rate, which is twice its input rate.
 func Parse(doc []byte) ([]app.ModelPrice, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(doc, &top); err != nil {
@@ -210,9 +225,14 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 
 			seen[entryKey] = true
 
+			cacheWrite := cost.CacheWrite
+			if sec.oneHourCache {
+				cacheWrite = 2 * *cost.Input
+			}
+
 			out = append(out, app.ModelPrice{
 				Provider: sec.provider, Model: model,
-				Input: *cost.Input, Output: *cost.Output, CacheRead: cost.CacheRead, CacheWrite: cost.CacheWrite,
+				Input: *cost.Input, Output: *cost.Output, CacheRead: cost.CacheRead, CacheWrite: cacheWrite,
 			})
 		}
 	}

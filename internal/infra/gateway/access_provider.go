@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
 
@@ -16,11 +15,11 @@ import (
 // under in upstream's access registry, and its Result.Provider.
 const accessProviderType = "llmproxy-token"
 
-// Resolver authenticates an API token secret, and returns the policy of the
+// Resolver authenticates an API token secret, and returns the grant of the
 // token's owner with the principal. app.TokenResolver implements it: every
 // refusal is app.ErrInvalidCredentials; any other error is a failed lookup.
 type Resolver interface {
-	Resolve(ctx context.Context, secret string) (app.Principal, access.Policy, error)
+	Resolve(ctx context.Context, secret string) (app.Principal, app.Grant, error)
 }
 
 // AccessProvider is upstream's request authentication, answered by API tokens
@@ -56,36 +55,36 @@ func (p *AccessProvider) Authenticate(ctx context.Context, r *http.Request) (*sd
 }
 
 // authenticate resolves the credential r presents to the principal it
-// authenticates and its owner's policy, and names where r presented it. No credential is
+// authenticates and its owner's grant, and names where r presented it. No credential is
 // no_credentials; a rejected one is invalid_credential; a failed lookup is an
 // internal error, so an outage is not reported to a client as a bad key. The
 // errors are upstream's own, so whoever answers with one — the access
 // provider through upstream's middleware, or the policy gate itself — sends
 // the same status and body.
-func authenticate(ctx context.Context, resolver Resolver, r *http.Request) (app.Principal, access.Policy, string, *sdkaccess.AuthError) {
+func authenticate(ctx context.Context, resolver Resolver, r *http.Request) (app.Principal, app.Grant, string, *sdkaccess.AuthError) {
 	candidates := credentialCandidates(r)
 	if len(candidates) == 0 {
 		// "Authorization: Bearer " presents a credential that is empty: upstream
 		// calls that invalid, not missing.
 		if r.Header.Get("Authorization") != "" {
-			return app.Principal{}, nil, "", sdkaccess.NewInvalidCredentialError()
+			return app.Principal{}, app.Grant{}, "", sdkaccess.NewInvalidCredentialError()
 		}
 
-		return app.Principal{}, nil, "", sdkaccess.NewNoCredentialsError()
+		return app.Principal{}, app.Grant{}, "", sdkaccess.NewNoCredentialsError()
 	}
 
 	for _, c := range candidates {
-		principal, policy, err := resolver.Resolve(ctx, c.secret)
+		principal, grant, err := resolver.Resolve(ctx, c.secret)
 		if err == nil {
-			return principal, policy, c.source, nil
+			return principal, grant, c.source, nil
 		}
 
 		if !errors.Is(err, app.ErrInvalidCredentials) {
-			return app.Principal{}, nil, "", sdkaccess.NewInternalAuthError("", err)
+			return app.Principal{}, app.Grant{}, "", sdkaccess.NewInternalAuthError("", err)
 		}
 	}
 
-	return app.Principal{}, nil, "", sdkaccess.NewInvalidCredentialError()
+	return app.Principal{}, app.Grant{}, "", sdkaccess.NewInvalidCredentialError()
 }
 
 func result(p app.Principal, source string) *sdkaccess.Result {

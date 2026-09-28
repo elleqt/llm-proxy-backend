@@ -8,6 +8,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
@@ -148,6 +149,12 @@ func TestUserRepo(t *testing.T) {
 		// instead and the caller sees a broken row rather than a shrunken policy.
 		user := identity.NewService(uuid.New(), "corrupt-policy", access.Policy{})
 		require.NoError(t, users.Create(ctx, user), "create")
+		// The broken row would fail every List that later subtests make on this
+		// shared database, so it goes once this subtest is done with it.
+		t.Cleanup(func() {
+			_, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, user.ID)
+			require.NoError(t, err, "delete the corrupt row")
+		})
 
 		_, err := pool.Exec(ctx,
 			`UPDATE users SET policy = '["no-colon-here"]'::jsonb WHERE id = $1`, user.ID)
@@ -484,5 +491,80 @@ func TestUserRepo(t *testing.T) {
 		imported := time.Date(2019, 3, 14, 15, 9, 26, 0, time.UTC)
 		at = store(t, newUser("imported", imported))
 		require.True(t, at.Equal(imported), "created_at = %v, want the caller's %v", at, imported)
+	})
+
+	t.Run("SpendLimitsRoundTrip", func(t *testing.T) {
+		person := identity.User{
+			ID: uuid.New(), Kind: identity.KindHuman, Email: "limited@example.com",
+			Role: identity.RoleUser, Status: identity.StatusActive, PolicySource: identity.PolicyLocal,
+		}
+		require.NoError(t, users.Create(ctx, person), "create user")
+
+		// ByID, List and View must all report the same stored value: the admin
+		// screens read the last two, the gateway the first.
+		requireSpendLimits := func(t *testing.T, want *limits.Set, step string) {
+			t.Helper()
+
+			got, err := users.ByID(ctx, person.ID)
+			require.NoError(t, err, "ByID %s", step)
+			require.Equal(t, want, got.SpendLimits, "ByID %s", step)
+
+			view, err := users.View(ctx, person.ID)
+			require.NoError(t, err, "View %s", step)
+			require.Equal(t, want, view.User.SpendLimits, "View %s", step)
+
+			all, err := users.List(ctx)
+			require.NoError(t, err, "List %s", step)
+
+			for _, v := range all {
+				if v.User.ID == person.ID {
+					require.Equal(t, want, v.User.SpendLimits, "List %s", step)
+
+					return
+				}
+			}
+
+			require.Failf(t, "List omits the account", "List %s", step)
+		}
+
+		// A new account inherits the defaults: NULL, read back as nil.
+		requireSpendLimits(t, nil, "after create")
+
+		// "No limits" is a decision of its own and must not collapse into
+		// "inherit": an empty set reads back non-nil.
+		require.NoError(t, users.UpdateSpendLimits(ctx, person.ID, &limits.Set{}), "set empty")
+		requireSpendLimits(t, &limits.Set{}, "after empty")
+
+		custom := &limits.Set{{Window: 2 * time.Hour, AmountUSD: 10}}
+		require.NoError(t, users.UpdateSpendLimits(ctx, person.ID, custom), "set custom")
+		requireSpendLimits(t, custom, "after custom")
+
+		require.NoError(t, users.UpdateSpendLimits(ctx, person.ID, nil), "reset to inherit")
+		requireSpendLimits(t, nil, "after reset")
+	})
+
+	t.Run("UpdateSpendLimitsUnknownUser", func(t *testing.T) {
+		require.ErrorIs(t, users.UpdateSpendLimits(ctx, uuid.New(), nil), app.ErrNotFound)
+	})
+
+	t.Run("IdentityStateLeavesSpendLimits", func(t *testing.T) {
+		// Spend limits are administrator-owned: a federated login writes back the
+		// user it built from the IdP, which never carries them, and must not wipe
+		// what an administrator set.
+		person := identity.User{
+			ID: uuid.New(), Kind: identity.KindHuman, Email: "federated-limited@example.com",
+			Role: identity.RoleUser, Status: identity.StatusActive, PolicySource: identity.PolicyIDP,
+		}
+		require.NoError(t, users.Create(ctx, person), "create user")
+
+		custom := &limits.Set{{Window: 24 * time.Hour, AmountUSD: 30}}
+		require.NoError(t, users.UpdateSpendLimits(ctx, person.ID, custom), "set custom")
+
+		require.Nil(t, person.SpendLimits, "the login's user value carries no limits")
+		require.NoError(t, users.SaveIdentityState(ctx, person), "SaveIdentityState")
+
+		got, err := users.ByID(ctx, person.ID)
+		require.NoError(t, err, "ByID")
+		require.Equal(t, custom, got.SpendLimits, "SaveIdentityState touched spend_limits")
 	})
 }

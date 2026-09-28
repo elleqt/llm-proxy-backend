@@ -62,8 +62,11 @@ func TestProxiedRequestWritesOneLedgerRow(t *testing.T) {
 
 	require.NoError(t, tokens.Create(ctx, tok), "create token")
 
+	catalog, err := gateway.NewCatalog()
+	require.NoError(t, err, "catalogue")
+
 	meter := metrics.New(prometheus.NewRegistry())
-	sink := New(pgusage.New(pool), tokens, users, &app.PriceTable{}, meter, wallClock{}, discardLog{})
+	sink := New(pgusage.New(pool), tokens, users, &app.PriceTable{}, catalog, meter, wallClock{}, discardLog{})
 	wire := startOnTheWireWith(t, &faketest.Vendor{
 		Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
 			`"choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],` +

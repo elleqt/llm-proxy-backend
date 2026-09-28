@@ -77,6 +77,7 @@ type Metrics struct {
 	cacheSavings    *prometheus.CounterVec
 	cachePremium    *prometheus.CounterVec
 	unpriced        *prometheus.CounterVec
+	limitUnpriced   *prometheus.CounterVec
 	quotaBurned     *prometheus.CounterVec
 	catalogChecked  prometheus.Gauge
 	catalogModels   prometheus.Gauge
@@ -124,6 +125,8 @@ const (
 		"in the window seen by this process (a lower, late reading adds nothing; after the window resets its first " +
 		"reading counts from zero; quota burned while the process was down is not counted). 1.0 = one full window; " +
 		"pair with llmproxy_cost_usd_total / llmproxy_tokens_total to estimate the capacity of a window."
+	limitUnpricedHelp = "Tokens of spend-limited accounts' requests absent from the cost estimate: " +
+		"a breakdown the vendor did not classify, or a price removed after the request was admitted."
 )
 
 // Request latency runs from sub-second errors to multi-minute reasoning completions.
@@ -214,6 +217,10 @@ func New(reg Registry, opts ...Option) *Metrics {
 			Namespace: namespace, Name: "cost_unpriced_tokens_total",
 			Help: "Tokens absent from the cost estimate: those of models the price list had no price for, and those the vendor did not classify.",
 		}, []string{labelProvider, labelModel}),
+		limitUnpriced: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: namespace, Name: "spend_limit_unpriced_tokens_total",
+			Help: limitUnpricedHelp,
+		}, []string{labelProvider, labelModel}),
 		quotaBurned: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: namespace, Name: "vendor_quota_burned_ratio_total",
 			Help: quotaBurnedHelp,
@@ -243,7 +250,8 @@ func New(reg Registry, opts ...Option) *Metrics {
 		metricSet.policyDenied, metricSet.authFailures,
 		metricSet.quotaUsed, metricSet.quotaReset, metricSet.quotaObserved,
 		metricSet.accountDisabled, metricSet.accountFailures,
-		metricSet.cost, metricSet.cacheSavings, metricSet.cachePremium, metricSet.unpriced, metricSet.quotaBurned,
+		metricSet.cost, metricSet.cacheSavings, metricSet.cachePremium, metricSet.unpriced, metricSet.limitUnpriced,
+		metricSet.quotaBurned,
 		metricSet.catalogChecked, metricSet.catalogModels, metricSet.catalogFailures,
 		buildInfo,
 	)
@@ -374,12 +382,18 @@ const (
 	DenyUnknownModel
 	// DenyRouteNotAllowed: the path is not on the proxied listener's allow-list.
 	DenyRouteNotAllowed
+	// DenySpendLimit: an exhausted spend-limit window.
+	DenySpendLimit
+	// DenyUnpricedModel: a model without a price, for a user with spend limits.
+	DenyUnpricedModel
 )
 
 var denyReasons = [...]string{
 	DenyModelNotAllowed: "model_not_allowed",
 	DenyUnknownModel:    "unknown_model",
 	DenyRouteNotAllowed: "route_not_allowed",
+	DenySpendLimit:      "spend_limit",
+	DenyUnpricedModel:   "unpriced_model",
 }
 
 // String returns the reason's label value; a value outside the declared constants
@@ -470,6 +484,12 @@ func (m *Metrics) SetPriceCatalog(models int, checkedAt time.Time) {
 
 // ObservePriceCatalogFailure counts a failed price catalog check.
 func (m *Metrics) ObservePriceCatalogFailure() { m.catalogFailures.Inc() }
+
+// ObserveLimitUnpriced counts tokens of a spend-limited account's request that no
+// price covered, so they are missing from the account's spend windows.
+func (m *Metrics) ObserveLimitUnpriced(provider, model string, tokens int64) {
+	m.limitUnpriced.WithLabelValues(provider, model).Add(float64(tokens))
+}
 
 // observeCost counts ev.Cost, the cost the usage sink priced ev at when it
 // recorded it (app.PriceUsage), so the metrics and the ledger agree. A part that

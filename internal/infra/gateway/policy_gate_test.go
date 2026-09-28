@@ -25,6 +25,9 @@ type catalogFunc func(model string) []string
 
 func (f catalogFunc) ProvidersFor(model string) []string { return f(model) }
 
+// KnownModel canonicalises by exact name, so the stub is an app.PricingCatalog.
+func (f catalogFunc) KnownModel(model string) (string, bool) { return model, len(f(model)) > 0 }
+
 // fixedCatalog serves each model by the providers listed for it.
 func fixedCatalog(served map[string][]string) catalogFunc {
 	return func(model string) []string { return served[model] }
@@ -293,7 +296,7 @@ func TestGateRefusalsAreUpstreamsOwn(t *testing.T) {
 // looking the token up again.
 func TestGateResolvesTheTokenOnce(t *testing.T) {
 	lookups := 0
-	resolver := resolverFunc(func(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+	resolver := resolverFunc(func(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 		lookups++
 
 		return staticResolver(gateSecret, gatePrincipal, "chatgpt:*")(ctx, secret)

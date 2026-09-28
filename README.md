@@ -2,7 +2,9 @@
 
 [![backend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-backend?sort=semver&label=backend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-backend) [![frontend image](https://img.shields.io/docker/v/yoonaowo/llm-proxy-frontend?sort=semver&label=frontend%20image)](https://hub.docker.com/r/yoonaowo/llm-proxy-frontend) [![ci](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/elleqt/llm-proxy-backend/actions/workflows/ci.yml)
 
-A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions, and any OpenAI-compatible API, through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
+A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions, and any OpenAI-compatible API, through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, **per-user spend limits**, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
+
+> **Spend limits.** Cap what each person may spend per time window, with up to 10 windows at once: e.g. $10 per 2 hours **and** $30 per 24 hours, both counting at the same time. Set one default for everyone, then give any user their own limits or none at all. Users see how much of each limit they have used and when it resets; whether they also see dollars is up to you. [How it works](#spend-limits)
 
 > **llm-proxy is one system in two repositories:** [llm-proxy-backend](https://github.com/elleqt/llm-proxy-backend) — the gateway, web API and metrics (start here to run it) · [llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend) — the web interface: cabinet and admin panel.
 
@@ -38,8 +40,9 @@ A plain CLIProxyAPI setup keeps API keys and access in one config file. Everythi
 | A key leaks or a laptop is lost; you message the admin and wait | The user revokes the key in the cabinet. It stops working on the next request |
 | A new device or tool needs a key; the admin edits the config and restarts | The user issues their own key. No config edit, no restart |
 | Everyone can use every model | Access is set per person and per model (e.g. only ChatGPT, or only Sonnet), in the admin panel or from identity-provider groups. Changes apply to existing keys at once |
+| One heavy user burns the whole subscription | Spend limits per time window (e.g. $10 per 2 hours and $30 per day), one default for everyone and any user's own limits, or none. A user over a limit is refused until the window resets |
 | Onboarding and offboarding are manual | Access follows your identity provider: join the group to get in. Blocking an account cuts all its keys and sessions at once |
-| One shared key; nobody knows who used what | Each key belongs to a person or a service account. Usage, cost and quota use are visible per user: users see their own spend and cache savings, admins see everyone's, Prometheus gets the rest |
+| One shared key; nobody knows who used what | Each key belongs to a person or a service account. Usage, cost and quota use are visible per user: users see their own usage (and cost, if you allow it), admins see everyone's, Prometheus gets the rest |
 | Vendor tokens are copied onto the server by hand | Vendor accounts are added through a browser sign-in wizard |
 | Cost estimates need a price list someone maintains | Prices update themselves from a public model catalog; manual overrides win |
 | Nobody knows who changed what | Admin actions are written to an audit log |
@@ -60,10 +63,10 @@ Each kind can be added as many times as needed: several subscription accounts, s
 
 | | |
 |---|---|
-| ![Sign-in page](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/login.png)<br>Sign-in: local password and/or identity provider | ![Cabinet](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/cabinet.png)<br>Cabinet: your keys, usage and estimated cost |
+| ![Sign-in page](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/login.png)<br>Sign-in: local password and/or identity provider | ![Cabinet](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/cabinet.png)<br>Cabinet: your keys, usage and spend limits |
 | ![Connect page](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/connect.png)<br>Connect: client setup with your key filled in | ![Admin: users](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-users.png)<br>Admin: users and service accounts |
-| ![Admin: one user](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-user.png)<br>Admin: one user's access rules, keys and activity | ![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)<br>Admin: vendor accounts and quota |
-| ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)<br>Admin: gateway settings and prices | ![Cabinet, dark theme, Russian](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/cabinet-dark-ru.png)<br>Cabinet in the dark theme, Russian UI |
+| ![Admin: one user](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-user.png)<br>Admin: one user's access rules, spend limits, keys and activity | ![Admin: providers](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-providers.png)<br>Admin: vendor accounts and quota |
+| ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)<br>Admin: gateway settings, default spend limits, what users see, prices | ![Cabinet, dark theme, Russian](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/cabinet-dark-ru.png)<br>Cabinet in the dark theme, Russian UI |
 
 ## How it works
 
@@ -444,7 +447,7 @@ curl https://llm-proxy.example.com/v1/chat/completions \
   -d '{"model": "gpt-5", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-The gateway accepts the key as `Authorization: Bearer`, `X-Api-Key` or `X-Goog-Api-Key`. A `401` means the key is wrong, revoked, or its owner is blocked. A `403` means the key works but your rules do not cover that model.
+The gateway accepts the key as `Authorization: Bearer`, `X-Api-Key` or `X-Goog-Api-Key`. A `401` means the key is wrong, revoked, or its owner is blocked. A `403` means the key works but your rules do not cover that model, or, while spend limits apply to you, that the model `has no price` (the cabinet lists such models as unpriced). A `429` naming a spend limit means a window of yours is exhausted: it says when it resets, and `Retry-After` counts down to then.
 
 ## Access control
 
@@ -587,7 +590,29 @@ Checklist:
 - reset the password (a new 72-hour temporary password)
 - renew an OIDC invitation
 - list and revoke keys (and issue keys for service accounts)
+- set the account's spend limits, or return it to the defaults, and reset its windows
 - see recent activity: requests with token counts and cost, and audit events
+
+### Spend limits
+
+An administrator caps how many US dollars of estimated cost (the usage ledger's figure) an account may spend per time window, with up to 10 windows at once, e.g. $10 per 2 hours and $30 per 24 hours. All windows count at the same time: a user who spends $10 within 2 hours waits for that window to reset even with $20 left of the daily one, and once the daily window reaches $30 every request waits for it to reset. The limits are soft: the request that crosses one is still served, so a window can end slightly above its amount.
+
+- **Defaults for everyone:** **Admin → Settings → Default spend limits**. Every account without its own limits inherits them. An empty set means no limits by default.
+- **Per user:** on a user's page, **Default** inherits the defaults and **Custom** gives the account its own set, which replaces the defaults entirely. A custom set with no rows means no limits for that user, whatever the defaults are.
+- **Reset:** an administrator resets one window of a user or all of them; the next request starts a fresh window. The usage history is kept.
+- A window opens with the first request after it expired, was reset or never ran, and lasts its full length from then; nothing counts while the account is idle.
+- A request is admitted while every open window is below its limit, so the last one may overshoot by its own cost. Once a window is exhausted, requests get a `429` naming the window and when it resets (and the amount, when users may see costs), with `Retry-After` and `X-Should-Retry: false`.
+- While limits apply to an account, a model without a price on every provider serving it is refused (`403`) and hidden from `/v1/models`; the cabinet lists it as unpriced. Set its price in **Admin → Prices**.
+- The cabinet shows each window's share used and its reset time.
+- Every change and reset is recorded in the audit log.
+
+### What users see of costs
+
+**Admin → Settings → What users see → Show users their costs in US dollars** decides whether users see dollars. It is **off** by default and applies to everyone at once.
+
+- **Off:** the cabinet shows usage in tokens only, and each spend limit as the share used (e.g. `41%`), never its amount. The web API leaves every dollar figure out of the user's usage and limits, and a `429` names the window but not the amount.
+- **On:** the cabinet also shows usage and cost in dollars, and each limit as `$4.10 of $10.00 (41%)`.
+- Administrators always see dollars: in the admin panel, and in their own cabinet.
 
 ### Vendor accounts
 
@@ -619,14 +644,14 @@ Two providers may serve the same model name, for example two keys of one vendor:
 
 The price list (US dollars per million tokens: input, output, cache read, cache write) is used only for cost estimates.
 
-- **Catalog prices** come from the [oh-my-pi model catalog](https://github.com/can1357/oh-my-pi) (`LLMPROXY_PRICES_CATALOG_URL`). It is checked at start and then every 6 h by default (`LLMPROXY_PRICES_CATALOG_INTERVAL`). Its `anthropic` section maps to `claude`, and `openai-codex` (then `openai`) maps to `chatgpt`.
+- **Catalog prices** come from the [oh-my-pi model catalog](https://github.com/can1357/oh-my-pi) (`LLMPROXY_PRICES_CATALOG_URL`). It is checked at start and then every 6 h by default (`LLMPROXY_PRICES_CATALOG_INTERVAL`). Its `anthropic` section maps to `claude`, and `openai-codex` (then `openai`) maps to `chatgpt`. A `claude` cache write is priced at Anthropic's 1-hour rate, 2× input, not the catalog's 5-minute rate (see [How cost is computed](#how-cost-is-computed)).
 - **Manual prices** set by an administrator always win over the catalog. Removing one falls back to the catalog price.
 - **Refresh** checks the catalog immediately. A failed check keeps the prices in force and shows the error in the admin panel.
 - Set `LLMPROXY_PRICES_CATALOG_URL=off` to use manual prices only.
 
 ### Audit log
 
-Security-relevant actions are recorded in an append-only audit table with actor, target, IP and user agent. This covers sign-ins, key issue and revoke, user changes, password resets, vendor account changes, settings and prices. There is no global audit page: the admin panel shows audit events per user on the user's **Activity**. The full log is the `audit_events` table in Postgres.
+Security-relevant actions are recorded in an append-only audit table with actor, target, IP and user agent. This covers sign-ins, key issue and revoke, user changes, password resets, vendor account changes, settings, prices and spend limits. There is no global audit page: the admin panel shows audit events per user on the user's **Activity**. The full log is the `audit_events` table in Postgres.
 
 ## Metrics and cost
 
@@ -638,12 +663,13 @@ Prometheus scrapes `http://backend-metrics:9090/metrics` from a container attach
 | `llmproxy_requests_total` | counter | `user`, `provider`, `model`, `stream`, `status` (`1xx`…`5xx`, or `ok`/`error`) |
 | `llmproxy_request_duration_seconds` | histogram | `provider`, `model`, `stream` |
 | `llmproxy_ttft_seconds` | histogram | `provider`, `model` (streamed requests) |
-| `llmproxy_policy_denied_total` | counter | `user`, `model`, `reason` (`model_not_allowed`, `unknown_model`, `route_not_allowed`) |
+| `llmproxy_policy_denied_total` | counter | `user`, `model`, `reason` (`model_not_allowed`, `unknown_model`, `route_not_allowed`, `spend_limit`, `unpriced_model`) |
 | `llmproxy_auth_failures_total` | counter | `reason` |
 | `llmproxy_cost_usd_total` | counter | `user`, `provider`, `model`, `kind` (`input`, `output`, `cache_read`, `cache_write`) |
 | `llmproxy_cache_savings_usd_total` | counter | `user`, `provider`, `model` |
 | `llmproxy_cache_write_premium_usd_total` | counter | `user`, `provider`, `model` |
 | `llmproxy_cost_unpriced_tokens_total` | counter | `provider`, `model` |
+| `llmproxy_spend_limit_unpriced_tokens_total` | counter | `provider`, `model` |
 | `llmproxy_vendor_quota_used_ratio` | gauge | `account`, `provider`, `window` |
 | `llmproxy_vendor_quota_reset_timestamp_seconds` | gauge | `account`, `provider`, `window` |
 | `llmproxy_vendor_quota_observed_timestamp_seconds` | gauge | `account`, `provider`, `window` |
@@ -665,8 +691,9 @@ Cost is an **estimate at list prices**, not a bill.
 - Token kinds do not overlap: **input** (uncached), **output** (including reasoning, at the output rate), **cache read**, **cache write**.
 - A **cache-write rate of zero** bills cache writes at the input rate. OpenAI does not charge extra for writes.
 - **Unpriced tokens** (models with no price, and tokens the vendor did not classify) go to `llmproxy_cost_unpriced_tokens_total`. They are never counted as free.
+- **Unpriced tokens of an account under spend limits** also go to `llmproxy_spend_limit_unpriced_tokens_total`, and the backend logs a warning: they escaped the limit. They come from tokens the vendor did not classify, or a price removed between admitting a request and pricing it.
 - **Cache effect** compared with paying the input rate for all input: `cache_read × (input − cache_read_rate) − cache_write × (cache_write_rate − input)`. A positive result goes to `cache_savings_usd_total`, a negative one to `cache_write_premium_usd_total`. The net effect is the difference.
-- **Approximation:** the catalog's cache-write price is Anthropic's 5-minute write rate (1.25× input). Clients that ask for the 1-hour cache (omp does) pay 2× input, but the vendor reports a single cache-write count. If your clients use the long cache, set a manual price with `cacheWrite` = 2× input.
+- **Cache writes on `claude` cost the 1-hour rate** (2× input). The embedded CLIProxyAPI asks for the 1-hour cache on subscription accounts, and the vendor's split of writes by lifetime does not reach the usage record, so every write is taken as a 1-hour one. The rare 5-minute writes (subagents, probes, a client's explicit `ttl`) are overestimated rather than the usual 1-hour ones underestimated. A manual price overrides it.
 
 ### Example queries
 
@@ -690,6 +717,9 @@ histogram_quantile(0.95, sum by (le, model) (rate(llmproxy_request_duration_seco
 
 # Models being used without a price
 sum by (provider, model) (increase(llmproxy_cost_unpriced_tokens_total[1d])) > 0
+
+# Tokens that escaped a spend limit for lack of a price
+sum by (provider, model) (increase(llmproxy_spend_limit_unpriced_tokens_total[1d])) > 0
 ```
 
 ## Configuration reference

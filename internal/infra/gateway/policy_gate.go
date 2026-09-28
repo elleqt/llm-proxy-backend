@@ -3,16 +3,41 @@ package gateway
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
+	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 )
+
+// spendCheck is the gate's spend-limit step (Params.Limits); nil enforces no
+// limits. catalog is the one prices are resolved in (app.PricedName); costs, when
+// set and on, lets a refusal name the limit's amount.
+type spendCheck struct {
+	limits  app.SpendGate
+	prices  app.PriceLookup
+	catalog app.PricingCatalog
+	costs   app.CostVisibility
+}
+
+// effective is the owner's set in force; empty when limits are not enforced.
+func (s *spendCheck) effective(custom *limits.Set) limits.Set {
+	if s == nil {
+		return nil
+	}
+
+	return s.limits.Effective(custom)
+}
 
 // policyGate is the proxied listener's default-deny guard, first in the
 // embedded server's middleware. It does not rely on upstream's access check,
@@ -29,7 +54,7 @@ import (
 //     errors — so a refusal has upstream's status and body byte for byte. The
 //     principal goes on the request context (withPrincipal) and the access
 //     provider accepts it without resolving again. The resolver returns the
-//     owner's policy with it, so the owner is read once per request.
+//     owner's grant with it, so the owner is read once per request.
 //   - A model route needs a body within its limit (413 otherwise) and
 //     received within bodyReadTimeout (408 otherwise), which the gate holds
 //     in memory under the process-wide body budget until the handler returns
@@ -41,10 +66,14 @@ import (
 //     the requested model and nothing else.
 //   - A listing route lists only the models the same rule (access.Policy.Admits)
 //     admits.
+//   - For an owner whose spend limits are in force, a model route also needs
+//     the model priced on every provider serving it (403 otherwise) and no
+//     exhausted window (429, with Retry-After and X-Should-Retry: false); a
+//     listing lists only priced models. A refused request opens no window.
 //
 // observe is told of every 401 and every policy or route refusal; nil observes
 // nothing. log receives the gate's own failures; nil discards them.
-func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer, log *slog.Logger) gin.HandlerFunc {
+func policyGate(resolver Resolver, catalog access.Catalog, spend *spendCheck, observe gate.Observer, log *slog.Logger) gin.HandlerFunc {
 	if observe == nil {
 		observe = gate.NopObserver{}
 	}
@@ -87,7 +116,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer
 
 		ctx := ginCtx.Request.Context()
 
-		principal, policy, source, authErr := authenticate(ctx, resolver, ginCtx.Request)
+		principal, grant, source, authErr := authenticate(ctx, resolver, ginCtx.Request)
 		if authErr != nil {
 			refuseAuthentication(ginCtx, authErr, observe, log)
 
@@ -113,13 +142,13 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer
 		}
 
 		if matched.kind == routeListing {
-			serveListing(ginCtx, matched.listing, func(model string) bool { return policy.Admits(catalog, model) }, log)
+			serveListing(ginCtx, matched.listing, listingFilter(grant, catalog, spend), log)
 
 			return
 		}
 
 		model, providers := access.Routed(catalog, requested)
-		if !policy.Covers(model, providers) {
+		if !grant.Policy.Covers(model, providers) {
 			reason := gate.DenyModelNotAllowed
 			if len(providers) == 0 {
 				reason = gate.DenyUnknownModel
@@ -131,8 +160,75 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer
 			return
 		}
 
+		if !admitSpend(ginCtx, spend, grant, principal, requested, model, observe, log) {
+			return
+		}
+
 		ginCtx.Next()
 	}
+}
+
+// listingFilter is what a listing keeps for the owner of grant: the models the
+// policy admits and, while the owner's spend limits are in force, only those
+// priced on every provider serving them, so a listing names no model the gate
+// would refuse.
+func listingFilter(grant app.Grant, catalog access.Catalog, spend *spendCheck) func(string) bool {
+	if len(spend.effective(grant.SpendLimits)) == 0 {
+		return func(model string) bool { return grant.Policy.Admits(catalog, model) }
+	}
+
+	return func(model string) bool {
+		return grant.Policy.Admits(catalog, model) && app.PricedEverywhere(spend.catalog, spend.prices, model)
+	}
+}
+
+// admitSpend applies the owner's spend limits, if any are in force, and answers
+// the request itself when it refuses it.
+func admitSpend(ginCtx *gin.Context, spend *spendCheck, grant app.Grant, principal app.Principal,
+	requested, model string, observe gate.Observer, log *slog.Logger,
+) bool {
+	set := spend.effective(grant.SpendLimits)
+	if len(set) == 0 {
+		return true
+	}
+
+	if !app.PricedEverywhere(spend.catalog, spend.prices, requested) {
+		observe.Denied(principal.Owner, model, gate.DenyUnpricedModel)
+		abortWithError(ginCtx, http.StatusForbidden, "permission_error", "model "+requested+" has no price")
+
+		return false
+	}
+
+	ctx := ginCtx.Request.Context()
+
+	decision, err := spend.limits.Admit(ctx, principal.UserID, set)
+	if err != nil {
+		log.LogAttrs(ctx, slog.LevelError, "policy gate: spend limits unavailable", slog.Any("err", err))
+		abortWithError(ginCtx, http.StatusInternalServerError, "server_error", "spend limits unavailable")
+
+		return false
+	}
+
+	if !decision.Blocked {
+		return true
+	}
+
+	observe.Denied(principal.Owner, model, gate.DenySpendLimit)
+	ginCtx.Header("Retry-After", strconv.Itoa(max(int(math.Ceil(decision.Wait.Seconds())), 1)))
+	// Honoured by the Anthropic and OpenAI SDKs: a window resets in hours, so an
+	// automatic retry would only repeat the refusal.
+	ginCtx.Header("X-Should-Retry", "false")
+	// The amount only while administrators let users see costs; the window and
+	// the reset always.
+	limit := "spend limit per " + limits.Label(decision.Rule.Window)
+	if spend.costs != nil && spend.costs.CostsVisible() {
+		limit = fmt.Sprintf("spend limit $%.2f per %s", decision.Rule.AmountUSD, limits.Label(decision.Rule.Window))
+	}
+
+	abortWithError(ginCtx, http.StatusTooManyRequests, "rate_limit_error",
+		limit+" reached; resets at "+decision.ResetsAt.UTC().Format(time.RFC3339))
+
+	return false
 }
 
 // refuseAuthentication answers a request authenticate refused, with

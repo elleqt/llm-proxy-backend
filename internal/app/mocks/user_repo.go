@@ -11,6 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -859,6 +860,69 @@ func (_c *UserRepo_UpdatePolicy_Call) Return(err error) *UserRepo_UpdatePolicy_C
 }
 
 func (_c *UserRepo_UpdatePolicy_Call) RunAndReturn(run func(ctx context.Context, id uuid.UUID, p access.Policy) error) *UserRepo_UpdatePolicy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateSpendLimits provides a mock function for the type UserRepo
+func (_mock *UserRepo) UpdateSpendLimits(ctx context.Context, id uuid.UUID, custom *limits.Set) error {
+	ret := _mock.Called(ctx, id, custom)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateSpendLimits")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, uuid.UUID, *limits.Set) error); ok {
+		r0 = returnFunc(ctx, id, custom)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// UserRepo_UpdateSpendLimits_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateSpendLimits'
+type UserRepo_UpdateSpendLimits_Call struct {
+	*mock.Call
+}
+
+// UpdateSpendLimits is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id uuid.UUID
+//   - custom *limits.Set
+func (_e *UserRepo_Expecter) UpdateSpendLimits(ctx any, id any, custom any) *UserRepo_UpdateSpendLimits_Call {
+	return &UserRepo_UpdateSpendLimits_Call{Call: _e.mock.On("UpdateSpendLimits", ctx, id, custom)}
+}
+
+func (_c *UserRepo_UpdateSpendLimits_Call) Run(run func(ctx context.Context, id uuid.UUID, custom *limits.Set)) *UserRepo_UpdateSpendLimits_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 uuid.UUID
+		if args[1] != nil {
+			arg1 = args[1].(uuid.UUID)
+		}
+		var arg2 *limits.Set
+		if args[2] != nil {
+			arg2 = args[2].(*limits.Set)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *UserRepo_UpdateSpendLimits_Call) Return(err error) *UserRepo_UpdateSpendLimits_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *UserRepo_UpdateSpendLimits_Call) RunAndReturn(run func(ctx context.Context, id uuid.UUID, custom *limits.Set) error) *UserRepo_UpdateSpendLimits_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -15,11 +15,13 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	"github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/spendlimits"
 	"github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
@@ -116,6 +118,7 @@ type testEnv struct {
 	activity *mocks.ActivityRepo
 	catalog  *mocks.ModelCatalog
 	settings *mocks.SettingsRepo
+	windows  *mocks.SpendWindowRepo
 	gateway  *mocks.ConfigPusher
 	prices   *mocks.PriceRepo
 	priceSet *mocks.PriceSink
@@ -186,6 +189,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		activity: mocks.NewActivityRepo(t),
 		catalog:  mocks.NewModelCatalog(t),
 		settings: mocks.NewSettingsRepo(t),
+		windows:  mocks.NewSpendWindowRepo(t),
 		gateway:  mocks.NewConfigPusher(t),
 		prices:   mocks.NewPriceRepo(t),
 		priceSet: mocks.NewPriceSink(t),
@@ -198,12 +202,16 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 		acctMet:  mocks.NewAccountMetrics(t),
 	}
 
+	spend := spendlimits.New(env.users, env.settings, env.windows, env.audit, env.clock)
+
 	env.deps = Deps{
 		Auth: auth.New(env.users, env.pwds, auth.NewThrottle(env.attempts, testMaxFailures, testLockFor, env.clock),
 			cheapHasher(), env.sessions, env.audit, env.clock),
 		Tokens:       tokens.New(env.users, env.tokens, env.audit, env.clock, env.log),
 		Usage:        usage.New(env.usage),
-		Models:       models.New(env.catalog),
+		Models:       models.New(env.catalog, &app.PriceTable{}, spend),
+		Limits:       spend,
+		Display:      display.New(env.settings, env.audit, env.clock),
 		LocalLogin:   true,
 		Clock:        env.clock,
 		Log:          env.log,
@@ -233,6 +241,14 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 	env.handler = h
 
 	return env
+}
+
+// withCostsVisible makes the display settings the service holds show users their
+// costs, as boot's Load reads them.
+func (e *testEnv) withCostsVisible() {
+	e.t.Helper()
+	e.settings.EXPECT().DisplayConfig(mock.Anything).Return(app.DisplayConfig{CostsVisible: true}, nil).Once()
+	require.NoError(e.t, e.deps.Display.Load(e.t.Context()), "Load")
 }
 
 func person(email string) identity.User {

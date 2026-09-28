@@ -23,10 +23,12 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/adminusers"
 	"github.com/elleqt/llm-proxy-backend/internal/app/auth"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/app/models"
 	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/spendlimits"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
@@ -42,6 +44,7 @@ import (
 	pgactivity "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
 	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
 	pgidentities "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	pglimitwindows "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/limitwindows"
 	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
 	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
@@ -101,9 +104,9 @@ const (
 // Boot order: configuration and the process log, migrations, the pool,
 // repositories and the one password hasher, the bootstrap administrator, the
 // upstream boot configuration from the database, metrics, the price list and the
-// usage sink, the vendor credential store, the gateway, then the three listeners
-// and the price catalog's checks, and once the gateway runs, the model catalogue
-// updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// usage sink, the spend limits, the vendor credential store, the gateway, then
+// the three listeners and the price catalog's checks, and once the gateway runs,
+// the model catalogue updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
@@ -196,8 +199,13 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		// gw is set below, before anything is served.
 		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
+
+	catalog, err := gateway.NewCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("gateway: %w", err)
+	}
 	//nolint:contextcheck // the sink's goroutine lives until Drain, not for a boot context
-	sink := gwusage.New(usage, tokens, users, prices, meters, clock, logs)
+	sink := gwusage.New(usage, tokens, users, prices, catalog, meters, clock, logs)
 
 	registerSinkCounters(registry, sink)
 	// A nil source (LLMPROXY_PRICES_CATALOG_URL=off) leaves the manual prices alone
@@ -211,6 +219,16 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		prices, meters, audit, clock, logs)
 	if err := priceList.Load(ctx); err != nil {
 		return nil, fmt.Errorf("prices: %w", err)
+	}
+
+	spend := spendlimits.New(users, settings, pglimitwindows.New(pool), audit, clock)
+	if err := spend.Load(ctx); err != nil {
+		return nil, fmt.Errorf("spend limits: %w", err)
+	}
+
+	shown := display.New(settings, audit, clock)
+	if err := shown.Load(ctx); err != nil {
+		return nil, fmt.Errorf("display config: %w", err)
 	}
 
 	// The vendor accounts' credentials live in the database, sealed under
@@ -263,6 +281,9 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Store:       store,
 		Cooldown:    cooldown,
 		Resolver:    app.NewTokenResolver(users, tokens),
+		Limits:      spend,
+		Prices:      prices,
+		Costs:       shown,
 		// The gate's 401s and refusals are counted, a denial under its owner.
 		Observer: gateMetrics{meters},
 		Log:      logger,
@@ -309,7 +330,9 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		OIDCDisplayName: cfg.OIDC.DisplayName,
 		LocalLogin:      cfg.Web.LocalLogin,
 		Usage:           appusage.New(usage),
-		Models:          models.New(gw.Catalog()),
+		Models:          models.New(gw.Catalog(), prices, spend),
+		Limits:          spend,
+		Display:         shown,
 		AdminUsers: adminusers.New(users, passwords, idents, sessions, pgactivity.New(pool),
 			tokenService, hasher, audit, clock, gw.Catalog(), adminusers.Config{
 				OIDCIssuer:             cfg.OIDC.Issuer,

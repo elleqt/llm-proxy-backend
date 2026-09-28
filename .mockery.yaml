@@ -18,6 +18,9 @@ packages:
       PasswordRepo:
       SessionRepo:
       UsageRepo:
+      SpendWindowRepo:
+      SpendGate:
+      CostVisibility:
       AuditSink:
       IdentityProvider:
       IdentityRepo:

@@ -29,6 +29,10 @@ func denyReason(r gate.DenyReason) metrics.DenyReason {
 		return metrics.DenyUnknownModel
 	case gate.DenyRouteNotAllowed:
 		return metrics.DenyRouteNotAllowed
+	case gate.DenySpendLimit:
+		return metrics.DenySpendLimit
+	case gate.DenyUnpricedModel:
+		return metrics.DenyUnpricedModel
 	default:
 		return metrics.DenyReason(^uint8(0))
 	}
