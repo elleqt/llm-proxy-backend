@@ -140,14 +140,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, spend *spendCheck, ob
 		}
 
 		if matched.kind == routeListing {
-			admitted := func(model string) bool { return grant.Policy.Admits(catalog, model) }
-			if len(spend.effective(grant.SpendLimits)) > 0 {
-				admitted = func(model string) bool {
-					return grant.Policy.Admits(catalog, model) && app.PricedEverywhere(spend.catalog, spend.prices, model)
-				}
-			}
-
-			serveListing(ginCtx, matched.listing, admitted, log)
+			serveListing(ginCtx, matched.listing, listingFilter(grant, catalog, spend), log)
 
 			return
 		}
@@ -170,6 +163,20 @@ func policyGate(resolver Resolver, catalog access.Catalog, spend *spendCheck, ob
 		}
 
 		ginCtx.Next()
+	}
+}
+
+// listingFilter is what a listing keeps for the owner of grant: the models the
+// policy admits and, while the owner's spend limits are in force, only those
+// priced on every provider serving them, so a listing names no model the gate
+// would refuse.
+func listingFilter(grant app.Grant, catalog access.Catalog, spend *spendCheck) func(string) bool {
+	if len(spend.effective(grant.SpendLimits)) == 0 {
+		return func(model string) bool { return grant.Policy.Admits(catalog, model) }
+	}
+
+	return func(model string) bool {
+		return grant.Policy.Admits(catalog, model) && app.PricedEverywhere(spend.catalog, spend.prices, model)
 	}
 }
 

@@ -349,18 +349,14 @@ func New(params Params) (*Gateway, error) {
 		return nil, ErrNoResolver
 	}
 
-	if params.Limits != nil && params.Prices == nil {
-		return nil, ErrNoPrices
-	}
-
 	catalog, err := NewCatalog()
 	if err != nil {
 		return nil, err
 	}
 
-	var spend *spendCheck
-	if params.Limits != nil {
-		spend = &spendCheck{limits: params.Limits, prices: params.Prices, catalog: catalog}
+	spend, err := newSpendCheck(params, catalog)
+	if err != nil {
+		return nil, err
 	}
 
 	gw := &Gateway{
@@ -455,6 +451,21 @@ func New(params Params) (*Gateway, error) {
 	gw.svc = svc
 
 	return gw, nil
+}
+
+// newSpendCheck is the gate's spend-limit step for params: nil without Limits,
+// and ErrNoPrices with Limits but no Prices, since no request of a limited
+// owner could then be priced.
+func newSpendCheck(params Params, catalog *Catalog) (*spendCheck, error) {
+	if params.Limits == nil {
+		return nil, nil //nolint:nilnil // no limits is no step and no error
+	}
+
+	if params.Prices == nil {
+		return nil, ErrNoPrices
+	}
+
+	return &spendCheck{limits: params.Limits, prices: params.Prices, catalog: catalog}, nil
 }
 
 // noRequestLogger is the request logger factory New installs. It returns no

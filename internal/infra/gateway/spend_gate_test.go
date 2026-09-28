@@ -24,7 +24,7 @@ import (
 func spendEngine(t *testing.T, custom *limits.Set, catalog catalogFunc, prices *app.PriceTable) (*gin.Engine, *bool, *mocks.SpendGate) {
 	t.Helper()
 
-	gate := mocks.NewSpendGate(t)
+	limited := mocks.NewSpendGate(t)
 	resolver := resolverFunc(func(_ context.Context, secret string) (app.Principal, app.Grant, error) {
 		if secret != gateSecret {
 			return app.Principal{}, app.Grant{}, app.ErrInvalidCredentials
@@ -32,11 +32,12 @@ func spendEngine(t *testing.T, custom *limits.Set, catalog catalogFunc, prices *
 
 		return gatePrincipal, app.Grant{Policy: mustPolicy("*:*"), SpendLimits: custom}, nil
 	})
-	engine := gateEngineWith(resolver, catalog, &spendCheck{limits: gate, prices: prices, catalog: catalog})
+	engine := gateEngineWith(resolver, catalog, &spendCheck{limits: limited, prices: prices, catalog: catalog}, nil)
 	reached := new(bool)
+
 	engine.POST("/v1/chat/completions", func(c *gin.Context) { *reached = true; c.Status(http.StatusOK) })
 
-	return engine, reached, gate
+	return engine, reached, limited
 }
 
 // pricedOn is a price table holding a price for model on each of providers.
@@ -68,9 +69,9 @@ var blockedUntilNoon = limits.Decision{
 // rule and when it resets, with a Retry-After rounded up to whole seconds and
 // X-Should-Retry: false so SDKs do not retry a refusal that lasts hours.
 func TestSpendLimitRefusesWithRetryAfter(t *testing.T) {
-	engine, reached, gate := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
-	gate.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(blockedUntilNoon, nil)
+	engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+	limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(blockedUntilNoon, nil)
 
 	rec := chat(engine, gateSecret, "m")
 
@@ -89,27 +90,52 @@ func TestSpendLimitRefusesWithRetryAfter(t *testing.T) {
 func TestUnpricedModelRefusedOnlyWithLimits(t *testing.T) {
 	catalog := fixedCatalog(map[string][]string{"m": {"vendora"}})
 
-	engine, reached, gate := spendEngine(t, nil, catalog, &app.PriceTable{})
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+	engine, reached, limited := spendEngine(t, nil, catalog, &app.PriceTable{})
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
 
 	rec := chat(engine, gateSecret, "m")
 	require.Equal(t, http.StatusForbidden, rec.Code, "limited")
 	assert.JSONEq(t, `{"error":{"message":"model m has no price","type":"permission_error"}}`, rec.Body.String(), "limited")
 	assert.False(t, *reached, "limited: an unpriced model reached the handler")
 
-	engine, reached, gate = spendEngine(t, nil, catalog, &app.PriceTable{})
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(limits.Set{})
+	engine, reached, limited = spendEngine(t, nil, catalog, &app.PriceTable{})
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(limits.Set{})
 
 	rec = chat(engine, gateSecret, "m")
 	require.Equal(t, http.StatusOK, rec.Code, "unlimited")
 	assert.True(t, *reached, "unlimited: an unpriced model did not reach the handler")
 }
 
+// TestTheOwnersOwnSetDecides: the gate asks for the set in force by the
+// owner's own set, not the defaults' — an owner whose own set is empty is
+// unlimited even where the defaults are not, and an owner's own rules are the
+// ones admitted against.
+func TestTheOwnersOwnSetDecides(t *testing.T) {
+	catalog := fixedCatalog(map[string][]string{"m": {"vendora"}})
+
+	unlimited := &limits.Set{}
+	engine, reached, limited := spendEngine(t, unlimited, catalog, &app.PriceTable{})
+	limited.EXPECT().Effective(unlimited).Return(limits.Set{})
+
+	rec := chat(engine, gateSecret, "m")
+	require.Equal(t, http.StatusOK, rec.Code, "own empty set")
+	assert.True(t, *reached, "own empty set: an unpriced model did not reach the handler")
+
+	own := &limits.Set{{Window: time.Hour, AmountUSD: 5}}
+	engine, reached, limited = spendEngine(t, own, catalog, pricedOn("m", "vendora"))
+	limited.EXPECT().Effective(own).Return(*own)
+	limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, *own).Return(limits.Decision{}, nil)
+
+	rec = chat(engine, gateSecret, "m")
+	require.Equal(t, http.StatusOK, rec.Code, "own set")
+	assert.True(t, *reached, "own set: an admitted request did not reach the handler")
+}
+
 // TestModelPricedOnOneOfTwoProvidersIsRefused: upstream may route to either
 // provider, and the one without a price could not be charged.
 func TestModelPricedOnOneOfTwoProvidersIsRefused(t *testing.T) {
-	engine, reached, gate := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"a", "b"}}), pricedOn("m", "a"))
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+	engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"a", "b"}}), pricedOn("m", "a"))
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
 
 	rec := chat(engine, gateSecret, "m")
 
@@ -117,10 +143,12 @@ func TestModelPricedOnOneOfTwoProvidersIsRefused(t *testing.T) {
 	assert.False(t, *reached, "a model unpriced on one provider reached the handler")
 }
 
+// TestAdmittedRequestReachesTheHandler: a priced model whose windows all have
+// room passes the gate untouched.
 func TestAdmittedRequestReachesTheHandler(t *testing.T) {
-	engine, reached, gate := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
-	gate.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(limits.Decision{}, nil)
+	engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+	limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).Return(limits.Decision{}, nil)
 
 	rec := chat(engine, gateSecret, "m")
 
@@ -131,9 +159,9 @@ func TestAdmittedRequestReachesTheHandler(t *testing.T) {
 // TestSpendLimitStorageFailureRefuses: limits that cannot be checked are not
 // waived; the failure is the gateway's, so a 500 without its cause.
 func TestSpendLimitStorageFailureRefuses(t *testing.T) {
-	engine, reached, gate := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
-	gate.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
-	gate.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).
+	engine, reached, limited := spendEngine(t, nil, fixedCatalog(map[string][]string{"m": {"vendora"}}), pricedOn("m", "vendora"))
+	limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
+	limited.EXPECT().Admit(mock.Anything, gatePrincipal.UserID, tenPerTwoHours).
 		Return(limits.Decision{}, errors.New("postgres: open windows: connection refused"))
 
 	rec := chat(engine, gateSecret, "m")
@@ -156,8 +184,8 @@ func TestListingHidesUnpricedModelsOnlyWhenLimited(t *testing.T) {
 		{"limited", tenPerTwoHours, []string{"priced"}},
 		{"unlimited", limits.Set{}, []string{"priced", "unpriced"}},
 	} {
-		engine, _, gate := spendEngine(t, nil, catalog, pricedOn("priced", "vendora"))
-		gate.EXPECT().Effective((*limits.Set)(nil)).Return(tc.effective)
+		engine, _, limited := spendEngine(t, nil, catalog, pricedOn("priced", "vendora"))
+		limited.EXPECT().Effective((*limits.Set)(nil)).Return(tc.effective)
 		engine.GET("/v1/models", func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"object": "list", "data": []gin.H{{"id": "priced"}, {"id": "unpriced"}}})
 		})
@@ -184,15 +212,17 @@ func TestSpendRefusalsAreObserved(t *testing.T) {
 
 		return owner, app.Grant{Policy: mustPolicy("*:*")}, nil
 	})
+	catalog := fixedCatalog(map[string][]string{"m": {"vendora"}})
 
 	for _, tc := range []struct {
 		what   string
 		prices *app.PriceTable
 		admit  bool
-		want   gate.DenyReason
+		status int
+		reason gate.DenyReason
 	}{
-		{"unpriced", &app.PriceTable{}, false, gate.DenyUnpricedModel},
-		{"exhausted", pricedOn("m", "vendora"), true, gate.DenySpendLimit},
+		{"unpriced", &app.PriceTable{}, false, http.StatusForbidden, gate.DenyUnpricedModel},
+		{"exhausted", pricedOn("m", "vendora"), true, http.StatusTooManyRequests, gate.DenySpendLimit},
 	} {
 		limited := mocks.NewSpendGate(t)
 		limited.EXPECT().Effective((*limits.Set)(nil)).Return(tenPerTwoHours)
@@ -201,17 +231,13 @@ func TestSpendRefusalsAreObserved(t *testing.T) {
 			limited.EXPECT().Admit(mock.Anything, owner.UserID, tenPerTwoHours).Return(blockedUntilNoon, nil)
 		}
 
-		catalog := fixedCatalog(map[string][]string{"m": {"vendora"}})
 		observer := &recordingObserver{}
-		engine := gin.New()
-		engine.Use(func(c *gin.Context) {
-			c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
-		}, policyGate(resolver, catalog, &spendCheck{limits: limited, prices: tc.prices, catalog: catalog}, observer, nil))
+		engine := gateEngineWith(resolver, catalog, &spendCheck{limits: limited, prices: tc.prices, catalog: catalog}, observer)
 		engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 		rec := chat(engine, gateSecret, "m")
 
-		require.NotEqual(t, http.StatusOK, rec.Code, tc.what)
-		assert.Equal(t, []observed{{owner: "alice@example.com", model: "m", reason: tc.want, denied: true}}, observer.seen(), tc.what)
+		require.Equal(t, tc.status, rec.Code, tc.what)
+		assert.Equal(t, []observed{{owner: "alice@example.com", model: "m", reason: tc.reason, denied: true}}, observer.seen(), tc.what)
 	}
 }
