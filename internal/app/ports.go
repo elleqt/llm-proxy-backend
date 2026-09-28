@@ -548,8 +548,22 @@ type ActivityRepo interface {
 type ModelCatalog interface {
 	// ProvidersFor returns every provider serving model now; nil if none does.
 	ProvidersFor(model string) []string
+	// KnownModel is the name the registry serves model under — as given, else in
+	// lower case — and false when no provider serves it.
+	KnownModel(model string) (string, bool)
 	// Models maps each provider to the models it serves now.
 	Models() map[string][]string
+}
+
+// SpendGate is what the proxied API asks about spend limits on a model request.
+type SpendGate interface {
+	// Effective is the set in force for an owner whose own set is custom (nil
+	// inherits the defaults). It answers from memory.
+	Effective(custom *limits.Set) limits.Set
+	// Admit decides at the clock's now whether userID may make one more request
+	// under set and, unless it may not, opens the windows due. A refusal writes
+	// nothing.
+	Admit(ctx context.Context, userID uuid.UUID, set limits.Set) (limits.Decision, error)
 }
 
 // LoginAttemptRepo backs sign-in throttling. Implementations key it by the lower-cased

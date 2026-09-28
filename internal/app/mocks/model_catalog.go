@@ -44,6 +44,66 @@ func (_m *ModelCatalog) EXPECT() *ModelCatalog_Expecter {
 	return &ModelCatalog_Expecter{mock: &_m.Mock}
 }
 
+// KnownModel provides a mock function for the type ModelCatalog
+func (_mock *ModelCatalog) KnownModel(model string) (string, bool) {
+	ret := _mock.Called(model)
+
+	if len(ret) == 0 {
+		panic("no return value specified for KnownModel")
+	}
+
+	var r0 string
+	var r1 bool
+	if returnFunc, ok := ret.Get(0).(func(string) (string, bool)); ok {
+		return returnFunc(model)
+	}
+	if returnFunc, ok := ret.Get(0).(func(string) string); ok {
+		r0 = returnFunc(model)
+	} else {
+		r0 = ret.Get(0).(string)
+	}
+	if returnFunc, ok := ret.Get(1).(func(string) bool); ok {
+		r1 = returnFunc(model)
+	} else {
+		r1 = ret.Get(1).(bool)
+	}
+	return r0, r1
+}
+
+// ModelCatalog_KnownModel_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'KnownModel'
+type ModelCatalog_KnownModel_Call struct {
+	*mock.Call
+}
+
+// KnownModel is a helper method to define mock.On call
+//   - model string
+func (_e *ModelCatalog_Expecter) KnownModel(model any) *ModelCatalog_KnownModel_Call {
+	return &ModelCatalog_KnownModel_Call{Call: _e.mock.On("KnownModel", model)}
+}
+
+func (_c *ModelCatalog_KnownModel_Call) Run(run func(model string)) *ModelCatalog_KnownModel_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 string
+		if args[0] != nil {
+			arg0 = args[0].(string)
+		}
+		run(
+			arg0,
+		)
+	})
+	return _c
+}
+
+func (_c *ModelCatalog_KnownModel_Call) Return(s string, b bool) *ModelCatalog_KnownModel_Call {
+	_c.Call.Return(s, b)
+	return _c
+}
+
+func (_c *ModelCatalog_KnownModel_Call) RunAndReturn(run func(model string) (string, bool)) *ModelCatalog_KnownModel_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Models provides a mock function for the type ModelCatalog
 func (_mock *ModelCatalog) Models() map[string][]string {
 	ret := _mock.Called()

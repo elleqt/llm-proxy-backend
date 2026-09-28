@@ -29,6 +29,10 @@ func (c fakeCatalog) ProvidersFor(model string) []string {
 	return out
 }
 
+func (c fakeCatalog) KnownModel(model string) (string, bool) {
+	return model, len(c.ProvidersFor(model)) > 0
+}
+
 var _ app.ModelCatalog = fakeCatalog(nil)
 
 var twoProviders = fakeCatalog{
