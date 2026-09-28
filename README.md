@@ -587,7 +587,17 @@ Checklist:
 - reset the password (a new 72-hour temporary password)
 - renew an OIDC invitation
 - list and revoke keys (and issue keys for service accounts)
+- set the account's spend limits, or return it to the defaults, and reset its windows
 - see recent activity: requests with token counts and cost, and audit events
+
+### Spend limits
+
+An administrator caps how many US dollars of estimated cost (the usage ledger's figure) an account may spend per time window, with up to 10 windows at once, e.g. $10 per 2 hours and $30 per 24 hours. **Admin → Settings** holds the default set every account inherits; a user's page gives that account its own set instead (an empty one means no limits) and resets one window or all of them. Every change and reset is recorded in the audit log.
+
+- A window opens with the first request after it expired, was reset or never ran, and lasts its full length from then; nothing counts while the account is idle.
+- A request is admitted while every open window is below its limit, so the last one may overshoot by its own cost. Once a window is exhausted, requests get a `429` naming the limit and when it resets.
+- While limits apply to an account, a model without a price on every provider serving it is refused (`403`) and hidden from `/v1/models`; the cabinet lists it as unpriced. Set its price in **Admin → Prices**.
+- The cabinet shows each window's spend, limit and reset time.
 
 ### Vendor accounts
 
@@ -626,7 +636,7 @@ The price list (US dollars per million tokens: input, output, cache read, cache 
 
 ### Audit log
 
-Security-relevant actions are recorded in an append-only audit table with actor, target, IP and user agent. This covers sign-ins, key issue and revoke, user changes, password resets, vendor account changes, settings and prices. There is no global audit page: the admin panel shows audit events per user on the user's **Activity**. The full log is the `audit_events` table in Postgres.
+Security-relevant actions are recorded in an append-only audit table with actor, target, IP and user agent. This covers sign-ins, key issue and revoke, user changes, password resets, vendor account changes, settings, prices and spend limits. There is no global audit page: the admin panel shows audit events per user on the user's **Activity**. The full log is the `audit_events` table in Postgres.
 
 ## Metrics and cost
 
@@ -638,12 +648,13 @@ Prometheus scrapes `http://backend-metrics:9090/metrics` from a container attach
 | `llmproxy_requests_total` | counter | `user`, `provider`, `model`, `stream`, `status` (`1xx`…`5xx`, or `ok`/`error`) |
 | `llmproxy_request_duration_seconds` | histogram | `provider`, `model`, `stream` |
 | `llmproxy_ttft_seconds` | histogram | `provider`, `model` (streamed requests) |
-| `llmproxy_policy_denied_total` | counter | `user`, `model`, `reason` (`model_not_allowed`, `unknown_model`, `route_not_allowed`) |
+| `llmproxy_policy_denied_total` | counter | `user`, `model`, `reason` (`model_not_allowed`, `unknown_model`, `route_not_allowed`, `spend_limit`, `unpriced_model`) |
 | `llmproxy_auth_failures_total` | counter | `reason` |
 | `llmproxy_cost_usd_total` | counter | `user`, `provider`, `model`, `kind` (`input`, `output`, `cache_read`, `cache_write`) |
 | `llmproxy_cache_savings_usd_total` | counter | `user`, `provider`, `model` |
 | `llmproxy_cache_write_premium_usd_total` | counter | `user`, `provider`, `model` |
 | `llmproxy_cost_unpriced_tokens_total` | counter | `provider`, `model` |
+| `llmproxy_spend_limit_unpriced_tokens_total` | counter | `provider`, `model` |
 | `llmproxy_vendor_quota_used_ratio` | gauge | `account`, `provider`, `window` |
 | `llmproxy_vendor_quota_reset_timestamp_seconds` | gauge | `account`, `provider`, `window` |
 | `llmproxy_vendor_quota_observed_timestamp_seconds` | gauge | `account`, `provider`, `window` |
@@ -665,6 +676,7 @@ Cost is an **estimate at list prices**, not a bill.
 - Token kinds do not overlap: **input** (uncached), **output** (including reasoning, at the output rate), **cache read**, **cache write**.
 - A **cache-write rate of zero** bills cache writes at the input rate. OpenAI does not charge extra for writes.
 - **Unpriced tokens** (models with no price, and tokens the vendor did not classify) go to `llmproxy_cost_unpriced_tokens_total`. They are never counted as free.
+- **Unpriced tokens of an account under spend limits** also go to `llmproxy_spend_limit_unpriced_tokens_total`, and the backend logs a warning: they escaped the limit. They come from tokens the vendor did not classify, or a price removed between admitting a request and pricing it.
 - **Cache effect** compared with paying the input rate for all input: `cache_read × (input − cache_read_rate) − cache_write × (cache_write_rate − input)`. A positive result goes to `cache_savings_usd_total`, a negative one to `cache_write_premium_usd_total`. The net effect is the difference.
 - **Approximation:** the catalog's cache-write price is Anthropic's 5-minute write rate (1.25× input). Clients that ask for the 1-hour cache (omp does) pay 2× input, but the vendor reports a single cache-write count. If your clients use the long cache, set a manual price with `cacheWrite` = 2× input.
 
@@ -690,6 +702,9 @@ histogram_quantile(0.95, sum by (le, model) (rate(llmproxy_request_duration_seco
 
 # Models being used without a price
 sum by (provider, model) (increase(llmproxy_cost_unpriced_tokens_total[1d])) > 0
+
+# Tokens that escaped a spend limit for lack of a price
+sum by (provider, model) (increase(llmproxy_spend_limit_unpriced_tokens_total[1d])) > 0
 ```
 
 ## Configuration reference
