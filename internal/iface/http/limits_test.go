@@ -171,6 +171,38 @@ func TestSetUserLimitsModes(t *testing.T) {
 	})
 }
 
+// An administrator reads an account's own set with its live window as the
+// cabinet shows it; an account that does not exist is not found.
+func TestGetUserLimits(t *testing.T) {
+	path := func(u identity.User) string { return "/api/admin/users/" + u.ID.String() + "/limits" }
+
+	t.Run("custom with a live window", func(t *testing.T) {
+		env := newEnv(t)
+		target := person("t@example.com")
+		target.SpendLimits = &limits.Set{{Window: time.Hour, AmountUSD: 5}}
+		env.users.EXPECT().ByID(mock.Anything, target.ID).Return(target, nil)
+		env.windows.EXPECT().Windows(mock.Anything, target.ID).Return([]limits.Window{
+			{Length: time.Hour, StartedAt: env.clock.Now().Add(-15 * time.Minute), SpentUSD: 1.25},
+		}, nil)
+
+		rec := env.do(http.MethodGet, path(target), "", withCookie(env.signedIn(admin())))
+		require.Equal(t, http.StatusOK, rec.Code, "status; body %s", rec.Body)
+		assert.JSONEq(t, `{"mode":"custom","custom":[{"windowMinutes":60,"amountUsd":5}],"windows":[
+			{"windowMinutes":60,"amountUsd":5,"spentUsd":1.25,
+			 "startedAt":"2026-09-22T11:45:00Z","resetsAt":"2026-09-22T12:45:00Z","exhausted":false}
+		]}`, rec.Body.String())
+	})
+
+	t.Run("unknown account", func(t *testing.T) {
+		env := newEnv(t)
+		target := person("t@example.com")
+		env.users.EXPECT().ByID(mock.Anything, target.ID).Return(identity.User{}, app.ErrNotFound)
+
+		rec := env.do(http.MethodGet, path(target), "", withCookie(env.signedIn(admin())))
+		apiError(t, rec, http.StatusNotFound, codeNotFound)
+	})
+}
+
 // A reset names a window in force, or omits it to reset all; a window no rule
 // in force has is refused before anything is deleted.
 func TestResetUserLimits(t *testing.T) {
