@@ -192,8 +192,9 @@ func TestUsageRepo(t *testing.T) {
 		require.NoError(t, windows.Open(ctx, owner.ID, []time.Duration{2 * time.Hour}, nil, openAt), "open")
 
 		limited, err := ledger.AppendBatch(ctx, []app.UsageEvent{
-			{At: openAt, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", Cost: app.UsageCost{InputUSD: 1}},
-			// cost_input_usd's CHECK refuses a negative cost.
+			{At: openAt, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", Cost: app.UsageCost{InputUSD: 2}},
+			// cost_input_usd's CHECK refuses a negative cost. The owner still nets $1,
+			// so a charge that escaped the batch's transaction would show.
 			{At: openAt, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", Cost: app.UsageCost{InputUSD: -1}},
 		})
 		require.Error(t, err, "AppendBatch accepted a row Postgres refuses")

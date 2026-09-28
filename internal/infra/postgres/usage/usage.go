@@ -34,6 +34,15 @@ VALUES ($1, (SELECT id FROM users WHERE id = $2), (SELECT id FROM api_tokens WHE
 	$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 	$21, $22, $23, $24, $25, $26, $27)`
 
+// lockWindows locks the owners' window rows before chargeWindows updates them.
+// The UPDATE's join locks rows in whatever order its plan visits them; a
+// concurrent limitwindows Open or Reset locking the same rows in another order
+// could deadlock with it, and losing the charge would lose the whole ledger
+// batch. Every statement that locks limit_windows rows takes them first by
+// (user_id, window_minutes), so they queue instead. $1 is chargeWindows' $1.
+const lockWindows = `SELECT 1 FROM limit_windows WHERE user_id = ANY($1::uuid[])
+ORDER BY user_id, window_minutes FOR UPDATE`
+
 // chargeWindows adds each owner's cost to every window row of that owner and
 // names the owners that had one. $1 holds each owner once.
 const chargeWindows = `UPDATE limit_windows w SET spent_usd = w.spent_usd + b.cost
@@ -74,6 +83,7 @@ func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) (map[uu
 	}
 
 	if len(owners) > 0 {
+		batch.Queue(lockWindows, owners)
 		batch.Queue(chargeWindows, owners, sums)
 	}
 	// One batch is one implicit transaction: a failing statement rolls back the
@@ -92,7 +102,8 @@ func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) (map[uu
 	return limited, nil
 }
 
-// readBatch consumes the inserts' results, then the charge's returned owners.
+// readBatch consumes the inserts' results, the window lock, then the charge's
+// returned owners.
 func readBatch(results pgx.BatchResults, inserts int, charged bool) (map[uuid.UUID]struct{}, error) {
 	for range inserts {
 		if _, err := results.Exec(); err != nil {
@@ -103,6 +114,10 @@ func readBatch(results pgx.BatchResults, inserts int, charged bool) (map[uuid.UU
 	limited := map[uuid.UUID]struct{}{}
 	if !charged {
 		return limited, nil
+	}
+
+	if _, err := results.Exec(); err != nil {
+		return nil, err
 	}
 
 	rows, err := results.Query()
