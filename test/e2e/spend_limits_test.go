@@ -1,10 +1,10 @@
 package e2e
 
 import (
+	"fmt"
 	"math"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/stretchr/testify/require"
@@ -41,6 +41,7 @@ func TestSpendLimitRefusesAndAdminResets(t *testing.T) {
 		`[{"provider":"`+proc.a.policyName+`","model":"`+proc.a.alias+
 			`","input":100000,"output":100000,"cacheRead":0,"cacheWrite":0}]`,
 		http.StatusOK, nil)
+	require.True(t, proc.models(t, secret)[proc.a.alias], "priced model listed")
 
 	require.Equal(t, http.StatusOK, proc.chat(t, secret, proc.a.alias), "first request")
 	awaitSpent(t, proc, 0.7)
@@ -56,10 +57,10 @@ func TestSpendLimitRefusesAndAdminResets(t *testing.T) {
 // want: the charge lands after the response, so the next request must not race it.
 func awaitSpent(t *testing.T, proc *process, want float64) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	eventually(t, fmt.Sprintf("the window has charged $%.2f", want), func() bool {
 		var got api.SpendLimits
 		proc.webJSON(t, http.MethodGet, "/api/me/limits", "", http.StatusOK, &got)
 
 		return len(got.Windows) == 1 && math.Abs(got.Windows[0].SpentUsd-want) < 1e-9
-	}, 10*time.Second, 50*time.Millisecond)
+	})
 }
