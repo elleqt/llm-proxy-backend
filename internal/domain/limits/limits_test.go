@@ -32,6 +32,8 @@ func TestValidateNamesTheFirstRefusal(t *testing.T) {
 		"window not whole minutes": {set: limits.Set{rule(90*time.Second, 1)}, want: &limits.InvalidError{Index: 0, Field: limits.FieldWindow}},
 		"window over a year":       {set: limits.Set{rule(limits.MaxWindow+time.Minute, 1)}, want: &limits.InvalidError{Index: 0, Field: limits.FieldWindow}},
 		"a year is fine":           {set: limits.Set{rule(limits.MaxWindow, 1)}},
+		"a minute is fine":         {set: limits.Set{rule(limits.MinWindow, 1)}},
+		"the cap is fine":          {set: limits.Set{rule(time.Hour, limits.MaxAmountUSD)}},
 		"duplicate window":         {set: limits.Set{rule(2*time.Hour, 10), rule(2*time.Hour, 30)}, want: &limits.InvalidError{Index: 1, Field: limits.FieldWindow}},
 		"zero amount":              {set: limits.Set{rule(time.Hour, 0)}, want: &limits.InvalidError{Index: 0, Field: limits.FieldAmount}},
 		"negative amount":          {set: limits.Set{rule(time.Hour, -1)}, want: &limits.InvalidError{Index: 0, Field: limits.FieldAmount}},
@@ -110,16 +112,18 @@ func TestDecide(t *testing.T) {
 }
 
 func TestStatesListEveryRuleInWindowOrder(t *testing.T) {
-	short, long := rule(2*time.Hour, 10), rule(24*time.Hour, 30)
+	short, mid, long := rule(2*time.Hour, 10), rule(5*time.Hour, 10), rule(24*time.Hour, 30)
 	rows := []limits.Window{
 		{Length: 24 * time.Hour, StartedAt: t0, SpentUSD: 30},
+		{Length: 5 * time.Hour, StartedAt: t0, SpentUSD: 9.99},
 		{Length: 2 * time.Hour, StartedAt: t0.Add(-3 * time.Hour), SpentUSD: 4}, // expired
 	}
 
 	require.Equal(t, []limits.WindowState{
 		{Rule: short},
+		{Rule: mid, StartedAt: t0, ResetsAt: t0.Add(5 * time.Hour), SpentUSD: 9.99},
 		{Rule: long, StartedAt: t0, ResetsAt: t0.Add(24 * time.Hour), SpentUSD: 30, Exhausted: true},
-	}, limits.States(limits.Set{long, short}, rows, t0.Add(time.Hour)))
+	}, limits.States(limits.Set{long, short, mid}, rows, t0.Add(time.Hour)))
 }
 
 func TestLabel(t *testing.T) {
