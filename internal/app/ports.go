@@ -291,10 +291,27 @@ type UsageSeries struct {
 //
 // AppendBatch writes every event or none. A UserID or TokenID that names no row
 // (the zero UUID, or an owner or token deleted since the request) is written as
-// NULL rather than failing the batch.
+// NULL rather than failing the batch. It also adds each attributed owner's summed
+// cost (UsageCost.TotalUSD, failed attempts included: their tokens were spent) to
+// every limit_windows row of that owner, in the same transaction, and returns the
+// owners that had a row. A batch that fails writes neither.
 type UsageRepo interface {
-	AppendBatch(ctx context.Context, events []UsageEvent) error
+	AppendBatch(ctx context.Context, events []UsageEvent) (map[uuid.UUID]struct{}, error)
 	SeriesForUser(ctx context.Context, userID uuid.UUID, from, to time.Time) (UsageSeries, error)
+}
+
+// SpendWindowRepo stores the spend-limit windows accounts have opened. The
+// usage ledger's AppendBatch adds each recorded request's cost to them.
+type SpendWindowRepo interface {
+	// Windows returns every stored window of userID, expired ones included.
+	Windows(ctx context.Context, userID uuid.UUID) ([]limits.Window, error)
+	// Open starts at at, with nothing spent, each window in open that userID has
+	// no row for or whose row had expired by at (a row another request restarted
+	// meanwhile is left alone), and deletes the windows in drop: one transaction.
+	Open(ctx context.Context, userID uuid.UUID, open, drop []time.Duration, at time.Time) error
+	// Reset deletes userID's window of that length, or every window of userID
+	// when window is nil. A window that is not stored is no error.
+	Reset(ctx context.Context, userID uuid.UUID, window *time.Duration) error
 }
 
 // QuotaSignal is a vendor's latest own report of how much of one quota window an

@@ -102,7 +102,7 @@ func (l *ledger) keep(evs []app.UsageEvent) {
 // accept makes every AppendBatch succeed and keeps what it was given.
 func (l *ledger) accept() {
 	l.EXPECT().AppendBatch(mock.Anything, mock.Anything).
-		Run(func(_ context.Context, evs []app.UsageEvent) { l.keep(evs) }).Return(nil)
+		Run(func(_ context.Context, evs []app.UsageEvent) { l.keep(evs) }).Return(nil, nil)
 }
 
 func (l *ledger) written() []app.UsageEvent {
@@ -598,7 +598,7 @@ func TestSinkNeverBlocksAndCountsDrops(t *testing.T) {
 		Run(func(_ context.Context, evs []app.UsageEvent) {
 			<-release
 			events.keep(evs)
-		}).Return(nil)
+		}).Return(nil, nil)
 	users.EXPECT().TouchLastSeen(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	tokens.EXPECT().TouchLastUsed(mock.Anything, mock.Anything, mock.Anything).Return(nil)
 
@@ -651,7 +651,7 @@ func TestSinkDrainStopsIntakeAndHonoursDeadline(t *testing.T) {
 
 			<-release
 			events.keep(evs)
-		}).Return(nil)
+		}).Return(nil, nil)
 
 	sink, _, _ := newMeteredSink(events, tokens, users, discardLog{})
 	sink.HandleUsage(context.Background(), cliproxyusage.Record{Provider: "claude", Model: "before", APIKey: sinkKey})
@@ -706,7 +706,7 @@ func TestSinkStampsLatestCompletionPerID(t *testing.T) {
 			}
 
 			events.keep(evs)
-		}).Return(nil)
+		}).Return(nil, nil)
 
 	var mu sync.Mutex
 
@@ -782,7 +782,7 @@ func returnsWithin(t *testing.T, limit time.Duration, what string, fn func()) {
 func TestSinkSurvivesRepositoryError(t *testing.T) {
 	events, tokens, users := newLedger(t), mocks.NewTokenRepo(t), mocks.NewUserRepo(t)
 	knownPrincipal(users, tokens)
-	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).Return(errors.New("connection refused")).Once()
+	events.EXPECT().AppendBatch(mock.Anything, mock.Anything).Return(nil, errors.New("connection refused")).Once()
 	events.accept()
 
 	log := &recordingLog{}

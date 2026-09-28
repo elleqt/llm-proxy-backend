@@ -423,7 +423,7 @@ func (s *Sink) process(records []cliproxyusage.Record) {
 		ctx, cancel := context.WithTimeout(context.Background(), usageWriteTimeout)
 		defer cancel()
 
-		if err := s.events.AppendBatch(ctx, events); err != nil {
+		if _, err := s.events.AppendBatch(ctx, events); err != nil {
 			s.log.Warn("usage ledger rows lost", slog.Int("rows", len(events)), slog.Any("err", err))
 		}
 

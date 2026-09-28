@@ -50,20 +50,31 @@ func (_m *UsageRepo) EXPECT() *UsageRepo_Expecter {
 }
 
 // AppendBatch provides a mock function for the type UsageRepo
-func (_mock *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) error {
+func (_mock *UsageRepo) AppendBatch(ctx context.Context, events []app.UsageEvent) (map[uuid.UUID]struct{}, error) {
 	ret := _mock.Called(ctx, events)
 
 	if len(ret) == 0 {
 		panic("no return value specified for AppendBatch")
 	}
 
-	var r0 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, []app.UsageEvent) error); ok {
+	var r0 map[uuid.UUID]struct{}
+	var r1 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []app.UsageEvent) (map[uuid.UUID]struct{}, error)); ok {
+		return returnFunc(ctx, events)
+	}
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []app.UsageEvent) map[uuid.UUID]struct{}); ok {
 		r0 = returnFunc(ctx, events)
 	} else {
-		r0 = ret.Error(0)
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(map[uuid.UUID]struct{})
+		}
 	}
-	return r0
+	if returnFunc, ok := ret.Get(1).(func(context.Context, []app.UsageEvent) error); ok {
+		r1 = returnFunc(ctx, events)
+	} else {
+		r1 = ret.Error(1)
+	}
+	return r0, r1
 }
 
 // UsageRepo_AppendBatch_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AppendBatch'
@@ -96,12 +107,12 @@ func (_c *UsageRepo_AppendBatch_Call) Run(run func(ctx context.Context, events [
 	return _c
 }
 
-func (_c *UsageRepo_AppendBatch_Call) Return(err error) *UsageRepo_AppendBatch_Call {
-	_c.Call.Return(err)
+func (_c *UsageRepo_AppendBatch_Call) Return(uUIDToVal map[uuid.UUID]struct{}, err error) *UsageRepo_AppendBatch_Call {
+	_c.Call.Return(uUIDToVal, err)
 	return _c
 }
 
-func (_c *UsageRepo_AppendBatch_Call) RunAndReturn(run func(ctx context.Context, events []app.UsageEvent) error) *UsageRepo_AppendBatch_Call {
+func (_c *UsageRepo_AppendBatch_Call) RunAndReturn(run func(ctx context.Context, events []app.UsageEvent) (map[uuid.UUID]struct{}, error)) *UsageRepo_AppendBatch_Call {
 	_c.Call.Return(run)
 	return _c
 }

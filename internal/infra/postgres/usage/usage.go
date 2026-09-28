@@ -34,14 +34,26 @@ VALUES ($1, (SELECT id FROM users WHERE id = $2), (SELECT id FROM api_tokens WHE
 	$4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
 	$21, $22, $23, $24, $25, $26, $27)`
 
+// chargeWindows adds each owner's cost to every window row of that owner and
+// names the owners that had one. $1 holds each owner once.
+const chargeWindows = `UPDATE limit_windows w SET spent_usd = w.spent_usd + b.cost
+FROM unnest($1::uuid[], $2::float8[]) AS b(user_id, cost)
+WHERE w.user_id = b.user_id
+RETURNING w.user_id`
+
 // AppendBatch writes events in one round trip and one implicit transaction: every
-// event or none.
-func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) error {
+// event or none. It also adds each attributed owner's summed cost
+// (UsageCost.TotalUSD, failed attempts included: their tokens were spent) to every
+// limit_windows row of that owner, in the same transaction, and returns the owners
+// that had a row. A batch that fails writes neither.
+func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) (map[uuid.UUID]struct{}, error) {
 	if len(events) == 0 {
-		return nil
+		return map[uuid.UUID]struct{}{}, nil
 	}
 
 	batch := &pgx.Batch{}
+	cost := map[uuid.UUID]float64{}
+
 	for _, event := range events {
 		batch.Queue(appendUsage,
 			event.At.UTC(), postgres.NullUUID(event.UserID), postgres.NullUUID(event.TokenID), event.Provider, event.Model, event.Alias,
@@ -50,13 +62,64 @@ func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) error {
 			event.LatencyMS, event.TTFTMS, event.StatusCode, event.Failed, event.VendorAccountID,
 			event.Cost.InputUSD, event.Cost.OutputUSD, event.Cost.CacheReadUSD, event.Cost.CacheWriteUSD,
 			event.Cost.CacheSavingsUSD, event.Cost.UnpricedTokens, event.Cost.Priced)
+
+		if event.UserID != uuid.Nil {
+			cost[event.UserID] += event.Cost.TotalUSD()
+		}
 	}
 
-	if err := r.pool.SendBatch(ctx, batch).Close(); err != nil {
-		return fmt.Errorf("postgres: append %d usage events: %w", len(events), err)
+	owners, sums := make([]uuid.UUID, 0, len(cost)), make([]float64, 0, len(cost))
+	for id, sum := range cost {
+		owners, sums = append(owners, id), append(sums, sum)
 	}
 
-	return nil
+	if len(owners) > 0 {
+		batch.Queue(chargeWindows, owners, sums)
+	}
+	// One batch is one implicit transaction: a failing statement rolls back the
+	// ledger rows and the charges together.
+	results := r.pool.SendBatch(ctx, batch)
+
+	limited, err := readBatch(results, len(events), len(owners) > 0)
+	if closeErr := results.Close(); err == nil {
+		err = closeErr
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("postgres: append %d usage events: %w", len(events), err)
+	}
+
+	return limited, nil
+}
+
+// readBatch consumes the inserts' results, then the charge's returned owners.
+func readBatch(results pgx.BatchResults, inserts int, charged bool) (map[uuid.UUID]struct{}, error) {
+	for range inserts {
+		if _, err := results.Exec(); err != nil {
+			return nil, err
+		}
+	}
+
+	limited := map[uuid.UUID]struct{}{}
+	if !charged {
+		return limited, nil
+	}
+
+	rows, err := results.Query()
+	if err != nil {
+		return nil, err
+	}
+
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	if err != nil {
+		return nil, err
+	}
+
+	for _, id := range ids {
+		limited[id] = struct{}{}
+	}
+
+	return limited, nil
 }
 
 // seriesForUser buckets on UTC boundaries whatever the session time zone is: the

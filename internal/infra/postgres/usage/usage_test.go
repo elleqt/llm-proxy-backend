@@ -9,6 +9,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/limitwindows"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	pgtokens "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/tokens"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/usage"
@@ -22,7 +23,7 @@ import (
 func TestUsageRepo(t *testing.T) {
 	ctx := context.Background()
 	pool := pgtest.NewTestPool(t)
-	users, tokens := pgusers.New(pool), pgtokens.New(pool)
+	users, tokens, windows := pgusers.New(pool), pgtokens.New(pool), limitwindows.New(pool)
 
 	// A session zone with a half-hour offset: buckets truncated in it rather than
 	// in UTC would start at :30 and on the wrong day.
@@ -62,11 +63,12 @@ func TestUsageRepo(t *testing.T) {
 				CacheSavingsUSD: -0.75, UnpricedTokens: 6, Priced: true,
 			},
 		}
-		require.NoError(t, ledger.AppendBatch(ctx, []app.UsageEvent{want}), "AppendBatch")
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{want})
+		require.NoError(t, err, "AppendBatch")
 
 		var got app.UsageEvent
 
-		err := pool.QueryRow(ctx, `SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
+		err = pool.QueryRow(ctx, `SELECT at, user_id, token_id, provider, model, alias, stream, service_tier,
 			tokens_input, tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, tokens_total,
 			breakdown_quality, latency_ms, ttft_ms, status_code, failed, vendor_account_id,
 			cost_input_usd, cost_output_usd, cost_cache_read_usd, cost_cache_write_usd, cache_savings_usd,
@@ -92,7 +94,7 @@ func TestUsageRepo(t *testing.T) {
 		model := "null-" + uuid.NewString()
 		at := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 
-		err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			{At: at, Provider: "claude", Model: model},
 			{At: at, UserID: uuid.New(), TokenID: uuid.New(), Provider: "claude", Model: model},
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: model},
@@ -116,7 +118,7 @@ func TestUsageRepo(t *testing.T) {
 		owner, tok := newOwner(t)
 		at := time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC)
 
-		err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "fine"},
 			{At: at, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "bad\x00model"},
 		})
@@ -127,6 +129,82 @@ func TestUsageRepo(t *testing.T) {
 		err = pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE user_id = $1`, owner.ID).Scan(&count)
 		require.NoError(t, err, "count")
 		require.Zero(t, count, "rows of the failed batch were kept")
+	})
+
+	// spent reads userID's window spends keyed by length.
+	spent := func(t *testing.T, userID uuid.UUID) map[time.Duration]float64 {
+		t.Helper()
+
+		got, err := windows.Windows(ctx, userID)
+		require.NoError(t, err, "Windows")
+
+		out := make(map[time.Duration]float64, len(got))
+		for _, w := range got {
+			out[w.Length] = w.SpentUSD
+		}
+
+		return out
+	}
+	openAt := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
+
+	t.Run("AppendBatchChargesEveryWindowOfItsOwner", func(t *testing.T) {
+		a, aTok := newOwner(t)
+		b, bTok := newOwner(t)
+		require.NoError(t, windows.Open(ctx, a.ID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, openAt), "open a")
+		require.NoError(t, windows.Open(ctx, b.ID, []time.Duration{2 * time.Hour}, nil, openAt), "open b")
+
+		ev := func(user, token uuid.UUID, usd float64, failed bool) app.UsageEvent {
+			return app.UsageEvent{
+				At: openAt, UserID: user, TokenID: token, Provider: "claude", Model: "m1", Failed: failed,
+				Cost: app.UsageCost{InputUSD: usd, Priced: true},
+			}
+		}
+		limited, err := ledger.AppendBatch(ctx, []app.UsageEvent{
+			ev(a.ID, aTok.ID, 1.5, false),
+			// A failed attempt spent its tokens: it counts against the limit too.
+			ev(a.ID, aTok.ID, 0.25, true),
+			ev(b.ID, bTok.ID, 2, false),
+			ev(uuid.Nil, uuid.Nil, 9, false),
+		})
+		require.NoError(t, err, "AppendBatch")
+		require.Equal(t, map[uuid.UUID]struct{}{a.ID: {}, b.ID: {}}, limited, "owners with windows")
+
+		gotA := spent(t, a.ID)
+		require.Len(t, gotA, 2, "a's windows")
+		require.InDelta(t, 1.75, gotA[2*time.Hour], 1e-9, "a 2h")
+		require.InDelta(t, 1.75, gotA[24*time.Hour], 1e-9, "a 24h")
+		require.Equal(t, map[time.Duration]float64{2 * time.Hour: 2}, spent(t, b.ID), "b's windows")
+	})
+
+	t.Run("AppendBatchReportsOnlyOwnersWithWindows", func(t *testing.T) {
+		c, cTok := newOwner(t)
+
+		limited, err := ledger.AppendBatch(ctx, []app.UsageEvent{{
+			At: openAt, UserID: c.ID, TokenID: cTok.ID, Provider: "claude", Model: "m1",
+			Cost: app.UsageCost{InputUSD: 1, Priced: true},
+		}})
+		require.NoError(t, err, "AppendBatch")
+		require.Empty(t, limited, "owners with windows")
+	})
+
+	t.Run("FailedBatchChargesNothing", func(t *testing.T) {
+		owner, tok := newOwner(t)
+		require.NoError(t, windows.Open(ctx, owner.ID, []time.Duration{2 * time.Hour}, nil, openAt), "open")
+
+		limited, err := ledger.AppendBatch(ctx, []app.UsageEvent{
+			{At: openAt, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", Cost: app.UsageCost{InputUSD: 1}},
+			// cost_input_usd's CHECK refuses a negative cost.
+			{At: openAt, UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", Cost: app.UsageCost{InputUSD: -1}},
+		})
+		require.Error(t, err, "AppendBatch accepted a row Postgres refuses")
+		require.Nil(t, limited, "owners of a failed batch")
+
+		var count int
+
+		err = pool.QueryRow(ctx, `SELECT count(*) FROM usage_events WHERE user_id = $1`, owner.ID).Scan(&count)
+		require.NoError(t, err, "count")
+		require.Zero(t, count, "rows of the failed batch were kept")
+		require.Equal(t, map[time.Duration]float64{2 * time.Hour: 0}, spent(t, owner.ID), "window charged by a failed batch")
 	})
 
 	t.Run("SeriesForUserBucketsHoursByModel", func(t *testing.T) {
@@ -146,7 +224,7 @@ func TestUsageRepo(t *testing.T) {
 		hourAt := func(hour, minute int) time.Time {
 			return from.Add(time.Duration(hour)*time.Hour + time.Duration(minute)*time.Minute)
 		}
-		err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			ev(owner.ID, tok.ID, hourAt(10, 15), "m1", 10),
 			ev(owner.ID, tok.ID, hourAt(10, 45), "m1", 5),
 			// An attempt that failed after spending tokens, then retried on
@@ -190,7 +268,7 @@ func TestUsageRepo(t *testing.T) {
 				Provider: "claude", Model: model, TokensTotal: 100, Cost: c,
 			}
 		}
-		err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			ev(1, "m1", app.UsageCost{InputUSD: 1, OutputUSD: 2, CacheReadUSD: 0.25, CacheWriteUSD: 0.5, CacheSavingsUSD: 1.5, Priced: true}),
 			ev(2, "m1", app.UsageCost{InputUSD: 0.5, CacheWriteUSD: 4, CacheSavingsUSD: -2, UnpricedTokens: 10, Priced: true}),
 			ev(3, "m2", app.UsageCost{UnpricedTokens: 100}),
@@ -216,7 +294,7 @@ func TestUsageRepo(t *testing.T) {
 		to := from.Add(7 * 24 * time.Hour)
 
 		day := func(d, hour int) time.Time { return from.AddDate(0, 0, d).Add(time.Duration(hour) * time.Hour) }
-		err := ledger.AppendBatch(ctx, []app.UsageEvent{
+		_, err := ledger.AppendBatch(ctx, []app.UsageEvent{
 			// 20:00 UTC is already the next day in Kolkata.
 			{At: day(0, 20), UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", TokensTotal: 3},
 			{At: day(0, 1), UserID: owner.ID, TokenID: tok.ID, Provider: "claude", Model: "m1", TokensTotal: 4},
