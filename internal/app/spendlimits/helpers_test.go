@@ -32,7 +32,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	f := &fixture{
+	fx := &fixture{
 		users:    mocks.NewUserRepo(t),
 		settings: mocks.NewSettingsRepo(t),
 		windows:  mocks.NewSpendWindowRepo(t),
@@ -40,17 +40,17 @@ func newFixture(t *testing.T) *fixture {
 	}
 	clock := mocks.NewClock(t)
 	clock.EXPECT().Now().Return(frozen).Maybe()
-	f.svc = spendlimits.New(f.users, f.settings, f.windows, f.audit, clock)
+	fx.svc = spendlimits.New(fx.users, fx.settings, fx.windows, fx.audit, clock)
 
-	return f
+	return fx
 }
 
 // recordAudit captures every audit event. Registering it is also an assertion: the
 // strict mock fails the test if the action under test records nothing.
-func (f *fixture) recordAudit() *[]app.AuditEvent {
+func (fx *fixture) recordAudit() *[]app.AuditEvent {
 	var events []app.AuditEvent
 
-	f.audited = f.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+	fx.audited = fx.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		events = append(events, e)
 
 		return nil

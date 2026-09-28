@@ -198,6 +198,7 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		// gw is set below, before anything is served.
 		metrics.WithKnownModel(func(model string) (string, bool) { return gw.Catalog().KnownModel(model) }),
 	)
+
 	catalog, err := gateway.NewCatalog()
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)

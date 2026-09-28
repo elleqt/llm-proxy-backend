@@ -61,11 +61,11 @@ func TestSpendWindowRepo(t *testing.T) {
 	}
 
 	t.Run("OpenStartsMissingWindows", func(t *testing.T) {
-		u := newUser(t)
+		userID := newUser(t)
 
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
 
-		got := stored(t, u)
+		got := stored(t, userID)
 		require.Len(t, got, 2, "windows")
 
 		for _, length := range []time.Duration{2 * time.Hour, 24 * time.Hour} {
@@ -77,14 +77,14 @@ func TestSpendWindowRepo(t *testing.T) {
 	})
 
 	t.Run("OpenRestartsOnlyExpiredRows", func(t *testing.T) {
-		u := newUser(t)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
-		charge(t, u, 3)
+		userID := newUser(t)
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
+		charge(t, userID, 3)
 
 		later := t0.Add(2 * time.Hour)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, later), "reopen")
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, later), "reopen")
 
-		got := stored(t, u)
+		got := stored(t, userID)
 		require.Len(t, got, 2, "windows")
 		assert.WithinDuration(t, later, got[2*time.Hour].StartedAt, time.Microsecond, "2h restarted")
 		assert.Zero(t, got[2*time.Hour].SpentUSD, "2h spent")
@@ -93,24 +93,25 @@ func TestSpendWindowRepo(t *testing.T) {
 	})
 
 	t.Run("ConcurrentOpensStartOnce", func(t *testing.T) {
-		u := newUser(t)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour}, nil, t0), "Open")
+		userID := newUser(t)
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour}, nil, t0), "Open")
 
 		first, second := t0.Add(3*time.Hour), t0.Add(3*time.Hour+time.Second)
 
 		var wg sync.WaitGroup
 		for _, at := range []time.Time{first, second} {
 			wg.Go(func() {
-				assert.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour}, nil, at), "Open at %s", at)
+				assert.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour}, nil, at), "Open at %s", at)
 			})
 		}
+
 		wg.Wait()
 
 		// Whichever open ran first restarted the expired row; the other found it
 		// live and left it. The charge follows both, so one window holds all of it.
-		charge(t, u, 1)
+		charge(t, userID, 1)
 
-		got := stored(t, u)
+		got := stored(t, userID)
 		require.Len(t, got, 1, "windows")
 
 		w := got[2*time.Hour]
@@ -122,41 +123,41 @@ func TestSpendWindowRepo(t *testing.T) {
 	})
 
 	t.Run("OpenDropsOrphans", func(t *testing.T) {
-		u := newUser(t)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour, 5 * time.Hour}, nil, t0), "Open")
+		userID := newUser(t)
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour, 5 * time.Hour}, nil, t0), "Open")
 
-		require.NoError(t, windows.Open(ctx, u, nil, []time.Duration{5 * time.Hour}, t0.Add(time.Minute)), "drop")
+		require.NoError(t, windows.Open(ctx, userID, nil, []time.Duration{5 * time.Hour}, t0.Add(time.Minute)), "drop")
 
-		got := stored(t, u)
+		got := stored(t, userID)
 		require.Len(t, got, 1, "windows")
 		assert.Contains(t, got, 2*time.Hour, "2h kept")
 	})
 
 	t.Run("ResetOneAndAll", func(t *testing.T) {
-		u := newUser(t)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
+		userID := newUser(t)
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, t0), "Open")
 
 		two := 2 * time.Hour
-		require.NoError(t, windows.Reset(ctx, u, &two), "Reset 2h")
+		require.NoError(t, windows.Reset(ctx, userID, &two), "Reset 2h")
 
-		got := stored(t, u)
+		got := stored(t, userID)
 		require.Len(t, got, 1, "windows after one reset")
 		assert.Contains(t, got, 24*time.Hour, "24h kept")
 
-		require.NoError(t, windows.Reset(ctx, u, nil), "Reset all")
-		assert.Empty(t, stored(t, u), "windows after reset all")
+		require.NoError(t, windows.Reset(ctx, userID, nil), "Reset all")
+		assert.Empty(t, stored(t, userID), "windows after reset all")
 
-		require.NoError(t, windows.Reset(ctx, u, &two), "Reset a missing window")
+		require.NoError(t, windows.Reset(ctx, userID, &two), "Reset a missing window")
 	})
 
 	t.Run("RowsGoWithTheUser", func(t *testing.T) {
-		u := newUser(t)
-		require.NoError(t, windows.Open(ctx, u, []time.Duration{2 * time.Hour}, nil, t0), "Open")
+		userID := newUser(t)
+		require.NoError(t, windows.Open(ctx, userID, []time.Duration{2 * time.Hour}, nil, t0), "Open")
 
-		_, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, u)
+		_, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, userID)
 		require.NoError(t, err, "delete user")
 
-		assert.Empty(t, stored(t, u), "windows")
+		assert.Empty(t, stored(t, userID), "windows")
 	})
 
 	// DropInherited reaches every inheriting account, so it runs last: the rows

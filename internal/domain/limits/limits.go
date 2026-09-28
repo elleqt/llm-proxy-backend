@@ -58,24 +58,26 @@ type InvalidError struct {
 	Field Field
 }
 
-func (e *InvalidError) Error() string { return ErrInvalid.Error() + " at rule " + strconv.Itoa(e.Index) }
+func (e *InvalidError) Error() string {
+	return ErrInvalid.Error() + " at rule " + strconv.Itoa(e.Index)
+}
 func (e *InvalidError) Unwrap() error { return ErrInvalid }
 
 // Validate accepts a set every rule of which is within bounds, with no window
 // repeated, and at most MaxRules rules.
-func Validate(s Set) error {
-	if len(s) > MaxRules {
+func Validate(set Set) error {
+	if len(set) > MaxRules {
 		return &InvalidError{Index: -1, Field: FieldCount}
 	}
 
-	for i, r := range s {
-		repeated := slices.ContainsFunc(s[:i], func(o Rule) bool { return o.Window == r.Window })
-		if r.Window < MinWindow || r.Window > MaxWindow || r.Window%time.Minute != 0 || repeated {
-			return &InvalidError{Index: i, Field: FieldWindow}
+	for index, rule := range set {
+		repeated := slices.ContainsFunc(set[:index], func(o Rule) bool { return o.Window == rule.Window })
+		if rule.Window < MinWindow || rule.Window > MaxWindow || rule.Window%time.Minute != 0 || repeated {
+			return &InvalidError{Index: index, Field: FieldWindow}
 		}
 		// +Inf is above the cap and -Inf below zero; NaN compares false to both.
-		if math.IsNaN(r.AmountUSD) || r.AmountUSD <= 0 || r.AmountUSD > MaxAmountUSD {
-			return &InvalidError{Index: i, Field: FieldAmount}
+		if math.IsNaN(rule.AmountUSD) || rule.AmountUSD <= 0 || rule.AmountUSD > MaxAmountUSD {
+			return &InvalidError{Index: index, Field: FieldAmount}
 		}
 	}
 
@@ -123,40 +125,40 @@ type Decision struct {
 // Decide says whether an account with set and the stored windows rows may make
 // one more request at now.
 func Decide(set Set, rows []Window, now time.Time) Decision {
-	var d Decision
+	var decision Decision
 
 	stored := make(map[time.Duration]Window, len(rows))
 	for _, w := range rows {
 		stored[w.Length] = w
 	}
 
-	for _, r := range set {
-		w, ok := stored[r.Window]
-		delete(stored, r.Window)
+	for _, rule := range set {
+		window, ok := stored[rule.Window]
+		delete(stored, rule.Window)
 
-		if !ok || !w.LiveAt(now) {
-			d.Open = append(d.Open, r)
+		if !ok || !window.LiveAt(now) {
+			decision.Open = append(decision.Open, rule)
 
 			continue
 		}
 
-		if w.SpentUSD >= r.AmountUSD && (!d.Blocked || w.EndsAt().After(d.ResetsAt)) {
-			d.Blocked, d.Rule, d.ResetsAt = true, r, w.EndsAt()
+		if window.SpentUSD >= rule.AmountUSD && (!decision.Blocked || window.EndsAt().After(decision.ResetsAt)) {
+			decision.Blocked, decision.Rule, decision.ResetsAt = true, rule, window.EndsAt()
 		}
 	}
 
 	for length := range stored {
-		d.Orphans = append(d.Orphans, length)
+		decision.Orphans = append(decision.Orphans, length)
 	}
 
-	slices.Sort(d.Orphans)
+	slices.Sort(decision.Orphans)
 
-	if d.Blocked {
-		d.Open = nil
-		d.Wait = d.ResetsAt.Sub(now)
+	if decision.Blocked {
+		decision.Open = nil
+		decision.Wait = decision.ResetsAt.Sub(now)
 	}
 
-	return d
+	return decision
 }
 
 // WindowState is one rule and its live window, as the API shows it. StartedAt

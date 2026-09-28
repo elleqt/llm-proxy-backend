@@ -24,6 +24,14 @@ const (
 	targetDefaults = "spend_limits"
 )
 
+// Audit detail keys; the audit log's readers key on them.
+const (
+	detailMode          = "mode"
+	detailLimits        = "limits"
+	detailWindowMinutes = "window_minutes"
+	detailAmountUSD     = "amount_usd"
+)
+
 // View is an account's spend limits as the API shows them.
 type View struct {
 	// Custom is the account's own set; nil when it inherits the defaults.
@@ -156,7 +164,7 @@ func (s *Service) SetDefaults(ctx context.Context, actor identity.User, set limi
 
 	s.defaults.Store(&stored)
 
-	if err := s.record(ctx, actor, actionDefaults, targetDefaults, now, map[string]any{"limits": auditRules(set)}); err != nil {
+	if err := s.record(ctx, actor, actionDefaults, targetDefaults, now, map[string]any{detailLimits: auditRules(set)}); err != nil {
 		return nil, err
 	}
 
@@ -197,13 +205,14 @@ func (s *Service) SetUser(ctx context.Context, actor identity.User, id uuid.UUID
 		return View{}, err
 	}
 
-	detail := map[string]any{"mode": "default"}
+	detail := map[string]any{detailMode: "default"}
+
 	if custom != nil {
 		if err := limits.Validate(*custom); err != nil {
 			return View{}, inputError(err)
 		}
 
-		detail = map[string]any{"mode": "custom", "limits": auditRules(*custom)}
+		detail = map[string]any{detailMode: "custom", detailLimits: auditRules(*custom)}
 	}
 
 	user, err := s.users.ByID(ctx, id)
@@ -250,14 +259,15 @@ func (s *Service) Reset(ctx context.Context, actor identity.User, id uuid.UUID, 
 		return View{}, fmt.Errorf("app: reset spend limits of %s: %w", id, err)
 	}
 
-	detail := map[string]any{"window_minutes": "all"}
+	detail := map[string]any{detailWindowMinutes: "all"}
+
 	if window != nil {
 		inForce := slices.ContainsFunc(s.Effective(user.SpendLimits), func(r limits.Rule) bool { return r.Window == *window })
 		if !inForce {
 			return View{}, &app.InvalidInputError{Field: "windowMinutes"}
 		}
 
-		detail = map[string]any{"window_minutes": int64(*window / time.Minute)}
+		detail = map[string]any{detailWindowMinutes: int64(*window / time.Minute)}
 	}
 
 	if err := s.windows.Reset(ctx, id, window); err != nil {
@@ -300,7 +310,7 @@ func (s *Service) record(ctx context.Context, actor identity.User, action, targe
 func auditRules(set limits.Set) []map[string]any {
 	out := make([]map[string]any, 0, len(set))
 	for _, r := range set {
-		out = append(out, map[string]any{"window_minutes": int64(r.Window / time.Minute), "amount_usd": r.AmountUSD})
+		out = append(out, map[string]any{detailWindowMinutes: int64(r.Window / time.Minute), detailAmountUSD: r.AmountUSD})
 	}
 
 	return out

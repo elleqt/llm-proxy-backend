@@ -107,7 +107,7 @@ func (r *Repo) AppendBatch(ctx context.Context, events []app.UsageEvent) (map[uu
 func readBatch(results pgx.BatchResults, inserts int, charged bool) (map[uuid.UUID]struct{}, error) {
 	for range inserts {
 		if _, err := results.Exec(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("postgres: insert usage event: %w", err)
 		}
 	}
 
@@ -117,17 +117,17 @@ func readBatch(results pgx.BatchResults, inserts int, charged bool) (map[uuid.UU
 	}
 
 	if _, err := results.Exec(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("postgres: lock limit windows: %w", err)
 	}
 
 	rows, err := results.Query()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("postgres: charge limit windows: %w", err)
 	}
 
 	ids, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("postgres: read charged owners: %w", err)
 	}
 
 	for _, id := range ids {

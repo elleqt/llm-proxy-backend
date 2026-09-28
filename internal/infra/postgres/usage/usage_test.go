@@ -148,10 +148,10 @@ func TestUsageRepo(t *testing.T) {
 	openAt := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
 
 	t.Run("AppendBatchChargesEveryWindowOfItsOwner", func(t *testing.T) {
-		a, aTok := newOwner(t)
-		b, bTok := newOwner(t)
-		require.NoError(t, windows.Open(ctx, a.ID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, openAt), "open a")
-		require.NoError(t, windows.Open(ctx, b.ID, []time.Duration{2 * time.Hour}, nil, openAt), "open b")
+		ownerA, aTok := newOwner(t)
+		ownerB, bTok := newOwner(t)
+		require.NoError(t, windows.Open(ctx, ownerA.ID, []time.Duration{2 * time.Hour, 24 * time.Hour}, nil, openAt), "open a")
+		require.NoError(t, windows.Open(ctx, ownerB.ID, []time.Duration{2 * time.Hour}, nil, openAt), "open b")
 
 		ev := func(user, token uuid.UUID, usd float64, failed bool) app.UsageEvent {
 			return app.UsageEvent{
@@ -160,20 +160,20 @@ func TestUsageRepo(t *testing.T) {
 			}
 		}
 		limited, err := ledger.AppendBatch(ctx, []app.UsageEvent{
-			ev(a.ID, aTok.ID, 1.5, false),
+			ev(ownerA.ID, aTok.ID, 1.5, false),
 			// A failed attempt spent its tokens: it counts against the limit too.
-			ev(a.ID, aTok.ID, 0.25, true),
-			ev(b.ID, bTok.ID, 2, false),
+			ev(ownerA.ID, aTok.ID, 0.25, true),
+			ev(ownerB.ID, bTok.ID, 2, false),
 			ev(uuid.Nil, uuid.Nil, 9, false),
 		})
 		require.NoError(t, err, "AppendBatch")
-		require.Equal(t, map[uuid.UUID]struct{}{a.ID: {}, b.ID: {}}, limited, "owners with windows")
+		require.Equal(t, map[uuid.UUID]struct{}{ownerA.ID: {}, ownerB.ID: {}}, limited, "owners with windows")
 
-		gotA := spent(t, a.ID)
+		gotA := spent(t, ownerA.ID)
 		require.Len(t, gotA, 2, "a's windows")
 		require.InDelta(t, 1.75, gotA[2*time.Hour], 1e-9, "a 2h")
 		require.InDelta(t, 1.75, gotA[24*time.Hour], 1e-9, "a 24h")
-		require.Equal(t, map[time.Duration]float64{2 * time.Hour: 2}, spent(t, b.ID), "b's windows")
+		require.Equal(t, map[time.Duration]float64{2 * time.Hour: 2}, spent(t, ownerB.ID), "b's windows")
 	})
 
 	t.Run("AppendBatchReportsOnlyOwnersWithWindows", func(t *testing.T) {

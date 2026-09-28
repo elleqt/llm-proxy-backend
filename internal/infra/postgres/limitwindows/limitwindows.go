@@ -102,6 +102,7 @@ func (r *Repo) Open(ctx context.Context, userID uuid.UUID, open, drop []time.Dur
 // window is nil. A window that is not stored is no error.
 func (r *Repo) Reset(ctx context.Context, userID uuid.UUID, window *time.Duration) error {
 	var length *int32
+
 	if window != nil {
 		m := int32(*window / time.Minute) //nolint:gosec // bounded by limits.MaxWindow
 		length = &m
