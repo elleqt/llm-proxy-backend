@@ -4,7 +4,7 @@
 
 A self-hosted gateway that lets a team share Claude (Pro/Max) and ChatGPT (Plus/Pro) subscriptions, and any OpenAI-compatible API, through personal API keys. It embeds [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as a Go library and adds what a shared deployment needs: users and sign-in (local accounts or any OIDC provider), self-service API keys, per-user model access rules, **per-user spend limits**, a web admin panel, a usage ledger with estimated cost, and Prometheus metrics.
 
-> **Spend limits.** Cap what each person may spend per time window, with as many windows at once as you like: e.g. $10 per 2 hours **and** $30 per 24 hours, both counting at the same time. Set one default for everyone, then give any user their own limits or none at all. Users see how much of each limit they have used and when it resets; whether they also see dollars is up to you. [How it works](#spend-limits)
+> **Spend limits.** Cap what each person may spend per time window, with up to 10 windows at once: e.g. $10 per 2 hours **and** $30 per 24 hours, both counting at the same time. Set one default for everyone, then give any user their own limits or none at all. Users see how much of each limit they have used and when it resets; whether they also see dollars is up to you. [How it works](#spend-limits)
 
 > **llm-proxy is one system in two repositories:** [llm-proxy-backend](https://github.com/elleqt/llm-proxy-backend) — the gateway, web API and metrics (start here to run it) · [llm-proxy-frontend](https://github.com/elleqt/llm-proxy-frontend) — the web interface: cabinet and admin panel.
 
@@ -595,7 +595,7 @@ Checklist:
 
 ### Spend limits
 
-An administrator caps how many US dollars of estimated cost (the usage ledger's figure) an account may spend per time window, with up to 10 windows at once, e.g. $10 per 2 hours and $30 per 24 hours. All windows count at the same time: a user who spends $10 within 2 hours waits for that window to reset even with $20 left of the daily one, and never spends more than $30 in 24 hours.
+An administrator caps how many US dollars of estimated cost (the usage ledger's figure) an account may spend per time window, with up to 10 windows at once, e.g. $10 per 2 hours and $30 per 24 hours. All windows count at the same time: a user who spends $10 within 2 hours waits for that window to reset even with $20 left of the daily one, and once the daily window reaches $30 every request waits for it to reset. The limits are soft: the request that crosses one is still served, so a window can end slightly above its amount.
 
 - **Defaults for everyone:** **Admin → Settings → Default spend limits**. Every account without its own limits inherits them. An empty set means no limits by default.
 - **Per user:** on a user's page, **Default** inherits the defaults and **Custom** gives the account its own set, which replaces the defaults entirely. A custom set with no rows means no limits for that user, whatever the defaults are.
