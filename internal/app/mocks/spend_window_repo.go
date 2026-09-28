@@ -49,6 +49,63 @@ func (_m *SpendWindowRepo) EXPECT() *SpendWindowRepo_Expecter {
 	return &SpendWindowRepo_Expecter{mock: &_m.Mock}
 }
 
+// DropInherited provides a mock function for the type SpendWindowRepo
+func (_mock *SpendWindowRepo) DropInherited(ctx context.Context, keep []time.Duration) error {
+	ret := _mock.Called(ctx, keep)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DropInherited")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, []time.Duration) error); ok {
+		r0 = returnFunc(ctx, keep)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// SpendWindowRepo_DropInherited_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DropInherited'
+type SpendWindowRepo_DropInherited_Call struct {
+	*mock.Call
+}
+
+// DropInherited is a helper method to define mock.On call
+//   - ctx context.Context
+//   - keep []time.Duration
+func (_e *SpendWindowRepo_Expecter) DropInherited(ctx any, keep any) *SpendWindowRepo_DropInherited_Call {
+	return &SpendWindowRepo_DropInherited_Call{Call: _e.mock.On("DropInherited", ctx, keep)}
+}
+
+func (_c *SpendWindowRepo_DropInherited_Call) Run(run func(ctx context.Context, keep []time.Duration)) *SpendWindowRepo_DropInherited_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 []time.Duration
+		if args[1] != nil {
+			arg1 = args[1].([]time.Duration)
+		}
+		run(
+			arg0,
+			arg1,
+		)
+	})
+	return _c
+}
+
+func (_c *SpendWindowRepo_DropInherited_Call) Return(err error) *SpendWindowRepo_DropInherited_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *SpendWindowRepo_DropInherited_Call) RunAndReturn(run func(ctx context.Context, keep []time.Duration) error) *SpendWindowRepo_DropInherited_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // Open provides a mock function for the type SpendWindowRepo
 func (_mock *SpendWindowRepo) Open(ctx context.Context, userID uuid.UUID, open []time.Duration, drop []time.Duration, at time.Time) error {
 	ret := _mock.Called(ctx, userID, open, drop, at)

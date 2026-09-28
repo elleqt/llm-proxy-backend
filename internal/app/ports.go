@@ -312,6 +312,10 @@ type SpendWindowRepo interface {
 	// Reset deletes userID's window of that length, or every window of userID
 	// when window is nil. A window that is not stored is no error.
 	Reset(ctx context.Context, userID uuid.UUID, window *time.Duration) error
+	// DropInherited deletes, for every account that inherits the defaults
+	// (users.spend_limits IS NULL), the windows whose length is not in keep: an
+	// empty keep drops every window of every such account.
+	DropInherited(ctx context.Context, keep []time.Duration) error
 }
 
 // QuotaSignal is a vendor's latest own report of how much of one quota window an
@@ -561,8 +565,8 @@ type SpendGate interface {
 	// inherits the defaults). It answers from memory.
 	Effective(custom *limits.Set) limits.Set
 	// Admit decides at the clock's now whether userID may make one more request
-	// under set and, unless it may not, opens the windows due. A refusal writes
-	// nothing.
+	// under set and, unless it may not, opens the windows due and deletes the
+	// windows of rules no longer in set. A refusal writes nothing.
 	Admit(ctx context.Context, userID uuid.UUID, set limits.Set) (limits.Decision, error)
 }
 

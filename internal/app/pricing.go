@@ -5,7 +5,11 @@ import "github.com/elleqt/llm-proxy-backend/internal/domain/access"
 // PricingCatalog is what pricing reads of the model catalogue: which providers
 // serve a model, and the name the registry serves it under.
 type PricingCatalog interface {
+	// ProvidersFor returns every provider serving model now, under the names
+	// prices are keyed by; nil if none does.
 	ProvidersFor(model string) []string
+	// KnownModel is the name the registry serves model under, which prices are
+	// keyed by: as given, else in lower case; false when no provider serves it.
 	KnownModel(model string) (string, bool)
 }
 

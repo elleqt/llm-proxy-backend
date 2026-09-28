@@ -25,6 +25,9 @@ type fixture struct {
 	windows  *mocks.SpendWindowRepo
 	audit    *mocks.AuditSink
 	svc      *spendlimits.Service
+	// audited is the expectation recordAudit registered, so a later write can be
+	// ordered after the audit (NotBefore).
+	audited *mock.Call
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -47,11 +50,11 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) recordAudit() *[]app.AuditEvent {
 	var events []app.AuditEvent
 
-	f.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
+	f.audited = f.audit.EXPECT().Record(mock.Anything, mock.Anything).RunAndReturn(func(_ context.Context, e app.AuditEvent) error {
 		events = append(events, e)
 
 		return nil
-	})
+	}).Call
 
 	return &events
 }

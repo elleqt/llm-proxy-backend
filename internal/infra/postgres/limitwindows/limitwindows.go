@@ -118,6 +118,32 @@ func (r *Repo) Reset(ctx context.Context, userID uuid.UUID, window *time.Duratio
 	return nil
 }
 
+// lockInherited locks, in lockWindows' order extended across accounts
+// (user_id, then window_minutes), the rows dropInherited is about to delete, so
+// it queues behind the ledger's charge rather than deadlocking with it.
+const lockInherited = `SELECT 1 FROM limit_windows w JOIN users u ON u.id = w.user_id
+ WHERE u.spend_limits IS NULL AND NOT (w.window_minutes = ANY($1::int[]))
+ ORDER BY w.user_id, w.window_minutes FOR UPDATE OF w`
+
+const dropInherited = `DELETE FROM limit_windows w USING users u
+ WHERE u.id = w.user_id AND u.spend_limits IS NULL AND NOT (w.window_minutes = ANY($1::int[]))`
+
+// DropInherited deletes, for every account that inherits the defaults, the
+// windows whose length is not in keep, in one transaction. A new defaults set
+// calls it so an account whose effective set lost a rule stops being charged
+// against that rule's window at once, not at its next admitted request.
+func (r *Repo) DropInherited(ctx context.Context, keep []time.Duration) error {
+	batch := &pgx.Batch{}
+	batch.Queue(lockInherited, minutes(keep))
+	batch.Queue(dropInherited, minutes(keep))
+
+	if err := r.pool.SendBatch(ctx, batch).Close(); err != nil {
+		return fmt.Errorf("postgres: drop inherited spend windows: %w", err)
+	}
+
+	return nil
+}
+
 func minutes(ds []time.Duration) []int32 {
 	out := make([]int32, len(ds))
 	for i, d := range ds {

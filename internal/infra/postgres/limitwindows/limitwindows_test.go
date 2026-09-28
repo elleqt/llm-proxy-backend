@@ -158,4 +158,27 @@ func TestSpendWindowRepo(t *testing.T) {
 
 		assert.Empty(t, stored(t, u), "windows")
 	})
+
+	// DropInherited reaches every inheriting account, so it runs last: the rows
+	// the cases above left behind are dropped with the empty keep.
+	t.Run("DropInheritedKeepsTheNewDefaultsWindows", func(t *testing.T) {
+		inheriting, custom := newUser(t), newUser(t)
+		own := limits.Set{{Window: 5 * time.Hour, AmountUSD: 1}}
+		require.NoError(t, users.UpdateSpendLimits(ctx, custom, &own), "custom limits")
+
+		both := []time.Duration{2 * time.Hour, 5 * time.Hour}
+		require.NoError(t, windows.Open(ctx, inheriting, both, nil, t0), "Open inheriting")
+		require.NoError(t, windows.Open(ctx, custom, both, nil, t0), "Open custom")
+
+		require.NoError(t, windows.DropInherited(ctx, []time.Duration{2 * time.Hour}), "DropInherited 2h")
+
+		got := stored(t, inheriting)
+		require.Len(t, got, 1, "inheriting windows")
+		assert.Contains(t, got, 2*time.Hour, "2h kept")
+		assert.Len(t, stored(t, custom), 2, "custom account untouched")
+
+		require.NoError(t, windows.DropInherited(ctx, nil), "DropInherited none")
+		assert.Empty(t, stored(t, inheriting), "inheriting windows after an empty keep")
+		assert.Len(t, stored(t, custom), 2, "custom account untouched by an empty keep")
+	})
 }
