@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -115,10 +114,10 @@ func TestAccessProviderWithoutACredentialReportsNone(t *testing.T) {
 // already resolved the token and put the principal on the request context, so
 // the provider must admit without a second lookup.
 func TestAccessProviderTrustsThePrincipalOnTheContext(t *testing.T) {
-	provider := NewAccessProvider(resolverFunc(func(context.Context, string) (app.Principal, access.Policy, error) {
+	provider := NewAccessProvider(resolverFunc(func(context.Context, string) (app.Principal, app.Grant, error) {
 		assert.Fail(t, "the resolver was called although the context carries a principal")
 
-		return app.Principal{}, nil, app.ErrInvalidCredentials
+		return app.Principal{}, app.Grant{}, app.ErrInvalidCredentials
 	}))
 	r := messagesRequest("/v1/messages")
 	r.Header.Set("X-Api-Key", wireSecret)
@@ -136,8 +135,8 @@ func TestAccessProviderTrustsThePrincipalOnTheContext(t *testing.T) {
 // client holding a valid token that its key is wrong, and must not carry the
 // secret into upstream's error log.
 func TestAccessProviderReportsAFailedLookupAsInternal(t *testing.T) {
-	provider := NewAccessProvider(resolverFunc(func(context.Context, string) (app.Principal, access.Policy, error) {
-		return app.Principal{}, nil, errors.New("app: resolve token: connection refused")
+	provider := NewAccessProvider(resolverFunc(func(context.Context, string) (app.Principal, app.Grant, error) {
+		return app.Principal{}, app.Grant{}, errors.New("app: resolve token: connection refused")
 	}))
 	r := messagesRequest("/v1/messages")
 	r.Header.Set("Authorization", "Bearer "+wireSecret)

@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -48,7 +47,7 @@ func userKey(user string, token int) string {
 
 // usersResolver admits gateSecret as gatePrincipal and every userKey as its
 // user, all allowed chatgpt's models.
-var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 	rest, ok := strings.CutPrefix(secret, "sk-user-")
 	if !ok {
 		return staticResolver(gateSecret, gatePrincipal, "chatgpt:*")(ctx, secret)
@@ -59,7 +58,7 @@ var usersResolver resolverFunc = func(ctx context.Context, secret string) (app.P
 	return app.Principal{
 		UserID:  uuid.NewSHA1(uuid.NameSpaceOID, []byte(user)),
 		TokenID: uuid.NewSHA1(uuid.NameSpaceOID, []byte(secret)),
-	}, mustPolicy("chatgpt:*"), nil
+	}, app.Grant{Policy: mustPolicy("chatgpt:*")}, nil
 }
 
 // heldEngine is a gated engine whose handlers signal entered with what they

@@ -293,7 +293,7 @@ func TestGateRefusalsAreUpstreamsOwn(t *testing.T) {
 // looking the token up again.
 func TestGateResolvesTheTokenOnce(t *testing.T) {
 	lookups := 0
-	resolver := resolverFunc(func(ctx context.Context, secret string) (app.Principal, access.Policy, error) {
+	resolver := resolverFunc(func(ctx context.Context, secret string) (app.Principal, app.Grant, error) {
 		lookups++
 
 		return staticResolver(gateSecret, gatePrincipal, "chatgpt:*")(ctx, secret)

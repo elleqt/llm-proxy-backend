@@ -8,6 +8,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 )
 
@@ -66,6 +67,13 @@ func parseCanonical(s string) (uuid.UUID, error) {
 	return id, nil
 }
 
+// Grant is what a token's owner may do, read with the owner by Resolve: the
+// model policy, and the owner's own spend limits (nil inherits the defaults).
+type Grant struct {
+	Policy      access.Policy
+	SpendLimits *limits.Set
+}
+
 // TokenResolver turns an API token secret into the principal it authenticates.
 type TokenResolver struct {
 	users  UserRepo
@@ -76,7 +84,7 @@ func NewTokenResolver(users UserRepo, tokens TokenRepo) *TokenResolver {
 	return &TokenResolver{users: users, tokens: tokens}
 }
 
-// Resolve authenticates secret, and returns the policy of the token's owner as
+// Resolve authenticates secret, and returns the grant of the token's owner as
 // Resolve read it, so a caller deciding what the request may do needs no second
 // read of the owner. A token authenticates only while it is not revoked and
 // its owner may use the API (identity.User.CanUseAPI), so blocking a user
@@ -84,39 +92,41 @@ func NewTokenResolver(users UserRepo, tokens TokenRepo) *TokenResolver {
 //
 // Every refusal — no secret, an unknown or revoked token, an owner that is gone
 // or may not use the API — is ErrInvalidCredentials and nothing else, with a
-// zero principal and no policy, so a caller cannot tell a revoked or blocked
+// zero principal and a zero grant, so a caller cannot tell a revoked or blocked
 // key from one that never existed. Any other error is a failed lookup, not a
 // refusal, and is returned wrapped. The secret appears in no error.
-func (r *TokenResolver) Resolve(ctx context.Context, secret string) (Principal, access.Policy, error) {
+func (r *TokenResolver) Resolve(ctx context.Context, secret string) (Principal, Grant, error) {
 	if secret == "" {
-		return Principal{}, nil, ErrInvalidCredentials
+		return Principal{}, Grant{}, ErrInvalidCredentials
 	}
 
 	tok, err := r.tokens.ByHash(ctx, credentials.HashSecret(secret))
 	if errors.Is(err, ErrNotFound) {
-		return Principal{}, nil, ErrInvalidCredentials
+		return Principal{}, Grant{}, ErrInvalidCredentials
 	}
 
 	if err != nil {
-		return Principal{}, nil, fmt.Errorf("app: resolve token: %w", err)
+		return Principal{}, Grant{}, fmt.Errorf("app: resolve token: %w", err)
 	}
 
 	if !tok.Active() {
-		return Principal{}, nil, ErrInvalidCredentials
+		return Principal{}, Grant{}, ErrInvalidCredentials
 	}
 
 	owner, err := r.users.ByID(ctx, tok.UserID)
 	if errors.Is(err, ErrNotFound) {
-		return Principal{}, nil, ErrInvalidCredentials
+		return Principal{}, Grant{}, ErrInvalidCredentials
 	}
 
 	if err != nil {
-		return Principal{}, nil, fmt.Errorf("app: resolve token owner: %w", err)
+		return Principal{}, Grant{}, fmt.Errorf("app: resolve token owner: %w", err)
 	}
 
 	if !owner.CanUseAPI() {
-		return Principal{}, nil, ErrInvalidCredentials
+		return Principal{}, Grant{}, ErrInvalidCredentials
 	}
 
-	return Principal{UserID: tok.UserID, TokenID: tok.ID, Owner: owner.Label()}, owner.Policy, nil
+	principal := Principal{UserID: tok.UserID, TokenID: tok.ID, Owner: owner.Label()}
+
+	return principal, Grant{Policy: owner.Policy, SpendLimits: owner.SpendLimits}, nil
 }

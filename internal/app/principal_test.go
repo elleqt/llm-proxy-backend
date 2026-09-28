@@ -12,6 +12,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -81,19 +82,21 @@ func TestResolveReturnsTheOwnerAndTheToken(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			owner := tc.owner
+			owner.SpendLimits = &limits.Set{{Window: 2 * time.Hour, AmountUSD: 10}}
 			users, tokens := mocks.NewUserRepo(t), mocks.NewTokenRepo(t)
 			tok := liveToken(owner.ID)
 			// The lookup is by the hash of what was presented, never the secret itself.
 			tokens.EXPECT().ByHash(mock.Anything, credentials.HashSecret(presented)).Return(tok, nil)
 			users.EXPECT().ByID(mock.Anything, owner.ID).Return(owner, nil)
 
-			got, policy, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
+			got, grant, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
 			require.NoError(t, err, "Resolve")
 			require.Equal(t, app.Principal{UserID: owner.ID, TokenID: tok.ID, Owner: tc.label}, got, "Resolve")
-			// The owner's policy travels with the principal: whoever decides
+			// The owner's grant travels with the principal: whoever decides
 			// what the request may do does not read the owner again.
-			require.True(t, policy.Allows("claude", "any-model"), "Resolve policy = %v, want the owner's claude:*", policy)
-			require.False(t, policy.Allows("chatgpt", "any-model"), "Resolve policy = %v, want the owner's claude:*", policy)
+			require.True(t, grant.Policy.Allows("claude", "any-model"), "Resolve policy = %v, want the owner's claude:*", grant.Policy)
+			require.False(t, grant.Policy.Allows("chatgpt", "any-model"), "Resolve policy = %v, want the owner's claude:*", grant.Policy)
+			require.Equal(t, &limits.Set{{Window: 2 * time.Hour, AmountUSD: 10}}, grant.SpendLimits, "Resolve spend limits")
 		})
 	}
 }
@@ -138,10 +141,10 @@ func TestResolveRefusalsAreIndistinguishable(t *testing.T) {
 			users, tokens := mocks.NewUserRepo(t), mocks.NewTokenRepo(t)
 			tc.expect(users, tokens)
 
-			got, policy, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
+			got, grant, err := app.NewTokenResolver(users, tokens).Resolve(context.Background(), presented)
 			require.Same(t, app.ErrInvalidCredentials, err, "Resolve = %+v; want exactly ErrInvalidCredentials", got)
 			require.Zero(t, got, "a refusal returned a principal")
-			require.Nil(t, policy, "a refusal returned a policy")
+			require.Zero(t, grant, "a refusal returned a grant")
 		})
 	}
 }

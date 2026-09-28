@@ -29,7 +29,7 @@ import (
 //     errors — so a refusal has upstream's status and body byte for byte. The
 //     principal goes on the request context (withPrincipal) and the access
 //     provider accepts it without resolving again. The resolver returns the
-//     owner's policy with it, so the owner is read once per request.
+//     owner's grant with it, so the owner is read once per request.
 //   - A model route needs a body within its limit (413 otherwise) and
 //     received within bodyReadTimeout (408 otherwise), which the gate holds
 //     in memory under the process-wide body budget until the handler returns
@@ -87,7 +87,7 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer
 
 		ctx := ginCtx.Request.Context()
 
-		principal, policy, source, authErr := authenticate(ctx, resolver, ginCtx.Request)
+		principal, grant, source, authErr := authenticate(ctx, resolver, ginCtx.Request)
 		if authErr != nil {
 			refuseAuthentication(ginCtx, authErr, observe, log)
 
@@ -113,13 +113,13 @@ func policyGate(resolver Resolver, catalog access.Catalog, observe gate.Observer
 		}
 
 		if matched.kind == routeListing {
-			serveListing(ginCtx, matched.listing, func(model string) bool { return policy.Admits(catalog, model) }, log)
+			serveListing(ginCtx, matched.listing, func(model string) bool { return grant.Policy.Admits(catalog, model) }, log)
 
 			return
 		}
 
 		model, providers := access.Routed(catalog, requested)
-		if !policy.Covers(model, providers) {
+		if !grant.Policy.Covers(model, providers) {
 			reason := gate.DenyModelNotAllowed
 			if len(providers) == 0 {
 				reason = gate.DenyUnknownModel
