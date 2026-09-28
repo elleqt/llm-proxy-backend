@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/google/uuid"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -192,6 +193,18 @@ func TestNewRefusesWithoutAResolver(t *testing.T) {
 
 	_, err := New(Params{Config: &cliproxyconfig.Config{AuthDir: t.TempDir()}, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml")})
 	require.ErrorIs(t, err, ErrNoResolver, "New without a resolver")
+}
+
+// TestNewRefusesLimitsWithoutPrices: limits without a price list could price
+// no request, so a limited owner would be refused every model.
+func TestNewRefusesLimitsWithoutPrices(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+
+	_, err := New(Params{
+		Config: &cliproxyconfig.Config{AuthDir: t.TempDir()}, ConfigPath: filepath.Join(t.TempDir(), "unused.yaml"),
+		Resolver: wireResolver, Limits: mocks.NewSpendGate(t),
+	})
+	require.ErrorIs(t, err, ErrNoPrices, "New with limits and no prices")
 }
 
 // TestEachGatewayAuthenticatesWithItsOwnResolver: the provider is registered

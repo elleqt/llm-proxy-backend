@@ -24,6 +24,8 @@ func TestGateRefusalsReachTheMetricsUnderTheirReasons(t *testing.T) {
 	observer.Denied("alice@example.com", "served-model", gate.DenyModelNotAllowed)
 	observer.Denied("alice@example.com", "Client-Invented-Model", gate.DenyUnknownModel)
 	observer.Denied("", "", gate.DenyRouteNotAllowed)
+	observer.Denied("alice@example.com", "served-model", gate.DenySpendLimit)
+	observer.Denied("alice@example.com", "served-model", gate.DenyUnpricedModel)
 	observer.Denied("alice@example.com", "served-model", gate.DenyReason(200))
 
 	rec := httptest.NewRecorder()
@@ -36,6 +38,8 @@ func TestGateRefusalsReachTheMetricsUnderTheirReasons(t *testing.T) {
 		`llmproxy_policy_denied_total{model="served-model",reason="model_not_allowed",user="alice@example.com"} 1`,
 		`llmproxy_policy_denied_total{model="unknown",reason="unknown_model",user="alice@example.com"} 1`,
 		`llmproxy_policy_denied_total{model="unknown",reason="route_not_allowed",user="unknown"} 1`,
+		`llmproxy_policy_denied_total{model="served-model",reason="spend_limit",user="alice@example.com"} 1`,
+		`llmproxy_policy_denied_total{model="served-model",reason="unpriced_model",user="alice@example.com"} 1`,
 		`llmproxy_policy_denied_total{model="served-model",reason="other",user="alice@example.com"} 1`,
 	} {
 		require.Contains(t, body, want, "scrape lacks %s", want)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
 )
 
 // Catalog answers which providers serve a model, under the provider names
@@ -42,6 +43,9 @@ type modelRegistry interface {
 // ErrModelRegistry reports an upstream model registry that does not say which
 // providers serve a model: no policy could then be applied to a model request.
 var ErrModelRegistry = errors.New("gateway: upstream's model registry does not report a model's providers")
+
+// NewCatalog is the catalogue over upstream's process-global model registry.
+func NewCatalog() (*Catalog, error) { return newCatalog(cliproxy.GlobalModelRegistry()) }
 
 // newCatalog reads registry, which must report a model's providers.
 func newCatalog(registry any) (*Catalog, error) {

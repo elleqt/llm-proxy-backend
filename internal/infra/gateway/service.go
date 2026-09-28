@@ -78,9 +78,14 @@ type Params struct {
 	// ErrNoTokenStore.
 	Store coreauth.Store
 	// Resolver authenticates the API tokens proxied requests present, and
-	// returns their owners' policies. Required: it backs the only access
+	// returns their owners' grants. Required: it backs the only access
 	// provider that can admit a request, and the policy gate.
 	Resolver Resolver
+	// Limits enforces spend limits on model requests and listings. Nil enforces
+	// none; boot always sets it, with Prices.
+	Limits app.SpendGate
+	// Prices is the price list in force. Required with Limits.
+	Prices app.PriceLookup
 	// Observer is told what the policy gate refuses. Nil observes nothing.
 	Observer gate.Observer
 	// Log receives the policy gate's own failures. Nil discards them.
@@ -170,6 +175,10 @@ var ErrNoTokenStore = errors.New("gateway: no token store was supplied")
 // ErrNoResolver reports Params without a Resolver: no request could be
 // authenticated, and upstream admits every request when it has no provider.
 var ErrNoResolver = errors.New("gateway: no token resolver was supplied")
+
+// ErrNoPrices reports Params with Limits but no Prices: no request of a
+// limited owner could be priced, so none could be admitted.
+var ErrNoPrices = errors.New("gateway: spend limits need a price list")
 
 // ErrConfigAPIKeys reports a configuration carrying api-keys. A config key
 // belongs to no user, so no per-user policy could apply to it: it would be a
@@ -314,8 +323,9 @@ func admit(cfg *cliproxyconfig.Config) error {
 // New builds the embedded service. It does not start it; call Run. It refuses
 // to build while an environment variable that enables upstream's management
 // API is set (ErrManagementEnv), on a configuration admit refuses, without a
-// Resolver (ErrNoResolver), and when upstream's
-// model registry cannot say which providers serve a model (ErrModelRegistry).
+// Resolver (ErrNoResolver), with Limits but no Prices (ErrNoPrices), and when
+// upstream's model registry cannot say which providers serve a model
+// (ErrModelRegistry).
 // It installs the policy gate as the server's first middleware. Access is
 // claimed for the built gateway's provider (see claimAccess) — again just
 // before the server starts serving — and the provider is registered here,
@@ -339,9 +349,18 @@ func New(params Params) (*Gateway, error) {
 		return nil, ErrNoResolver
 	}
 
-	catalog, err := newCatalog(cliproxy.GlobalModelRegistry())
+	if params.Limits != nil && params.Prices == nil {
+		return nil, ErrNoPrices
+	}
+
+	catalog, err := NewCatalog()
 	if err != nil {
 		return nil, err
+	}
+
+	var spend *spendCheck
+	if params.Limits != nil {
+		spend = &spendCheck{limits: params.Limits, prices: params.Prices, catalog: catalog}
 	}
 
 	gw := &Gateway{
@@ -402,7 +421,7 @@ func New(params Params) (*Gateway, error) {
 		}).
 		WithServerOptions(
 			sdkapi.WithEngineConfigurator(gw.configureEngine),
-			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, params.Observer, params.Log)),
+			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, spend, params.Observer, params.Log)),
 			sdkapi.WithRequestLoggerFactory(noRequestLogger),
 		)
 	if len(params.Middleware) > 0 {

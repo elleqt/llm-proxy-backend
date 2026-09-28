@@ -416,7 +416,7 @@ func TestBodilessRequestGetsNoReadDeadline(t *testing.T) {
 
 	engine := gin.New()
 	engine.Use(readDeadlineControl(), policyGate(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"),
-		fixedCatalog(map[string][]string{"gemini-3-pro": {"chatgpt"}}), nil, nil))
+		fixedCatalog(map[string][]string{"gemini-3-pro": {"chatgpt"}}), nil, nil, nil))
 	engine.POST("/v1beta/models/*action", func(c *gin.Context) {
 		select {
 		case <-c.Request.Context().Done():
@@ -449,10 +449,10 @@ func TestBodyIsRefusedWithoutAReadDeadline(t *testing.T) {
 	resolver := staticResolver(gateSecret, gatePrincipal, "chatgpt:*")
 	catalog := fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}})
 	withoutControl := gin.New()
-	withoutControl.Use(policyGate(resolver, catalog, nil, nil))
+	withoutControl.Use(policyGate(resolver, catalog, nil, nil, nil))
 
 	overRecorder := gin.New()
-	overRecorder.Use(readDeadlineControl(), policyGate(resolver, catalog, nil, nil))
+	overRecorder.Use(readDeadlineControl(), policyGate(resolver, catalog, nil, nil, nil))
 
 	for what, engine := range map[string]*gin.Engine{"no controller": withoutControl, "no deadline on the writer": overRecorder} {
 		reached := false
@@ -518,7 +518,7 @@ func TestStalledSenderIsCutWhenTheTransportClearsTheDeadline(t *testing.T) {
 
 	engine := gin.New()
 	engine.Use(readDeadlineControl(), policyGate(staticResolver(gateSecret, gatePrincipal, "chatgpt:*"),
-		fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}), nil, nil))
+		fixedCatalog(map[string][]string{"gpt-5.6": {"chatgpt"}}), nil, nil, nil))
 	engine.POST("/v1/chat/completions", func(c *gin.Context) { c.Status(http.StatusOK) })
 
 	inner, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")

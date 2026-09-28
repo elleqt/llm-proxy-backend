@@ -27,6 +27,7 @@ import (
 	appprices "github.com/elleqt/llm-proxy-backend/internal/app/prices"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	appsettings "github.com/elleqt/llm-proxy-backend/internal/app/settings"
+	"github.com/elleqt/llm-proxy-backend/internal/app/spendlimits"
 	apptokens "github.com/elleqt/llm-proxy-backend/internal/app/tokens"
 	appusage "github.com/elleqt/llm-proxy-backend/internal/app/usage"
 	"github.com/elleqt/llm-proxy-backend/internal/config"
@@ -42,6 +43,7 @@ import (
 	pgactivity "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/activity"
 	pgaudit "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/audit"
 	pgidentities "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/identities"
+	pglimitwindows "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/limitwindows"
 	pgloginattempts "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/loginattempts"
 	pgpasswords "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/passwords"
 	pgprices "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/prices"
@@ -101,9 +103,9 @@ const (
 // Boot order: configuration and the process log, migrations, the pool,
 // repositories and the one password hasher, the bootstrap administrator, the
 // upstream boot configuration from the database, metrics, the price list and the
-// usage sink, the vendor credential store, the gateway, then the three listeners
-// and the price catalog's checks, and once the gateway runs, the model catalogue
-// updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// usage sink, the spend limits, the vendor credential store, the gateway, then
+// the three listeners and the price catalog's checks, and once the gateway runs,
+// the model catalogue updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
@@ -213,6 +215,11 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		return nil, fmt.Errorf("prices: %w", err)
 	}
 
+	spend := spendlimits.New(users, settings, pglimitwindows.New(pool), audit, clock)
+	if err := spend.Load(ctx); err != nil {
+		return nil, fmt.Errorf("spend limits: %w", err)
+	}
+
 	// The vendor accounts' credentials live in the database, sealed under
 	// LLMPROXY_CREDENTIALS_KEY. The store is registered process-wide before the
 	// gateway exists, so upstream code that asks sdkauth.GetTokenStore gets it,
@@ -263,6 +270,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Store:       store,
 		Cooldown:    cooldown,
 		Resolver:    app.NewTokenResolver(users, tokens),
+		Limits:      spend,
+		Prices:      prices,
 		// The gate's 401s and refusals are counted, a denial under its owner.
 		Observer: gateMetrics{meters},
 		Log:      logger,

@@ -374,12 +374,18 @@ const (
 	DenyUnknownModel
 	// DenyRouteNotAllowed: the path is not on the proxied listener's allow-list.
 	DenyRouteNotAllowed
+	// DenySpendLimit: an exhausted spend-limit window.
+	DenySpendLimit
+	// DenyUnpricedModel: a model without a price, for a user with spend limits.
+	DenyUnpricedModel
 )
 
 var denyReasons = [...]string{
 	DenyModelNotAllowed: "model_not_allowed",
 	DenyUnknownModel:    "unknown_model",
 	DenyRouteNotAllowed: "route_not_allowed",
+	DenySpendLimit:      "spend_limit",
+	DenyUnpricedModel:   "unpriced_model",
 }
 
 // String returns the reason's label value; a value outside the declared constants

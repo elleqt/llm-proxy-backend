@@ -25,10 +25,15 @@ import (
 // handed a controller whose deadlines are accepted and ignored. Tests of the
 // deadline itself serve the real engine (startWith).
 func gateEngine(resolver Resolver, catalog access.Catalog) *gin.Engine {
+	return gateEngineWith(resolver, catalog, nil)
+}
+
+// gateEngineWith is gateEngine with the spend-limit step.
+func gateEngineWith(resolver Resolver, catalog access.Catalog, spend *spendCheck) *gin.Engine {
 	engine := gin.New()
 	engine.Use(func(c *gin.Context) {
 		c.Set(readDeadlineKey, http.NewResponseController(deadlineIgnored{c.Writer}))
-	}, policyGate(resolver, catalog, nil, nil))
+	}, policyGate(resolver, catalog, spend, nil, nil))
 
 	return engine
 }
