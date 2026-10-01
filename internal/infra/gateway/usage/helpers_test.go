@@ -17,7 +17,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/access"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )

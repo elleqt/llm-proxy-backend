@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

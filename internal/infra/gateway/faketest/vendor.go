@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // Vendor is an OpenAI-compatible vendor on the wire: an http.Handler that

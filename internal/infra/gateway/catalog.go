@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 )
 
 // Catalog answers which providers serve a model, under the provider names

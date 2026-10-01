@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-`github.com/elleqt/llm-proxy-backend` is a self-hosted LLM gateway that lets a team share Claude/ChatGPT subscriptions through personal API keys. It embeds CLIProxyAPI (`github.com/router-for-me/CLIProxyAPI/v7`; the version in `go.mod` is authoritative) as a library and adds:
+`github.com/elleqt/llm-proxy-backend` is a self-hosted LLM gateway that lets a team share Claude/ChatGPT subscriptions through personal API keys. It embeds CLIProxyAPI (`github.com/router-for-me/CLIProxyAPI/v8`; the version in `go.mod` is authoritative) as a library and adds:
 
 - users with local or OIDC sign-in
 - `sk-` API tokens

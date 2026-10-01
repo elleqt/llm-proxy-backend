@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
 // scratchPattern names the temporary directory a fresh login's token storage
@@ -40,6 +41,8 @@ const (
 	metadataType     = "type"
 	metadataDisabled = "disabled"
 	metadataEmail    = "email"
+	metadataPlanType = "plan_type"
+	metadataIDToken  = "id_token"
 )
 
 var (
@@ -475,7 +478,8 @@ func stampCredential(auth *coreauth.Auth, key string) {
 // authFromRow rebuilds a stored account as FileTokenStore.readAuthFiles
 // rebuilds one from its file (sdk/auth/filestore.go, non-plugin branch): the
 // row's id where the file's relative path was, Postgres as the source, the
-// row's timestamps where the file's mtime was. No path attribute: upstream
+// row's timestamps where the file's mtime was, and a Codex account's plan type
+// as the file watcher adds it (codexPlanType). No path attribute: upstream
 // reads it only as a cache key in executors this gateway does not route to
 // and in the file watcher, which is hollow here.
 func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, error) {
@@ -521,6 +525,12 @@ func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, er
 		auth.Attributes[metadataEmail] = email
 	}
 
+	if auth.Provider == "codex" {
+		if plan, ok := codexPlanType(metadata); ok {
+			auth.Attributes[metadataPlanType] = plan
+		}
+	}
+
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
 
 	if isCompatAccount(auth) {
@@ -528,6 +538,61 @@ func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, er
 	}
 
 	return auth, nil
+}
+
+// codexPlanType is the plan_type attribute upstream's file watcher gives a
+// Codex account it reads (internal/watcher/synthesizer/file.go
+// synthesizeFileAuths), which FileTokenStore.readAuthFiles does not: the stored
+// plan type, else the ID token's plan claim; none without either. Upstream
+// registers a Codex account's models by it, the Pro set when it is unset
+// (sdk/cliproxy/service_models.go). The watcher is hollow here, so without it
+// an account would list the Pro models after a restart whatever its plan,
+// while a fresh sign-in, which sets it, lists its plan's own.
+func codexPlanType(metadata map[string]any) (string, bool) {
+	if plan, isString := metadata[metadataPlanType].(string); isString {
+		if plan = strings.TrimSpace(plan); plan != "" {
+			return plan, true
+		}
+	}
+
+	idToken, isString := metadata[metadataIDToken].(string)
+	if !isString || strings.TrimSpace(idToken) == "" {
+		return "", false
+	}
+
+	return idTokenPlanType(idToken), true
+}
+
+// idTokenPlanType is upstream's JWTClaims.GetPlanType over a Codex ID token's
+// unverified claims (internal/auth/codex/jwt_parser.go): the plan claim, else
+// "free", which is also the plan of a token whose claims do not decode.
+func idTokenPlanType(idToken string) string {
+	const freePlan = "free"
+
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return freePlan
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return freePlan
+	}
+
+	var claims struct {
+		Auth struct {
+			PlanType string `json:"chatgpt_plan_type"`
+		} `json:"https://api.openai.com/auth"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return freePlan
+	}
+
+	if plan := strings.TrimSpace(claims.Auth.PlanType); plan != "" {
+		return plan
+	}
+
+	return freePlan
 }
 
 // credentialLabel is FileTokenStore.labelFor: the label, else the email,

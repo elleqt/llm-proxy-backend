@@ -17,7 +17,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/pgtest"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/postgres/vendorcreds"
 	"github.com/jackc/pgx/v5/pgxpool"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

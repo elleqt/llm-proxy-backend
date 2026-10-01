@@ -43,13 +43,13 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	sdklogging "github.com/router-for-me/CLIProxyAPI/v7/sdk/logging"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	sdkapi "github.com/router-for-me/CLIProxyAPI/v8/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	sdklogging "github.com/router-for-me/CLIProxyAPI/v8/sdk/logging"
 )
 
 // Params configures a Gateway.
