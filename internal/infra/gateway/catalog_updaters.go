@@ -24,13 +24,13 @@ import (
 // symbol still exists under that name, so upgrading upstream must re-check all
 // three against its source.
 
-//go:linkname startModelsUpdater github.com/router-for-me/CLIProxyAPI/v7/internal/registry.StartModelsUpdater
+//go:linkname startModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartModelsUpdater
 func startModelsUpdater(ctx context.Context)
 
-//go:linkname startCodexClientModelsUpdater github.com/router-for-me/CLIProxyAPI/v7/internal/registry.StartCodexClientModelsUpdater
+//go:linkname startCodexClientModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartCodexClientModelsUpdater
 func startCodexClientModelsUpdater(ctx context.Context)
 
-//go:linkname startDevinModelsUpdater github.com/router-for-me/CLIProxyAPI/v7/internal/registry.StartDevinModelsUpdater
+//go:linkname startDevinModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartDevinModelsUpdater
 func startDevinModelsUpdater(ctx context.Context)
 
 // StartModelCatalogUpdaters starts upstream's model catalogue updaters as its

@@ -22,9 +22,9 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/gin-gonic/gin"
-	sdkapi "github.com/router-for-me/CLIProxyAPI/v7/sdk/api"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	sdkapi "github.com/router-for-me/CLIProxyAPI/v8/sdk/api"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -516,8 +516,10 @@ func net127(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
 
 // answerCodexExchange makes upstream's Codex code exchange — the one step of
 // upstream's real flow that needs the vendor — succeed with fresh tokens for
-// email. Upstream's exchange client leaves its transport nil when no proxy is
-// configured (internal/util/proxy.go SetProxy), so its token request goes
+// email on the Plus plan. Like a real ID token, the one it returns carries the
+// plan claim, which upstream puts in the account's file name. Upstream's
+// exchange client leaves its transport nil when no proxy is configured
+// (internal/util/proxy.go SetProxy), so its token request goes
 // through http.DefaultTransport. For the rest of the test that is a clone whose
 // TLS dial to auth.openai.com reaches a local plain-HTTP server instead, and
 // which refuses every other TLS dial. Call it before the gateway starts: the
@@ -526,7 +528,10 @@ func net127(port int) string { return "127.0.0.1:" + strconv.Itoa(port) }
 func answerCodexExchange(t *testing.T, email, accessToken string) {
 	t.Helper()
 
-	claims, err := json.Marshal(map[string]any{"email": email})
+	claims, err := json.Marshal(map[string]any{
+		"email":                       email,
+		"https://api.openai.com/auth": map[string]any{"chatgpt_plan_type": "plus"},
+	})
 	require.NoError(t, err)
 
 	vendor := httptest.NewServer(http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
@@ -577,7 +582,7 @@ func answerCodexExchange(t *testing.T, email, accessToken string) {
 func TestReloginKeepsTheHeldStateOverAStaleCredentialFile(t *testing.T) {
 	const email = "relogin@example.com"
 
-	id := "codex-" + email + ".json"
+	id := "codex-" + email + "-plus.json"
 
 	t.Cleanup(func() { cliproxy.GlobalModelRegistry().UnregisterClient(id) })
 

@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/credentials"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -345,6 +346,51 @@ func TestCredentialStoreListRebuildsTheAccounts(t *testing.T) {
 	key, err := fx.store.Save(t.Context(), listed[0])
 	require.NoError(t, err, "a listed account saved unchanged")
 	require.Equal(t, "codex-team@example.com.json", key)
+}
+
+// TestCredentialStoreListGivesCodexAccountsTheirPlan: List gives a Codex
+// account the plan_type attribute upstream registers its models by, as
+// upstream's file watcher does: the stored plan type, else the ID token's plan
+// claim, "free" for a token without one or whose claims do not decode; none
+// without either, and none on another provider's account.
+func TestCredentialStoreListGivesCodexAccountsTheirPlan(t *testing.T) {
+	idToken := func(claims string) string {
+		return "e30." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".c2ln"
+	}
+	teamToken := idToken(`{"https://api.openai.com/auth":{"chatgpt_plan_type":"team"}}`)
+
+	for name, tc := range map[string]struct {
+		fields map[string]any
+		want   string // "" means no plan_type attribute.
+	}{
+		"stored plan type":           {map[string]any{"type": "codex", "plan_type": " plus ", "id_token": teamToken}, "plus"},
+		"plan claim of the token":    {map[string]any{"type": "codex", "id_token": teamToken}, "team"},
+		"token without a plan claim": {map[string]any{"type": "codex", "id_token": idToken(`{"email":"a@example.com"}`)}, "free"},
+		"token that does not decode": {map[string]any{"type": "codex", "id_token": "not-a-jwt"}, "free"},
+		"neither":                    {map[string]any{"type": "codex"}, ""},
+		"another provider":           {map[string]any{"type": "claude", "plan_type": "pro"}, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := newStoreFixture(t)
+			tc.fields["access_token"] = "at-plan"
+			fx.repo.EXPECT().List(mock.Anything).Return([]app.VendorCredential{
+				sealedRow(t, fx.sealer, "account.json", tc.fields, storeNow),
+			}, nil).Once()
+
+			listed, err := fx.store.List(t.Context())
+			require.NoError(t, err)
+			require.Len(t, listed, 1)
+
+			plan, ok := listed[0].Attributes["plan_type"]
+			if tc.want == "" {
+				assert.False(t, ok, "plan_type = %q, want none", plan)
+
+				return
+			}
+
+			assert.Equal(t, tc.want, plan)
+		})
+	}
 }
 
 // TestCredentialStoreListRefusesARowSealedUnderAnotherKey: a row that does

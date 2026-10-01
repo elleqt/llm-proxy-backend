@@ -57,8 +57,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/pricecatalog"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	sdkauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/auth"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 )
 
 // Options is what the process takes from outside its environment variables.

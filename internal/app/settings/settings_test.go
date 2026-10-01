@@ -13,7 +13,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/settings"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/google/uuid"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -152,12 +152,22 @@ func TestSettingsRefusesSmuggledOwnedFields(t *testing.T) {
 	}
 }
 
+// TestSettingsRefusesUnknownAndMalformedDocuments also covers upstream's v8
+// layout: its sections nest gateway-owned keys under ones the document shares
+// with editable keys, so the document stays in the legacy layout.
 func TestSettingsRefusesUnknownAndMalformedDocuments(t *testing.T) {
 	for name, doc := range map[string]string{
-		"misspelt top-level key": "request-retries: 3\n",
-		"misspelt nested key":    "streaming:\n  keepalive-second: 5\n",
-		"not a mapping":          "- a\n- b\n",
-		"wrong type":             "request-retry: many\n",
+		"misspelt top-level key":       "request-retries: 3\n",
+		"misspelt nested key":          "streaming:\n  keepalive-second: 5\n",
+		"not a mapping":                "- a\n- b\n",
+		"wrong type":                   "request-retry: many\n",
+		"v8 config version":            "config-version: 8\n",
+		"v8 management section":        "management:\n  secret-key: hunter2\n",
+		"v8 listener section":          "server:\n  port: 9999\n",
+		"v8 auth dir in a shared root": "oauth:\n  auth-dir: /tmp/elsewhere\n",
+		"v8 request log in a new root": "observability:\n  logs:\n    request-log: true\n",
+		"v8 cooldown in a shared root": "routing:\n  cooldown:\n    save-cooldown-status: true\n",
+		"v8 retry next to legacy keys": "routing:\n  strategy: round-robin\n  retry:\n    request-retry: 2\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newSettingsFixture(t, "")

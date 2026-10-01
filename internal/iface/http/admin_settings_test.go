@@ -11,7 +11,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 	"github.com/google/uuid"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

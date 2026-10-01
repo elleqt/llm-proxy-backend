@@ -17,8 +17,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/pmezard/go-difflib/difflib"
-	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -583,12 +583,25 @@ func hasMergeKey(node *yaml.Node) bool {
 	return slices.ContainsFunc(node.Content, hasMergeKey)
 }
 
+// strictDocument is sdkconfig.Config without its methods, for the known-fields
+// probe. Upstream's Config decodes through its own UnmarshalYAML
+// (internal/config/config_v8.go Config.UnmarshalYAML), which re-decodes a
+// rewritten node without the decoder's KnownFields and so takes any key; this
+// type decodes field by field, the way upstream reads the legacy layout.
+type strictDocument sdkconfig.Config
+
 // parseDocument checks an editable document and parses it the way upstream does.
 // A gateway-owned field is ErrForbiddenSetting naming it: first by its literal
 // top-level key, then — for whatever route the key check misses — by comparing
 // every owned field of the parsed result with an empty document's. A key upstream
 // does not know, at any depth, is ErrInvalidSettings, so a misspelt setting is
 // refused rather than silently ignored.
+//
+// The document is in upstream's legacy, flat layout. Upstream also reads its v8
+// layout, which nests owned keys under sections the document shares with
+// editable ones (oauth.auth-dir, routing.cooldown.save-cooldown-status,
+// observability.logs.debug), out of the top-level key check's sight; its
+// sections are unknown keys here, so the check keeps seeing every owned key.
 func parseDocument(doc string) (*sdkconfig.Config, error) {
 	root, err := documentRoot(doc)
 	if err != nil {
@@ -610,7 +623,7 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 
-	var probe sdkconfig.Config
+	var probe strictDocument
 	if err := dec.Decode(&probe); err != nil {
 		return nil, app.InvalidSetting("yaml", err.Error())
 	}

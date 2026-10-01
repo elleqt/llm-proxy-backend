@@ -19,7 +19,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/infra/metrics"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
-	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"

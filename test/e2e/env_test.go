@@ -32,7 +32,7 @@ import (
 	pgusers "github.com/elleqt/llm-proxy-backend/internal/infra/postgres/users"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

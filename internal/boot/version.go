@@ -7,7 +7,7 @@ import (
 )
 
 // cliproxyModule is the module path of the embedded CLIProxyAPI.
-const cliproxyModule = "github.com/router-for-me/CLIProxyAPI/v7"
+const cliproxyModule = "github.com/router-for-me/CLIProxyAPI/v8"
 
 // unknownVersion labels a build whose version cannot be told.
 const unknownVersion = "unknown"

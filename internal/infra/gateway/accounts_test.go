@@ -14,9 +14,9 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/require"
 )
 

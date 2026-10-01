@@ -12,7 +12,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )

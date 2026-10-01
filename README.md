@@ -363,6 +363,12 @@ With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from 
 
 If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer compose file is not required for an upgrade unless the release notes say so.
 
+### CLIProxyAPI v8 drops the Codex `identity-confuse` setting
+
+The embedded CLIProxyAPI moves to v8, which removes the `identity-confuse` key of the `codex:` section. Before upgrading, remove it from the settings document in the admin panel (**Admin → Settings**) if the document sets it: the backend refuses a document with a key upstream does not know, so one that still sets it stops the backend at start.
+
+The settings document keeps upstream's flat layout. v8 also reads a nested one (`config-version: 8`, `server:`, `oauth:`, `observability:` …), which the settings editor refuses.
+
 ### The credentials import and the `grants` volume are removed
 
 v0.2.0 moved the vendor accounts' OAuth credentials from files in the `grants` volume into Postgres, importing the files once on its first start. This release removes that import and the `grants` volume, and refuses a settings document that sets `save-cooldown-status`, `request-log` or `error-logs-max-files`. Upgrading:

@@ -14,8 +14,8 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/google/uuid"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

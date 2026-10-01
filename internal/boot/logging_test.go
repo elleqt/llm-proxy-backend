@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"path"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -52,8 +53,9 @@ func TestUpstreamLogrusRecordsReachTheProcessLog(t *testing.T) {
 	}
 
 	version, _ := warn["cliproxy_version"].(string)
-	assert.True(t, strings.HasPrefix(version, "v7."),
-		"cliproxy_version = %q, want the embedded CLIProxyAPI v7 module's version", version)
+	major := path.Base(cliproxyModule)
+	assert.True(t, strings.HasPrefix(version, major+"."),
+		"cliproxy_version = %q, want the embedded CLIProxyAPI %s module's version", version, major)
 
 	stamp, _ := warn["time"].(string)
 	assert.True(t, strings.HasSuffix(stamp, "Z"), "time = %q, want UTC", stamp)

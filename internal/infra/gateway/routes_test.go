@@ -14,8 +14,8 @@ import (
 
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/faketest"
 	"github.com/gorilla/websocket"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
-	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
+	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -107,6 +107,8 @@ func TestDeniedRoutesAreNotServed(t *testing.T) {
 	probes = append(probes,
 		[2]string{http.MethodGet, "/debug/pprof/"},
 		[2]string{http.MethodGet, "/v0/management/config"},
+		[2]string{http.MethodGet, "/v8/management/config"},
+		[2]string{http.MethodPost, "/v8/management/oauth/callback"},
 		[2]string{http.MethodGet, "/v0/resource/plugins/x"},
 		[2]string{http.MethodOptions, "/v1/chat/completions"},
 	)

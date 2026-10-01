@@ -17,7 +17,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/elleqt/llm-proxy-backend/internal/infra/gateway/gate"
 	"github.com/gin-gonic/gin"
-	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
+	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 )
 
 // spendCheck is the gate's spend-limit step (Params.Limits); nil enforces no
