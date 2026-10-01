@@ -9,7 +9,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/klauspost/compress v1.20.0
+	github.com/klauspost/compress v1.20.1
 	github.com/oapi-codegen/runtime v1.7.0
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/pressly/goose/v3 v3.28.0
