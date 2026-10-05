@@ -32,8 +32,20 @@ var errListingShape = errors.New("gateway: model list is not of the expected sha
 // lists run to tens of kilobytes; a larger one is refused, not passed on.
 const maxListingBody = 16 << 20
 
-// v1Models filters GET /v1/models, which serves four formats. It picks the
-// one upstream's handler picks, in its order
+// v1ListFormat is one format of GET /v1/models: the key of its list, how an
+// entry names its model, and whether it is Anthropic's, which also names its
+// first and last model.
+type v1ListFormat struct {
+	key       string
+	names     func(entry []byte) []string
+	anthropic bool
+}
+
+// v1Data is the key of every GET /v1/models list but Codex's.
+const v1Data = "data"
+
+// v1Format is the format GET /v1/models answers ginCtx's request in, among
+// four. It picks the one upstream's handler picks, in its order
 // (internal/api/server_routes.go unifiedModelsHandler; home mode, its first
 // branch otherwise, is refused by admit):
 //   - Grok Shell clients (a User-Agent containing "grok-shell"): "data", by
@@ -42,53 +54,83 @@ const maxListingBody = 16 << 20
 //     by "slug" (codex/models BuildResponseForClient);
 //   - Anthropic clients (an Anthropic-Version header, or a User-Agent starting
 //     with "claude-cli"): "data", by "id" decoded as upstream routes a cloaked
-//     Claude name, with "first_id" and "last_id" following the filtered list
-//     (claude/models BuildResponse);
+//     Claude name (claude/models BuildResponse);
 //   - everyone else: "data", by "id" (openai OpenAIModels).
+func v1Format(ginCtx *gin.Context) v1ListFormat {
+	userAgent := ginCtx.GetHeader("User-Agent")
+	switch {
+	case strings.Contains(strings.ToLower(userAgent), "grok-shell"):
+		return v1ListFormat{key: v1Data, names: func(entry []byte) []string {
+			return []string{gjson.GetBytes(entry, "id").String(), gjson.GetBytes(entry, "model").String()}
+		}}
+	case hasQuery(ginCtx, "client_version"):
+		return v1ListFormat{key: "models", names: field("slug", nil)}
+	case ginCtx.GetHeader("Anthropic-Version") != "" || strings.HasPrefix(userAgent, "claude-cli"):
+		return v1ListFormat{key: v1Data, names: field("id", decodeClaudeModelID), anthropic: true}
+	default:
+		return v1ListFormat{key: v1Data, names: field("id", nil)}
+	}
+}
+
+// v1Models filters GET /v1/models in the format v1Format picks; an Anthropic
+// list's "first_id" and "last_id" follow the filtered list.
 func v1Models(ginCtx *gin.Context, status int, body []byte, admitted func(string) bool) (int, []byte, error) {
 	if status != http.StatusOK {
 		return status, body, nil
 	}
 
-	userAgent := ginCtx.GetHeader("User-Agent")
-	switch {
-	case strings.Contains(strings.ToLower(userAgent), "grok-shell"):
-		out, _, err := filterArray(body, "data", admitted, func(entry []byte) []string {
-			return []string{gjson.GetBytes(entry, "id").String(), gjson.GetBytes(entry, "model").String()}
-		})
+	format := v1Format(ginCtx)
 
-		return status, out, err
-	case hasQuery(ginCtx, "client_version"):
-		out, _, err := filterArray(body, "models", admitted, field("slug", nil))
-
-		return status, out, err
-	case ginCtx.GetHeader("Anthropic-Version") != "" || strings.HasPrefix(userAgent, "claude-cli"):
-		out, kept, err := filterArray(body, "data", admitted, field("id", decodeClaudeModelID))
-		if err != nil {
-			return status, nil, err
-		}
-
-		first, last := "", ""
-		if len(kept) > 0 {
-			first, last = kept[0].Get("id").String(), kept[len(kept)-1].Get("id").String()
-		}
-
-		out, err = sjson.SetBytes(out, "first_id", first)
-		if err == nil {
-			out, err = sjson.SetBytes(out, "last_id", last)
-		}
-
-		if err != nil {
-			return status, nil, fmt.Errorf("gateway: set the model list's first and last ids: %w", err)
-		}
-
-		return status, out, nil
-	default:
-		out, _, err := filterArray(body, "data", admitted, field("id", nil))
-
+	out, kept, err := filterArray(body, format.key, admitted, format.names)
+	if err != nil || !format.anthropic {
 		return status, out, err
 	}
+
+	first, last := "", ""
+	if len(kept) > 0 {
+		first, last = kept[0].Get("id").String(), kept[len(kept)-1].Get("id").String()
+	}
+
+	out, err = sjson.SetBytes(out, "first_id", first)
+	if err == nil {
+		out, err = sjson.SetBytes(out, "last_id", last)
+	}
+
+	if err != nil {
+		return status, nil, fmt.Errorf("gateway: set the model list's first and last ids: %w", err)
+	}
+
+	return status, out, nil
 }
+
+// v1Model filters GET /v1/models/{model}, which upstream answers with the one
+// entry of the list GET /v1/models would send whose id (a Codex entry's slug)
+// is the path's model, or 404 (sdk/api/handlers/handlers_interceptors.go
+// WriteModelListResponse). The entry is judged as v1Models judges it in the
+// same format, so a model is shown here exactly when the list shows it; one
+// that is not gets upstream's own 404, so it cannot be told from one that does
+// not exist.
+func v1Model(ginCtx *gin.Context, status int, body []byte, admitted func(string) bool) (int, []byte, error) {
+	if status != http.StatusOK {
+		return status, body, nil
+	}
+
+	if !gjson.ValidBytes(body) || !gjson.ParseBytes(body).IsObject() {
+		return status, nil, errListingShape
+	}
+
+	for _, n := range v1Format(ginCtx).names(body) {
+		if n == "" || !admitted(n) {
+			return http.StatusNotFound, v1ModelNotFound, nil
+		}
+	}
+
+	return status, body, nil
+}
+
+// v1ModelNotFound is the body upstream's WriteModelListResponse answers an
+// unknown model with: a gin.H written by c.JSON, so with its keys sorted.
+var v1ModelNotFound = []byte(`{"error":{"code":"model_not_found","message":"Model not found","type":"invalid_request_error"}}`)
 
 // geminiModels filters GET /v1beta/models: "models", by "name" without its
 // "models/" prefix — the name a client puts in the path of

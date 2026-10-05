@@ -98,6 +98,11 @@ type Params struct {
 	// registers their models on Run; Config's own entries stay the boot entries
 	// every applied configuration keeps.
 	Stored []*coreauth.Auth
+	// ModelCatalogUpdates lets upstream keep its model catalogues current from
+	// the published ones, fetched over the network when Run starts and every
+	// three hours. Off, it serves the catalogues compiled into the build. The
+	// choice is process-wide, applied by Run (see setLocalModelCatalogs).
+	ModelCatalogUpdates bool
 }
 
 // Gateway owns the embedded upstream service and the configuration pushed into it.
@@ -129,6 +134,8 @@ type Gateway struct {
 	derived map[string]struct{}
 	// discoverWait overrides discoverTimeout; tests shorten it.
 	discoverWait time.Duration
+	// catalogUpdates is Params.ModelCatalogUpdates.
+	catalogUpdates bool
 
 	// pushMu serialises configuration pushes and account changes, so current
 	// always matches the last configuration upstream committed and an account
@@ -363,16 +370,17 @@ func New(params Params) (*Gateway, error) {
 	}
 
 	gw := &Gateway{
-		current:  params.Config,
-		coreAuth: params.CoreAuth,
-		store:    params.Store,
-		access:   sdkaccess.NewManager(),
-		provider: NewAccessProvider(params.Resolver),
-		catalog:  catalog,
-		static:   static,
-		derived:  derived,
-		ready:    make(chan struct{}),
-		done:     make(chan struct{}),
+		current:        params.Config,
+		coreAuth:       params.CoreAuth,
+		store:          params.Store,
+		access:         sdkaccess.NewManager(),
+		provider:       NewAccessProvider(params.Resolver),
+		catalog:        catalog,
+		static:         static,
+		derived:        derived,
+		catalogUpdates: params.ModelCatalogUpdates,
+		ready:          make(chan struct{}),
+		done:           make(chan struct{}),
 	}
 
 	if dir := strings.TrimSpace(params.Config.AuthDir); dir != "" {
@@ -556,6 +564,10 @@ func routingSelector(cfg *cliproxyconfig.Config) coreauth.Selector {
 func (g *Gateway) Run(ctx context.Context) error {
 	err := checkManagementEnv()
 	if err == nil {
+		// Upstream reads the switch when its service starts the catalogue
+		// updaters, and again on every configuration it commits.
+		setLocalModelCatalogs(!g.catalogUpdates)
+
 		if err = g.svc.Run(ctx); err != nil {
 			err = fmt.Errorf("gateway: run the service: %w", err)
 		}

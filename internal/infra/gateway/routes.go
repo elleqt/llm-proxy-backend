@@ -80,8 +80,10 @@ var routes = map[string]route{
 	"HEAD /healthz": {kind: routePublic},
 
 	// Model listings (see listing.go): OpenAI, Anthropic, Codex and Grok
-	// clients on one route, Gemini's list, and a single Gemini model.
+	// clients on one route and a single model of it, Gemini's list, and a
+	// single Gemini model.
 	"GET /v1/models":             {kind: routeListing, listing: v1Models},
+	"GET /v1/models/*model":      {kind: routeListing, listing: v1Model},
 	"GET /v1beta/models":         {kind: routeListing, listing: geminiModels},
 	"GET /v1beta/models/*action": {kind: routeListing, listing: geminiModel},
 

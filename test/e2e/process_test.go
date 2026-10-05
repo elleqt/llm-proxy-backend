@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/require"
 )
 
@@ -231,18 +230,11 @@ func TestThePlaceholderCredentialsKeyServesWithAWarning(t *testing.T) {
 		"no warning that the credentials key is public")
 }
 
-// catalogueHost is where upstream's model catalogue updaters fetch from first
-// (internal/registry model_updater.go modelsURLs), as a CONNECT asks
-// for it.
+// catalogueHost is where each of upstream's three model catalogues (models,
+// Codex client models, Devin models) is fetched from first
+// (internal/registry model_updater.go modelsURLs and its siblings), as a
+// CONNECT asks for it.
 const catalogueHost = "raw.githubusercontent.com:443"
-
-// updaterStarts is what each of upstream's three model catalogue updaters logs
-// once its first fetch is over, failed or not.
-var updaterStarts = []string{
-	"periodic model refresh started",
-	"periodic Codex client model refresh started",
-	"periodic Devin model refresh started",
-}
 
 // refusingProxy is an HTTP(S) proxy that refuses every request with 502 and
 // records the hosts asked for, so nothing the process sends through it reaches
@@ -268,21 +260,13 @@ func (p *refusingProxy) asked() []string {
 
 // startBehindRefusingProxy boots the process with
 // LLMPROXY_MODEL_CATALOG_UPDATES=updates and every outbound request not to a
-// loopback address sent through a refusingProxy, which a refused fetch leaves
-// the updaters to log updaterStarts at once. It returns the proxy and a hook per
-// line of updaterStarts, installed before the process boots.
-func startBehindRefusingProxy(t *testing.T, updates string) (*refusingProxy, []*logSeen) {
+// loopback address sent through a refusingProxy, and returns the proxy.
+func startBehindRefusingProxy(t *testing.T, updates string) *refusingProxy {
 	t.Helper()
 
 	proxy := &refusingProxy{}
 	srv := httptest.NewServer(proxy)
 	t.Cleanup(srv.Close)
-
-	hooks := make([]*logSeen, len(updaterStarts))
-	for i, msg := range updaterStarts {
-		hooks[i] = &logSeen{msg: msg, seen: make(chan struct{})}
-		logrus.AddHook(hooks[i])
-	}
 
 	startProcess(t, "", map[string]string{
 		"LLMPROXY_MODEL_CATALOG_UPDATES": updates,
@@ -292,49 +276,48 @@ func startBehindRefusingProxy(t *testing.T, updates string) (*refusingProxy, []*
 		"no_proxy":                       "",
 	})
 
-	return proxy, hooks
+	return proxy
 }
 
 // TestModelCatalogUpdatersStartWhenOn: with LLMPROXY_MODEL_CATALOG_UPDATES on,
-// the process starts all three of upstream's model catalogue updaters, which
-// fetch the published catalogue. Each updater starts once per process, so this
-// is the one boot with them on.
+// upstream's service fetches each of its three published model catalogues
+// once it runs.
 func TestModelCatalogUpdatersStartWhenOn(t *testing.T) {
 	if !inFreshProcess(t) {
 		return
 	}
 
-	proxy, hooks := startBehindRefusingProxy(t, "on")
-	for _, h := range hooks {
-		select {
-		case <-h.seen:
-		case <-time.After(30 * time.Second):
-			require.Failf(t, "an updater never started", "upstream never logged %q", h.msg)
-		}
-	}
+	proxy := startBehindRefusingProxy(t, "on")
 
-	require.Contains(t, proxy.asked(), catalogueHost, "the proxy was not asked for the catalogue host")
+	require.Eventually(t, func() bool {
+		return countOf(proxy.asked(), catalogueHost) >= 3
+	}, 30*time.Second, 50*time.Millisecond, "not every catalogue asked the proxy for its host")
 }
 
 // TestModelCatalogUpdatersStayOffWhenOff: with LLMPROXY_MODEL_CATALOG_UPDATES
-// off, no updater starts and nothing is fetched. On, the lines follow the start
-// within milliseconds, the fetch being refused at once.
+// off, nothing is fetched. On, the fetches follow the start within
+// milliseconds, each refused at once.
 func TestModelCatalogUpdatersStayOffWhenOff(t *testing.T) {
 	if !inFreshProcess(t) {
 		return
 	}
 
-	proxy, hooks := startBehindRefusingProxy(t, "off")
+	proxy := startBehindRefusingProxy(t, "off")
 
 	time.Sleep(3 * time.Second)
 
-	for _, h := range hooks {
-		select {
-		case <-h.seen:
-			require.Failf(t, "an updater started with the updates off", "upstream logged %q", h.msg)
-		default:
+	require.Empty(t, proxy.asked(), "the process fetched through the proxy with the updates off")
+}
+
+// countOf is how many of hosts are host.
+func countOf(hosts []string, host string) int {
+	count := 0
+
+	for _, h := range hosts {
+		if h == host {
+			count++
 		}
 	}
 
-	require.Empty(t, proxy.asked(), "the process fetched through the proxy with the updates off")
+	return count
 }
