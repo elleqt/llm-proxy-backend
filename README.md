@@ -473,7 +473,7 @@ claude:claude-opus-4-?       one character after "4-"
 - **Wildcards are evaluated per request** against the live model catalog. `chatgpt:*` covers a model the vendor releases tomorrow.
 - **A model served by several providers** must be allowed on **all** of them. The router may choose any of them.
 - **There are no deny rules.** Order does not matter. An empty policy allows nothing.
-- **`/v1/models` shows only allowed models.** The cabinet shows the same list.
+- **`/v1/models` shows only allowed models**, and `/v1/models/{model}` answers for a model that is not allowed as for one that does not exist. The cabinet shows the same list.
 - **Edits apply at once** to every existing key of the user, from the next request. Nothing is cached.
 
 The admin panel has a preview that shows which current models a rule set covers.
@@ -644,7 +644,7 @@ Two providers may serve the same model name, for example two keys of one vendor:
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
-- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**. Cooldowns stay in memory and CLIProxyAPI writes no request or error log files, so the last three would have no effect.
+- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `models`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**; where the model catalogs come from (`models`) is `LLMPROXY_MODEL_CATALOG_UPDATES`. Cooldowns stay in memory and CLIProxyAPI writes no request or error log files, so the last three would have no effect.
 
 ### Prices
 

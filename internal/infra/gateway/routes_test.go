@@ -112,7 +112,9 @@ func TestDeniedRoutesAreNotServed(t *testing.T) {
 		[2]string{http.MethodGet, "/v0/resource/plugins/x"},
 		[2]string{http.MethodOptions, "/v1/chat/completions"},
 	)
-	for _, p := range append(slices.Clone(probes), [2]string{http.MethodGet, "/v1/models"}) {
+	// Not GET /v1/models: its trailing slash is GET /v1/models/{model} for an
+	// empty model, which upstream answers as an unknown one.
+	for _, p := range append(slices.Clone(probes), [2]string{http.MethodPost, "/v1/chat/completions"}) {
 		if !strings.HasSuffix(p[1], "/") {
 			probes = append(probes, [2]string{p[0], p[1] + "/"})
 		}

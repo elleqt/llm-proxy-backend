@@ -100,6 +100,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 		"save-cooldown-status":   "save-cooldown-status: false",
 		"request-log":            "request-log: false",
 		"error-logs-max-files":   "error-logs-max-files: 5",
+		"models":                 "models:\n  catalog: https://example.com/models.json",
 	}
 	// Every credential family upstream declares is boot-only, not just the ones
 	// spelled out above: a new "*-api-key" field must be refused too.
@@ -182,6 +183,27 @@ func TestSettingsRefusesUnknownAndMalformedDocuments(t *testing.T) {
 		_, err := f.svc.Update(context.Background(), newAdmin(), yamlUpdate("proxy-url: ftp://proxy.test:21\n", true))
 		wantSettingError(t, err, app.ErrInvalidSettings, "proxy-url")
 	})
+}
+
+// TestSettingsReadHistoricalAliases: a key upstream moved but still reads under
+// its old name keeps working, in a stored document at boot and in an update,
+// with the meaning of its new name; the section it sits in is still checked.
+func TestSettingsReadHistoricalAliases(t *testing.T) {
+	doc := "codex:\n  optimize-multi-agent-v2: true\nrequest-retry: 1\n"
+
+	fixture := newSettingsFixture(t, doc)
+	require.True(t, fixture.running.Client.Codex.OptimizeMultiAgentV2, "booted from a stored document")
+
+	fixture.gateway.EXPECT().CurrentConfig().Return(fixture.running)
+	res, err := fixture.svc.Update(context.Background(), newAdmin(), yamlUpdate(doc+"max-retry-interval: 30\n", true))
+	require.NoError(t, err, "dry-run update")
+	require.False(t, res.Applied, "dry run")
+	require.NotContains(t, res.Diff, "optimize-multi-agent-v2", "the alias means what the running configuration already has")
+
+	f := newSettingsFixture(t, "")
+	_, err = f.svc.Update(context.Background(), newAdmin(),
+		yamlUpdate("codex:\n  optimize-multi-agent-v2: true\n  optimize-multi-agent-v3: true\n", true))
+	require.ErrorIs(t, err, app.ErrInvalidSettings, "a misspelt key beside the alias")
 }
 
 func TestSettingsYAMLAndFieldsAreMutuallyExclusive(t *testing.T) {

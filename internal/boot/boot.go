@@ -105,8 +105,9 @@ const (
 // repositories and the one password hasher, the bootstrap administrator, the
 // upstream boot configuration from the database, metrics, the price list and the
 // usage sink, the spend limits, the vendor credential store, the gateway, then
-// the three listeners and the price catalog's checks, and once the gateway runs,
-// the model catalogue updaters unless LLMPROXY_MODEL_CATALOG_UPDATES is off.
+// the three listeners and the price catalog's checks. The gateway's service
+// starts upstream's model catalogue updaters itself, fetching unless
+// LLMPROXY_MODEL_CATALOG_UPDATES is off.
 // Nothing pushes a configuration or changes an account after boot: the first
 // change is an administrator's.
 func Run(ctx context.Context, opts Options) error {
@@ -151,10 +152,7 @@ type process struct {
 	gateway *gateway.Gateway
 	// apiAddr is where the gateway serves the proxied API.
 	apiAddr string
-	// catalogUpdates starts upstream's model catalogue updaters once the gateway
-	// runs (LLMPROXY_MODEL_CATALOG_UPDATES).
-	catalogUpdates bool
-	sink           *gwusage.Sink
+	sink    *gwusage.Sink
 	// prices checks the price catalog every catalogInterval while serving.
 	prices          *appprices.Service
 	catalogInterval time.Duration
@@ -288,6 +286,8 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		Observer: gateMetrics{meters},
 		Log:      logger,
 		Stored:   stored,
+
+		ModelCatalogUpdates: cfg.ModelCatalogUpdates,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("gateway: %w", err)
@@ -297,7 +297,6 @@ func build(ctx context.Context, cfg config.Config, opts Options, version string,
 		log:             logger,
 		gateway:         gw,
 		apiAddr:         cfg.ListenAddr,
-		catalogUpdates:  cfg.ModelCatalogUpdates,
 		sink:            sink,
 		prices:          priceList,
 		catalogInterval: cfg.PriceCatalog.Interval,
@@ -526,14 +525,6 @@ func (p *process) serve(ctx context.Context, releaseSignals func()) error {
 		}
 
 		p.log.Info("serving the proxied API", slog.String("addr", p.apiAddr))
-		// Upstream's binary starts the model catalogue updaters before its
-		// service; here they start once the service runs, under its context,
-		// which ends their periodic refresh at shutdown. A change found before
-		// upstream registers its refresh callback is held and delivered on
-		// registration. They log their own start and every refresh.
-		if p.catalogUpdates {
-			gateway.StartModelCatalogUpdaters(gatewayCtx)
-		}
 	}()
 
 	catalogCtx, stopCatalog := context.WithCancel(context.WithoutCancel(ctx))

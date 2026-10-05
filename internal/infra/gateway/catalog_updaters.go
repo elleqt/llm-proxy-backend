@@ -1,48 +1,25 @@
 package gateway
 
 import (
-	"context"
-
 	_ "unsafe" // go:linkname
 )
 
-// The upstream binary keeps its model catalogue current by starting three
-// updaters from its command, not from the SDK service (cmd/server/main.go
-// startModelCatalogUpdaters): each fetches its catalogue from
-// github.com/router-for-me/models at once and then every three hours, and the
-// service re-registers the models of every account whose provider changed
-// (sdk/cliproxy/service_plugins.go registerModelRefreshCallback, which also
-// receives changes found before it was registered). An embedder that does
-// not start them serves only the catalogue compiled into the build.
+// Upstream's service starts its three model catalogue updaters itself, bound to
+// the context Run is given (sdk/cliproxy/service_lifecycle.go Service.Run,
+// startModelCatalogUpdaters): the models, Codex client models and Devin models
+// catalogues, fetched from github.com/router-for-me/models at once and then
+// every three hours, unless the process has been switched to the catalogues
+// compiled into the build. Its binary makes that switch for --local-model
+// (cmd/server/main.go); no SDK package offers it, and it lives in upstream's
+// internal/registry, which this module cannot import, so it is pulled by
+// linkname: internal/registry/catalog_sources.go SetLocalModelCatalogs,
+// func(bool). The linker checks neither the signature nor that the symbol
+// still exists under that name, so upgrading upstream must re-check it against
+// its source.
 //
-// They live in upstream's internal/registry, which this module cannot import,
-// and no SDK package starts or wraps them, so they are pulled by linkname:
-// internal/registry/model_updater.go StartModelsUpdater,
-// codex_client_models_updater.go StartCodexClientModelsUpdater and
-// devin_models_updater.go StartDevinModelsUpdater, each
-// func(context.Context). The linker checks neither the signature nor that the
-// symbol still exists under that name, so upgrading upstream must re-check all
-// three against its source.
+// The switch only changes the default source. A source set in the
+// configuration's models section would still be fetched; that section is
+// gateway-owned (settings ownedKeys), so no configuration sets one.
 
-//go:linkname startModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartModelsUpdater
-func startModelsUpdater(ctx context.Context)
-
-//go:linkname startCodexClientModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartCodexClientModelsUpdater
-func startCodexClientModelsUpdater(ctx context.Context)
-
-//go:linkname startDevinModelsUpdater github.com/router-for-me/CLIProxyAPI/v8/internal/registry.StartDevinModelsUpdater
-func startDevinModelsUpdater(ctx context.Context)
-
-// StartModelCatalogUpdaters starts upstream's model catalogue updaters as its
-// binary does without a local model file and outside home mode, which the
-// gateway refuses (modelCatalogUpdaterPlan(false, false) starts all three).
-// They fetch over the network immediately.
-//
-// Each updater runs at most once per process (a sync.Once apiece): the first
-// call's ctx governs them, cancelling it stops their periodic refresh, and
-// later calls do nothing, even after that ctx has ended.
-func StartModelCatalogUpdaters(ctx context.Context) {
-	startCodexClientModelsUpdater(ctx)
-	startDevinModelsUpdater(ctx)
-	startModelsUpdater(ctx)
-}
+//go:linkname setLocalModelCatalogs github.com/router-for-me/CLIProxyAPI/v8/internal/registry.SetLocalModelCatalogs
+func setLocalModelCatalogs(local bool)

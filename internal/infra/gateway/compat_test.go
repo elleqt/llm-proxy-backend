@@ -26,6 +26,14 @@ import (
 // with; nothing the admin API shows may contain it.
 const compatKey = "compat-vendor-key-9f2c"
 
+// compatVendor answers chat completions as a vendor does. Upstream answers a
+// successful reply it cannot translate, such as an empty body, with 502.
+func compatVendor() *faketest.Vendor {
+	return &faketest.Vendor{Payload: []byte(`{"id":"chatcmpl-1","object":"chat.completion","created":1,"model":"m",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)}
+}
+
 // startCompat boots a gateway the way production does over the vendor
 // credentials in pool: a Postgres credential store, listed once, and the
 // listing handed to New.
@@ -108,7 +116,7 @@ func heldCompatAuths(g *Gateway, name string) int {
 // of it held beside it.
 func TestCompatProviderServesLiveAndAfterARestart(t *testing.T) {
 	pool := pgtest.NewTestPool(t)
-	vendor := &faketest.Vendor{}
+	vendor := compatVendor()
 	vendorSrv := faketest.Start(t, vendor)
 	name, alias := compatName(t, "live"), compatModel(t, "alias")
 
@@ -145,7 +153,7 @@ func TestCompatProviderServesLiveAndAfterARestart(t *testing.T) {
 // take the models out of service.
 func TestCompatProviderUpdateDisableRemove(t *testing.T) {
 	pool := pgtest.NewTestPool(t)
-	vendor := &faketest.Vendor{}
+	vendor := compatVendor()
 	vendorSrv := faketest.Start(t, vendor)
 	name, oldModel, newModel := compatName(t, "upd"), compatModel(t, "old"), compatModel(t, "new")
 
@@ -209,7 +217,7 @@ func TestCompatProviderUpdateDisableRemove(t *testing.T) {
 // receive its requests, and the policy names both.
 func TestCompatProvidersPoolAModel(t *testing.T) {
 	pool := pgtest.NewTestPool(t)
-	va, vb := &faketest.Vendor{}, &faketest.Vendor{}
+	va, vb := compatVendor(), compatVendor()
 	sa, sb := faketest.Start(t, va), faketest.Start(t, vb)
 	nameA, nameB, model := compatName(t, "a"), compatName(t, "b"), compatModel(t, "pooled")
 

@@ -209,6 +209,69 @@ func TestSingleGeminiModelIsHiddenLikeAnUnknownOne(t *testing.T) {
 	}
 }
 
+// TestSingleV1ModelIsShownAsItsListShowsIt: GET /v1/models/{model} answers in
+// each format GET /v1/models lists in with the entry that format's list
+// shows, and a model the policy does not admit exactly as one that does not
+// exist. The model is asked for by the id (a Codex entry's slug) its list
+// gives, which for Anthropic clients is the cloaked name.
+func TestSingleV1ModelIsShownAsItsListShowsIt(t *testing.T) {
+	policy := &switchableResolver{}
+	srv := startWith(t, Params{Config: &cliproxyconfig.Config{}, Resolver: policy})
+	seq := strconv.FormatInt(wireSeq.Add(1), 10)
+	model := "detail-" + seq
+	registerClient(t, "detail-client-"+seq, "claude", model)
+
+	entryID := func(entry gjson.Result) string {
+		if id := entry.Get("id").String(); id != "" {
+			return id
+		}
+
+		return entry.Get("slug").String()
+	}
+
+	for _, list := range modelLists {
+		base, query, found := strings.Cut(list.path, "?")
+		if base != "/v1/models" {
+			continue
+		}
+
+		detail := func(id string) string {
+			if found {
+				return base + "/" + id + "?" + query
+			}
+
+			return base + "/" + id
+		}
+
+		policy.set("claude:*")
+
+		code, body := srv.getAs(t, list.path, list.header)
+		require.Equal(t, http.StatusOK, code, "%s list: %s", list.name, body)
+
+		at := slices.Index(list.names(t, body), model)
+		require.GreaterOrEqual(t, at, 0, "%s list shows the model: %s", list.name, body)
+
+		entries := gjson.Get(body, "data")
+		if !entries.Exists() {
+			entries = gjson.Get(body, "models")
+		}
+
+		id := entryID(entries.Array()[at])
+
+		code, body = srv.getAs(t, detail(id), list.header)
+		require.Equal(t, http.StatusOK, code, "%s detail allowed: %s", list.name, body)
+		require.Equal(t, id, entryID(gjson.Parse(body)), "%s detail allowed: %s", list.name, body)
+
+		policy.set("chatgpt:*")
+
+		unknownCode, unknownBody := srv.getAs(t, detail("no-such-model-"+seq), list.header)
+		code, body = srv.getAs(t, detail(id), list.header)
+		require.Equal(t, http.StatusNotFound, code, "%s detail denied: %s", list.name, body)
+		require.Equal(t, unknownCode, code, "%s detail denied, status of an unknown model", list.name)
+		require.Equal(t, unknownBody, body, "%s detail denied, body of an unknown model", list.name)
+	}
+}
+
 // TestListingsOfAnUnexpectedShapeAreNotSent: the filter knows each listing
 // route's format; a list in any other shape — upstream changed its format, or
 // picks it by another rule — or one too large to hold is answered 502, and

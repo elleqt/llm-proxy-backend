@@ -59,11 +59,19 @@ import (
 //     gateway. gateway.admit forces save-cooldown-status and request-log off
 //     (cooldown state stays in memory, and no request logger is installed), and
 //     error-logs-max-files bounds error log files nothing writes.
+//   - models: the sources of upstream's model catalogues, an absolute path on
+//     this host or any http(s) URL, fetched at start and every three hours.
+//     The process picks between the published catalogues and the ones compiled
+//     into the build (LLMPROXY_MODEL_CATALOG_UPDATES); a source set here would
+//     override that choice and read files or reach hosts the deployment never
+//     named. Upstream also drops a whole configuration whose sources it finds
+//     invalid (sdk/cliproxy/service_config.go commitConfigUpdate), which a
+//     push would not learn of.
 var ownedKeys = []string{
 	"host", "port", "tls", "trusted-proxies", "pprof", "discovery", "debug", "auth-dir",
 	"logging-to-file", "logs-max-total-size-mb",
 	"remote-management", "api-keys", "plugins", "ws-auth", "openai-compatibility",
-	"save-cooldown-status", "request-log", "error-logs-max-files",
+	"save-cooldown-status", "request-log", "error-logs-max-files", "models",
 }
 
 // isOwnedKey reports whether a top-level key is gateway-owned. Any key ending in
@@ -620,7 +628,12 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 		data = []byte("{}")
 	}
 
-	dec := yaml.NewDecoder(bytes.NewReader(data))
+	probed, err := withoutHistoricalAliases(doc, data)
+	if err != nil {
+		return nil, err
+	}
+
+	dec := yaml.NewDecoder(bytes.NewReader(probed))
 	dec.KnownFields(true)
 
 	var probe strictDocument
@@ -644,6 +657,55 @@ func parseDocument(doc string) (*sdkconfig.Config, error) {
 	applySessionAffinityDefault(root, cfg)
 
 	return cfg, nil
+}
+
+// historicalAliases are legacy-layout keys, as section and key, that upstream
+// still reads but no longer has a field for: its parse moves each to the key
+// that replaced it (internal/config/config_v8.go v8ClientPaths), so a document
+// written before the move keeps its meaning and its boot.
+var historicalAliases = [][2]string{
+	{"codex", "optimize-multi-agent-v2"}, // now client.codex.optimize-multi-agent-v2
+}
+
+// withoutHistoricalAliases is data, the document as upstream parses it, for the
+// known-fields probe, which would refuse a historical alias as an unknown key:
+// without the aliases doc sets. A document setting none is returned as it is,
+// so the probe's errors name the lines as written.
+func withoutHistoricalAliases(doc string, data []byte) ([]byte, error) {
+	// A fresh tree: parseDocument keeps reading its own.
+	root, err := documentRoot(doc)
+	if err != nil {
+		return nil, err
+	}
+
+	removed := false
+
+	for _, alias := range historicalAliases {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			section := root.Content[i+1]
+			if root.Content[i].Value != alias[0] || section.Kind != yaml.MappingNode {
+				continue
+			}
+
+			for j := len(section.Content) - 2; j >= 0; j -= 2 {
+				if section.Content[j].Value == alias[1] {
+					section.Content = slices.Delete(section.Content, j, j+2)
+					removed = true
+				}
+			}
+		}
+	}
+
+	if !removed {
+		return data, nil
+	}
+
+	out, err := yaml.Marshal(root)
+	if err != nil {
+		return nil, fmt.Errorf("app: re-encode the settings document: %w", err)
+	}
+
+	return out, nil
 }
 
 // editableDiff is the unified diff between the editable parts of two
