@@ -278,8 +278,8 @@ func TestDiscoverCompatPassesTheProxyThrough(t *testing.T) {
 }
 
 // TestCreateCompatNormalisesReasoningLevels: an own list reaches the gateway
-// trimmed and lower-cased, and a model without one still has none, so it
-// follows the default set.
+// trimmed, lower-cased and with known levels first in canonical order, and a
+// model without one still has none, so it follows the default set.
 func TestCreateCompatNormalisesReasoningLevels(t *testing.T) {
 	longest := "a" + strings.Repeat("b", 31)
 
@@ -287,6 +287,7 @@ func TestCreateCompatNormalisesReasoningLevels(t *testing.T) {
 		in, want []string
 	}{
 		"own list":         {[]string{" None ", "HIGH", "ultra_2", "x-y"}, []string{"none", "high", "ultra_2", "x-y"}},
+		"canonical order":  {[]string{"high", "ultra", "low", "none"}, []string{"none", "low", "high", "ultra"}},
 		"longest value":    {[]string{longest}, []string{longest}},
 		"follows defaults": {nil, nil},
 	} {

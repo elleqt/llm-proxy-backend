@@ -1317,9 +1317,10 @@ components:
           maxItems: 16
           items: { type: string, pattern: "^[a-z][a-z0-9_-]{0,31}$" }
           description: >
-            The `reasoning_effort` values passed to the vendor unchanged; a value off the list
-            becomes the nearest listed one. Absent: the default set (`CompatDefaults`). Responses
-            carry it only for a model's own list.
+            The `reasoning_effort` values passed to the vendor unchanged. A standard level off the
+            list becomes the nearest listed one, so the vendor does not reject it; an unknown value
+            off the list is refused. Known levels are kept in canonical order. Absent: the default
+            set (`CompatDefaults`). Responses carry it only for a model's own list.
 
     CompatDefaults:
       type: object

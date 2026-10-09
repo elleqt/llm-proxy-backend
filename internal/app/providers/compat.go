@@ -245,10 +245,19 @@ func validCompat(baseURL, prefix string, models []app.CompatModel) (string, stri
 	return base, prefix, out, nil
 }
 
+// canonicalReasoningLevels is the order known levels are kept in, ahead of a
+// model's own values.
+var canonicalReasoningLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "auto"}
+
 // validReasoningLevels trims and lower-cases a model's own list of reasoning
 // levels; nil stays nil, as it follows the default set. A present list must
 // name at least one level: upstream takes an empty one for a model that does
 // not reason and strips the parameter.
+//
+// Known levels come first in canonical order, own values after them in the
+// order given: when `none` is off a list, upstream sends the first listed
+// level for a `none` request, so a caller's ["high","low"] would turn `none`
+// into `high`.
 func validReasoningLevels(levels []string) ([]string, error) {
 	if levels == nil {
 		return nil, nil
@@ -269,7 +278,21 @@ func validReasoningLevels(levels []string) ([]string, error) {
 		out = append(out, level)
 	}
 
+	slices.SortStableFunc(out, func(a, b string) int {
+		return reasoningRank(a) - reasoningRank(b)
+	})
+
 	return out, nil
+}
+
+// reasoningRank is a level's place in canonicalReasoningLevels; own values
+// share the last place, so a stable sort keeps their order.
+func reasoningRank(level string) int {
+	if i := slices.Index(canonicalReasoningLevels, level); i >= 0 {
+		return i
+	}
+
+	return len(canonicalReasoningLevels)
 }
 
 // validBaseURL accepts an absolute http or https URL without credentials, a

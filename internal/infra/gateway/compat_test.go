@@ -371,6 +371,37 @@ func TestCompatProviderOwnReasoningLevels(t *testing.T) {
 	check(second)
 }
 
+// TestCompatProviderUpdateReasoningLevels: an update that gives a model its
+// own list applies it at once, and one that takes it away returns the model
+// to the default set.
+func TestCompatProviderUpdateReasoningLevels(t *testing.T) {
+	vendor := compatVendor()
+	vendorSrv := faketest.Start(t, vendor)
+	name, model := compatName(t, "relevel"), compatModel(t, "m")
+
+	srv := startCompat(t, pgtest.NewTestPool(t))
+
+	account, err := srv.gateway.AddCompatProvider(t.Context(), app.CompatProvider{
+		Name: name, BaseURL: vendorSrv.URL, Models: []app.CompatModel{{Name: model}},
+	})
+	require.NoError(t, err)
+	awaitProviders(t, srv.gateway.catalog, model, []string{name})
+
+	own := []app.CompatModel{{Name: model, ReasoningLevels: []string{"none", "high"}}}
+	_, err = srv.gateway.UpdateCompatProvider(t.Context(), account.ID, app.CompatProviderUpdate{BaseURL: vendorSrv.URL, Models: own})
+	require.NoError(t, err)
+	require.Equal(t, own, compatAccountModels(t, srv.gateway, account.ID))
+	awaitProviders(t, srv.gateway.catalog, model, []string{name})
+	assert.Equal(t, "high", sentEffort(t, srv, vendor, model, "max")["reasoning_effort"], "sent max with an own list")
+
+	plain := []app.CompatModel{{Name: model}}
+	_, err = srv.gateway.UpdateCompatProvider(t.Context(), account.ID, app.CompatProviderUpdate{BaseURL: vendorSrv.URL, Models: plain})
+	require.NoError(t, err)
+	require.Equal(t, plain, compatAccountModels(t, srv.gateway, account.ID))
+	awaitProviders(t, srv.gateway.catalog, model, []string{name})
+	assert.Equal(t, "max", sentEffort(t, srv, vendor, model, "max")["reasoning_effort"], "sent max without one")
+}
+
 // TestCompatProviderNames: a name a built-in provider goes by is refused as
 // invalid input, and a taken one as a conflict.
 func TestCompatProviderNames(t *testing.T) {

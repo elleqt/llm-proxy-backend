@@ -387,8 +387,9 @@ type VendorAccount struct {
 // CompatModel is one model an OpenAI-compatible provider serves: Name as the
 // vendor knows it, and the Alias clients request it by ("" serves it as Name).
 // ReasoningLevels are the reasoning_effort values the gateway passes to the
-// vendor unchanged (any other is replaced with the nearest listed one); nil
-// follows DefaultReasoningLevels.
+// vendor unchanged; a standard level off the list is replaced with the nearest
+// listed one, an unknown value off it is refused. Known levels are kept in
+// canonical order. nil follows DefaultReasoningLevels.
 type CompatModel struct {
 	Name            string
 	Alias           string
