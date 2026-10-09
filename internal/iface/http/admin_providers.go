@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
 
@@ -99,7 +100,7 @@ func (rt *router) discoverCompatModels(rw http.ResponseWriter, req *http.Request
 		return
 	}
 
-	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId))
+	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId), nil)
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 
@@ -209,7 +210,8 @@ func (rt *router) updateProviderAccount(rw http.ResponseWriter, req *http.Reques
 		return
 	}
 
-	account, err := rt.Providers.SetDisabled(req.Context(), actor.user, req.PathValue("accountId"), body.Disabled)
+	account, err := rt.Providers.Update(req.Context(), actor.user, req.PathValue("accountId"),
+		providers.AccountChange{Disabled: &body.Disabled})
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 

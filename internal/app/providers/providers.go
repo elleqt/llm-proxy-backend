@@ -1,6 +1,6 @@
 // Package providers is the administrator's view of the gateway's vendor accounts:
 // the list with quota signals, the login wizard, OpenAI-compatible providers,
-// disabling and removal.
+// disabling, proxy and removal.
 package providers
 
 import (
@@ -13,7 +13,7 @@ import (
 )
 
 // Service is the administrator's view of the gateway's vendor accounts: the
-// list with quota signals, the login wizard, disabling and removal.
+// list with quota signals, the login wizard, disabling, proxy and removal.
 //
 // Every account change goes through the gateway (VendorAccounts, VendorLogins),
 // never the core auth manager. Every mutation is audited; an audit detail holds
@@ -115,28 +115,65 @@ func (s *Service) CompleteLogin(ctx context.Context, actor identity.User, sessio
 	return s.withQuota(account), nil
 }
 
-// SetDisabled disables or re-enables account id and returns it as it now is.
-func (s *Service) SetDisabled(ctx context.Context, actor identity.User, id string, disabled bool) (app.VendorAccount, error) {
+// AccountChange is an administrator's edit of a vendor account: each field
+// that is set is changed, the others are kept.
+type AccountChange struct {
+	Disabled *bool
+	Proxy    *app.ProxyChoice
+}
+
+// Update applies change to account id and returns the account as it now is.
+// The whole change is validated before anything is touched, so a refused
+// change changes nothing; then the proxy is set and the account disabled or
+// enabled, each audited as it lands.
+func (s *Service) Update(ctx context.Context, actor identity.User, id string, change AccountChange) (app.VendorAccount, error) {
 	if err := app.RequireAdmin(actor); err != nil {
 		return app.VendorAccount{}, err
 	}
 
-	if _, err := s.find(id); err != nil {
+	if change.Disabled == nil && change.Proxy == nil {
+		return app.VendorAccount{}, &app.InvalidInputError{}
+	}
+
+	if change.Proxy != nil {
+		proxy, err := change.Proxy.Validate()
+		if err != nil {
+			return app.VendorAccount{}, err
+		}
+
+		change.Proxy = &proxy
+	}
+
+	before, err := s.find(id)
+	if err != nil {
 		return app.VendorAccount{}, err
 	}
 
-	if err := s.accounts.SetAccountDisabled(ctx, id, disabled); err != nil {
-		return app.VendorAccount{}, fmt.Errorf("app: set vendor account disabled: %w", err)
+	target := "provider_account/" + before.ID
+
+	if change.Proxy != nil {
+		if err := s.accounts.SetAccountProxy(ctx, id, *change.Proxy); err != nil {
+			return app.VendorAccount{}, fmt.Errorf("app: set vendor account proxy: %w", err)
+		}
+
+		s.record(ctx, actor, "provider.account_proxy", target,
+			map[string]any{auditAccountID: before.ID, auditProvider: before.Provider, "mode": string(change.Proxy.Mode)})
+	}
+
+	if change.Disabled != nil {
+		if err := s.accounts.SetAccountDisabled(ctx, id, *change.Disabled); err != nil {
+			return app.VendorAccount{}, fmt.Errorf("app: set vendor account disabled: %w", err)
+		}
+
+		s.metrics.SetAccountDisabled(before.ID, before.Provider, *change.Disabled)
+		s.record(ctx, actor, "provider.account_disable", target,
+			map[string]any{auditAccountID: before.ID, auditProvider: before.Provider, "disabled": *change.Disabled})
 	}
 
 	account, err := s.find(id)
 	if err != nil {
 		return app.VendorAccount{}, err
 	}
-
-	s.metrics.SetAccountDisabled(account.ID, account.Provider, disabled)
-	s.record(ctx, actor, "provider.account_disable", "provider_account/"+account.ID,
-		map[string]any{auditAccountID: account.ID, auditProvider: account.Provider, "disabled": disabled})
 
 	return s.withQuota(account), nil
 }

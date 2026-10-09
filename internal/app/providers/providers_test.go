@@ -79,14 +79,15 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture := newProvidersFixture(t)
 			ctx := context.Background()
+			yes := true
 			calls := map[string]error{}
 			_, calls["List"] = fixture.svc.List(ctx, actor)
 			_, calls["StartLogin"] = fixture.svc.StartLogin(ctx, actor, "claude")
 			_, calls["CompleteLogin"] = fixture.svc.CompleteLogin(ctx, actor, "session", "http://localhost/callback?code=c&state=s")
-			_, calls["SetDisabled"] = fixture.svc.SetDisabled(ctx, actor, codexAccount.ID, true)
+			_, calls["Update"] = fixture.svc.Update(ctx, actor, codexAccount.ID, providers.AccountChange{Disabled: &yes})
 			_, calls["CreateCompat"] = fixture.svc.CreateCompat(ctx, actor, app.CompatProvider{Name: "acme"})
 			_, calls["UpdateCompat"] = fixture.svc.UpdateCompat(ctx, actor, "openai-compatible-acme", app.CompatProviderUpdate{})
-			_, calls["DiscoverCompat"] = fixture.svc.DiscoverCompat(ctx, actor, "https://api.example.com/v1", "", "")
+			_, calls["DiscoverCompat"] = fixture.svc.DiscoverCompat(ctx, actor, "https://api.example.com/v1", "", "", nil)
 
 			calls["Remove"] = fixture.svc.Remove(ctx, actor, codexAccount.ID)
 			for method, err := range calls {
@@ -118,9 +119,9 @@ func TestProvidersListCarriesEachAccountsQuota(t *testing.T) {
 	require.Empty(t, got[1].Quota, "claude account: want no quota: none was reported for it")
 }
 
-// TestProvidersSetDisabledGoesThroughTheGateway: the change is the gateway's,
+// TestProvidersUpdateDisablesThroughTheGateway: the change is the gateway's,
 // the metric follows under the policy name, and it is audited.
-func TestProvidersSetDisabledGoesThroughTheGateway(t *testing.T) {
+func TestProvidersUpdateDisablesThroughTheGateway(t *testing.T) {
 	fixture := newProvidersFixture(t)
 	disabled := codexAccount
 	disabled.Disabled, disabled.Status = true, "disabled"
@@ -133,10 +134,11 @@ func TestProvidersSetDisabledGoesThroughTheGateway(t *testing.T) {
 	fixture.recordAudits()
 
 	actor := providerAdmin()
+	yes := true
 
-	got, err := fixture.svc.SetDisabled(context.Background(), actor, codexAccount.ID, true)
-	require.NoError(t, err, "SetDisabled")
-	require.True(t, got.Disabled, "SetDisabled returned %+v, want the account as it now is: disabled", got)
+	got, err := fixture.svc.Update(context.Background(), actor, codexAccount.ID, providers.AccountChange{Disabled: &yes})
+	require.NoError(t, err, "Update")
+	require.True(t, got.Disabled, "Update returned %+v, want the account as it now is: disabled", got)
 	require.Len(t, fixture.events, 1, "audit: want one provider.account_disable")
 
 	event := fixture.events[0]
@@ -189,8 +191,9 @@ func TestProvidersUnknownAccountIsNotFound(t *testing.T) {
 	err := fixture.svc.Remove(context.Background(), providerAdmin(), "no-such.json")
 	require.ErrorIs(t, err, app.ErrNotFound, "Remove(unknown)")
 
-	_, err = fixture.svc.SetDisabled(context.Background(), providerAdmin(), "no-such.json", true)
-	require.ErrorIs(t, err, app.ErrNotFound, "SetDisabled(unknown)")
+	yes := true
+	_, err = fixture.svc.Update(context.Background(), providerAdmin(), "no-such.json", providers.AccountChange{Disabled: &yes})
+	require.ErrorIs(t, err, app.ErrNotFound, "Update(unknown)")
 }
 
 // TestProvidersLoginAuditCarriesNoSecret: the wizard's audit records name the
@@ -282,4 +285,76 @@ func TestProvidersReportsAnUnauditedAccountItCouldNotWithdraw(t *testing.T) {
 	_, err := svc.CompleteLogin(context.Background(), providerAdmin(), "session", "cb")
 	require.ErrorIs(t, err, auditDown, "CompleteLogin: want the audit error")
 	require.Contains(t, warned, codexAccount.ID, "warning does not name the stranded account")
+}
+
+// TestProvidersUpdateSetsTheProxy: a proxy change goes through the gateway
+// normalised and is audited with its mode only.
+func TestProvidersUpdateSetsTheProxy(t *testing.T) {
+	const secretURL = "http://ops:proxy-pass@proxy.example.com:3128"
+
+	fixture := newProvidersFixture(t)
+
+	withProxy := codexAccount
+	withProxy.Proxy = app.AccountProxy{Mode: app.ProxyCustom, URL: "http://proxy.example.com:3128", HasCredentials: true}
+
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount}).Once()
+	fixture.accounts.EXPECT().SetAccountProxy(mock.Anything, codexAccount.ID, app.ProxyChoice{Mode: app.ProxyCustom, URL: secretURL}).Return(nil).Once()
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{withProxy}).Once()
+	fixture.quota.EXPECT().QuotaSignals().Return(nil)
+	fixture.recordAudits()
+
+	got, err := fixture.svc.Update(context.Background(), providerAdmin(), codexAccount.ID,
+		providers.AccountChange{Proxy: &app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + secretURL + " "}})
+	require.NoError(t, err)
+	require.Equal(t, withProxy.Proxy, got.Proxy)
+	require.Len(t, fixture.events, 1)
+	require.Equal(t, "provider.account_proxy", fixture.events[0].Action)
+	require.Equal(t, map[string]any{"account_id": codexAccount.ID, "provider": "chatgpt", "mode": "custom"}, fixture.events[0].Detail)
+	require.NotContains(t, fmt.Sprintf("%+v", fixture.events), "proxy-pass")
+}
+
+// TestProvidersUpdateValidatesBeforeChangingAnything: an invalid proxy beside
+// a valid disable, or an empty change, reaches no gateway method (the strict
+// mocks carry no expectations).
+func TestProvidersUpdateValidatesBeforeChangingAnything(t *testing.T) {
+	yes := true
+
+	for name, tc := range map[string]struct {
+		change providers.AccountChange
+		field  string
+	}{
+		"empty":                   {change: providers.AccountChange{}, field: ""},
+		"bad url beside disabled": {change: providers.AccountChange{Disabled: &yes, Proxy: &app.ProxyChoice{Mode: app.ProxyCustom, URL: "ftp://proxy.example.com"}}, field: app.FieldProxyURL},
+		"bad mode":                {change: providers.AccountChange{Proxy: &app.ProxyChoice{Mode: "sideways"}}, field: app.FieldProxyMode},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newProvidersFixture(t)
+
+			_, err := fixture.svc.Update(context.Background(), providerAdmin(), codexAccount.ID, tc.change)
+
+			var invalid *app.InvalidInputError
+			require.ErrorAs(t, err, &invalid)
+			require.Equal(t, tc.field, invalid.Field)
+		})
+	}
+}
+
+// TestProvidersUpdateBothFields: proxy first, then disabled; each audited.
+func TestProvidersUpdateBothFields(t *testing.T) {
+	fixture := newProvidersFixture(t)
+	yes := true
+
+	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{codexAccount})
+	fixture.accounts.EXPECT().SetAccountProxy(mock.Anything, codexAccount.ID, app.ProxyChoice{Mode: app.ProxyDirect}).Return(nil).Once()
+	fixture.accounts.EXPECT().SetAccountDisabled(mock.Anything, codexAccount.ID, true).Return(nil).Once()
+	fixture.quota.EXPECT().QuotaSignals().Return(nil)
+	fixture.metrics.EXPECT().SetAccountDisabled(codexAccount.ID, "chatgpt", true).Once()
+	fixture.recordAudits()
+
+	_, err := fixture.svc.Update(context.Background(), providerAdmin(), codexAccount.ID,
+		providers.AccountChange{Disabled: &yes, Proxy: &app.ProxyChoice{Mode: app.ProxyDirect}})
+	require.NoError(t, err)
+	require.Len(t, fixture.events, 2)
+	require.Equal(t, "provider.account_proxy", fixture.events[0].Action)
+	require.Equal(t, "provider.account_disable", fixture.events[1].Action)
 }
