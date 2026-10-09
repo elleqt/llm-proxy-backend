@@ -386,10 +386,20 @@ type VendorAccount struct {
 
 // CompatModel is one model an OpenAI-compatible provider serves: Name as the
 // vendor knows it, and the Alias clients request it by ("" serves it as Name).
+// ReasoningLevels are the reasoning_effort values the gateway passes to the
+// vendor unchanged (any other is replaced with the nearest listed one); nil
+// follows DefaultReasoningLevels.
 type CompatModel struct {
-	Name  string
-	Alias string
+	Name            string
+	Alias           string
+	ReasoningLevels []string
 }
+
+// DefaultReasoningLevels are the reasoning levels of a compat model without
+// its own list: every level upstream knows except "auto", which some vendors
+// (Ollama) refuse and which, left off the list, goes out as "medium". Read
+// only: callers handing it out give a copy.
+var DefaultReasoningLevels = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
 // CompatProvider is an OpenAI-compatible vendor as the administrator defines it.
 // Name is its policy name, immutable once created; APIKey is optional (a local

@@ -17,11 +17,16 @@ import (
 // name, so lower case and free of the rule syntax's ":" and "*".
 var compatName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 
+// reasoningLevel is what a reasoning level may be, lower-cased: a word a vendor
+// takes as a reasoning_effort value, never something carrying JSON or spaces.
+var reasoningLevel = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,31}$`)
+
 // Bounds on a definition: an administrator types it, a vendor lists far fewer.
 const (
-	maxCompatModels  = 500
-	maxCompatField   = 256
-	maxCompatBaseURL = 2048
+	maxCompatModels    = 500
+	maxCompatField     = 256
+	maxCompatBaseURL   = 2048
+	maxReasoningLevels = 16
 )
 
 // fieldModels is the request field, and audit key, of a definition's models.
@@ -128,6 +133,16 @@ func (s *Service) UpdateCompat(
 	return s.withQuota(account), nil
 }
 
+// CompatDefaults is the default set of reasoning levels, the ones a model
+// without its own list follows, as a copy the caller may change.
+func (s *Service) CompatDefaults(actor identity.User) ([]string, error) {
+	if err := app.RequireAdmin(actor); err != nil {
+		return nil, err
+	}
+
+	return slices.Clone(app.DefaultReasoningLevels), nil
+}
+
 // DiscoverCompat lists the models the vendor at baseURL serves, asked with
 // apiKey or, when that is empty, the stored key of provider accountID, and
 // sent through proxy, else the provider's own, else the global proxy-url.
@@ -187,7 +202,7 @@ func (s *Service) DiscoverCompat(
 
 // validCompat checks and normalises the editable part of a definition: the
 // base URL, a prefix without slashes, and at least one model, each named
-// once, aliases unique.
+// once, aliases unique, reasoning levels valid.
 func validCompat(baseURL, prefix string, models []app.CompatModel) (string, string, []app.CompatModel, error) {
 	base, err := validBaseURL(baseURL)
 	if err != nil {
@@ -220,10 +235,41 @@ func validCompat(baseURL, prefix string, models []app.CompatModel) (string, stri
 
 		served[requested] = struct{}{}
 
+		if model.ReasoningLevels, err = validReasoningLevels(model.ReasoningLevels); err != nil {
+			return "", "", nil, err
+		}
+
 		out = append(out, model)
 	}
 
 	return base, prefix, out, nil
+}
+
+// validReasoningLevels trims and lower-cases a model's own list of reasoning
+// levels; nil stays nil, as it follows the default set. A present list must
+// name at least one level: upstream takes an empty one for a model that does
+// not reason and strips the parameter.
+func validReasoningLevels(levels []string) ([]string, error) {
+	if levels == nil {
+		return nil, nil
+	}
+
+	if len(levels) == 0 || len(levels) > maxReasoningLevels {
+		return nil, &app.InvalidInputError{Field: fieldModels}
+	}
+
+	out := make([]string, 0, len(levels))
+
+	for _, level := range levels {
+		level = strings.ToLower(strings.TrimSpace(level))
+		if !reasoningLevel.MatchString(level) || slices.Contains(out, level) {
+			return nil, &app.InvalidInputError{Field: fieldModels}
+		}
+
+		out = append(out, level)
+	}
+
+	return out, nil
 }
 
 // validBaseURL accepts an absolute http or https URL without credentials, a
