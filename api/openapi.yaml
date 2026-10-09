@@ -717,8 +717,9 @@ paths:
       summary: >
         List the models a vendor serves (GET {baseURL}/models). Nothing is saved. Without
         `apiKey`, the stored key of `accountId` is used, and only when `baseURL` is that
-        provider's own: for any other URL the answer is `invalid_input` on `apiKey`, and
-        nothing is sent.
+        provider's own: for any other URL, if the provider has a stored key, the answer is
+        `invalid_input` on `apiKey`, and nothing is sent. The request goes through `proxy`,
+        else the proxy of `accountId`, else the global one.
       requestBody:
         required: true
         content:
@@ -752,15 +753,21 @@ paths:
           application/json:
             schema:
               type: object
-              required: [disabled]
+              description: Each field present is changed; the rest is kept. At least one is required.
               properties:
                 disabled: { type: boolean }
+                proxy: { $ref: "#/components/schemas/AccountProxyInput" }
       responses:
         "200":
           description: Updated.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ProviderAccount" }
+        "422":
+          description: "`invalid_input` — no field given (no `field`), or `field` `proxy.mode` / `proxy.url`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
     delete:
       tags: [admin-providers]
       operationId: removeProviderAccount
@@ -1260,7 +1267,7 @@ components:
 
     ProviderAccount:
       type: object
-      required: [id, provider, status, disabled, quota]
+      required: [id, provider, status, disabled, quota, proxy]
       properties:
         id: { type: string }
         provider: { type: string, description: Policy-facing provider name. }
@@ -1268,6 +1275,7 @@ components:
         email: { type: [string, "null"] }
         status: { type: string, examples: [active, error, disabled] }
         disabled: { type: boolean }
+        proxy: { $ref: "#/components/schemas/AccountProxy" }
         lastError: { type: [string, "null"] }
         lastRefreshedAt: { type: [string, "null"], format: date-time }
         quota:
@@ -1304,6 +1312,36 @@ components:
           type: array
           items: { $ref: "#/components/schemas/CompatModel" }
 
+    AccountProxy:
+      type: object
+      required: [mode]
+      description: >
+        How the account's vendor traffic leaves the gateway. `inherit` uses the global
+        `proxyURL` setting (direct when it is empty), `direct` bypasses it, `custom` uses
+        the account's own proxy.
+      properties:
+        mode: { type: string, enum: [inherit, direct, custom] }
+        url:
+          type: string
+          description: >
+            `custom` only: the proxy's scheme, host and port. Userinfo, path and query are
+            never returned.
+        hasCredentials:
+          type: boolean
+          description: "`custom` only: whether the stored URL carries a user name or password."
+
+    AccountProxyInput:
+      type: object
+      required: [mode]
+      properties:
+        mode: { type: string, enum: [inherit, direct, custom] }
+        url:
+          type: string
+          description: >
+            Required for `custom` and refused otherwise: the whole proxy URL, credentials
+            included (`http`, `https`, `socks5` or `socks5h`). Replaces the stored one.
+          examples: ["http://user:password@proxy.example.com:3128"]
+
     CompatProviderRequest:
       type: object
       required: [name, baseURL, models]
@@ -1320,6 +1358,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/CompatModel" }
+        proxy:
+          $ref: "#/components/schemas/AccountProxyInput"
+          description: Absent is `inherit`.
 
     CompatProviderUpdate:
       type: object
@@ -1338,6 +1379,9 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/CompatModel" }
+        proxy:
+          $ref: "#/components/schemas/AccountProxyInput"
+          description: Absent keeps the stored proxy.
 
     CompatDiscoverRequest:
       type: object
@@ -1345,7 +1389,12 @@ components:
       properties:
         baseURL: { type: string }
         apiKey: { type: string }
-        accountId: { type: string, description: An existing provider whose stored key is used when `apiKey` is absent. }
+        accountId:
+          type: string
+          description: An existing provider whose stored key is used when `apiKey` is absent, and whose proxy is used when `proxy` is absent.
+        proxy:
+          $ref: "#/components/schemas/AccountProxyInput"
+          description: The proxy to ask through. Absent, the proxy of `accountId`, else the global one.
 
     CompatDiscoverResult:
       type: object

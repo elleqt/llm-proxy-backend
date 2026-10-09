@@ -20,8 +20,14 @@ func TestListProviderAccountsWithTheirQuota(t *testing.T) {
 	refreshed := env.clock.Now().Add(-time.Hour)
 	reset := env.clock.Now().Add(4 * time.Hour)
 	env.accounts.EXPECT().Accounts().Return([]app.VendorAccount{
-		{ID: "claude-a.json", Provider: "claude", Label: "team", Email: "a@example.com", Status: "active", LastRefreshedAt: refreshed},
-		{ID: "codex-b.json", Provider: "chatgpt", Status: "error", Disabled: true, LastError: "refresh failed"},
+		{
+			ID: "claude-a.json", Provider: "claude", Label: "team", Email: "a@example.com", Status: "active", LastRefreshedAt: refreshed,
+			Proxy: app.AccountProxy{Mode: app.ProxyInherit},
+		},
+		{
+			ID: "codex-b.json", Provider: "chatgpt", Status: "error", Disabled: true, LastError: "refresh failed",
+			Proxy: app.AccountProxy{Mode: app.ProxyDirect},
+		},
 	})
 	env.quota.EXPECT().QuotaSignals().Return([]app.QuotaSignal{
 		{Account: "claude-a.json", Provider: "claude", Window: "5h", UsedRatio: 0.25, ResetAt: reset, ObservedAt: refreshed},
@@ -45,6 +51,7 @@ func TestListProviderAccountsWithTheirQuota(t *testing.T) {
 	require.Equal(t, float32(0.25), claude.Quota[0].UsedRatio, "claude quota used ratio")
 	require.NotNil(t, claude.Quota[0].ResetAt, "claude quota reset")
 	require.True(t, claude.Quota[0].ResetAt.Equal(reset), "claude quota reset = %v, want %v", claude.Quota[0].ResetAt, reset)
+	require.Equal(t, api.AccountProxy{Mode: api.AccountProxyMode("inherit")}, claude.Proxy, "claude proxy")
 
 	require.True(t, chatgpt.Disabled, "chatgpt disabled")
 	require.NotNil(t, chatgpt.LastError, "chatgpt last error")
@@ -54,6 +61,7 @@ func TestListProviderAccountsWithTheirQuota(t *testing.T) {
 	require.Nil(t, chatgpt.LastRefreshedAt, "chatgpt last refreshed")
 	require.NotNil(t, chatgpt.Quota, "chatgpt quota must be empty, not null")
 	require.Empty(t, chatgpt.Quota, "chatgpt quota")
+	require.Equal(t, api.AccountProxy{Mode: api.AccountProxyMode("direct")}, chatgpt.Proxy, "chatgpt proxy")
 }
 
 func TestStartingAProviderLogin(t *testing.T) {
@@ -184,21 +192,60 @@ func TestDisablingAProviderAccount(t *testing.T) {
 		require.Equal(t, id, got.Id, "account id")
 		require.True(t, got.Disabled, "account disabled")
 	})
-	// Without `disabled` the request says nothing; it must not re-enable the account
-	// (the gateway mock expects no call).
-	for _, body := range []string{`{}`, `{"disabled":null}`, `{"disabled":"yes"}`} {
+	// A body that names nothing changes nothing (the gateway mock expects no call).
+	for _, body := range []string{`{}`, `{"disabled":null}`} {
 		t.Run(body, func(t *testing.T) {
 			e := newEnv(t)
-			rec := e.do(http.MethodPatch, path, body, withCookie(e.signedIn(admin())))
-			wantField(t, apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput), "disabled")
+			apiError(t, e.do(http.MethodPatch, path, body, withCookie(e.signedIn(admin()))), http.StatusUnprocessableEntity, codeInvalidInput)
 		})
 	}
+
+	t.Run("not a boolean", func(t *testing.T) {
+		e := newEnv(t)
+		apiError(t, e.do(http.MethodPatch, path, `{"disabled":"yes"}`, withCookie(e.signedIn(admin()))), http.StatusUnprocessableEntity, codeInvalidInput)
+	})
 
 	t.Run("unknown account", func(t *testing.T) {
 		e := newEnv(t)
 		e.accounts.EXPECT().Accounts().Return(nil)
 		apiError(t, e.do(http.MethodPatch, path, `{"disabled":true}`, withCookie(e.signedIn(admin()))), http.StatusNotFound, codeNotFound)
 	})
+}
+
+func TestSettingAProviderAccountsProxy(t *testing.T) {
+	const id = "claude-a.json"
+
+	path := "/api/admin/providers/" + id
+
+	t.Run("custom", func(t *testing.T) {
+		env := newEnv(t)
+		shown := app.AccountProxy{Mode: app.ProxyCustom, URL: "http://proxy.example.com:3128", HasCredentials: true}
+		env.accounts.EXPECT().Accounts().Return([]app.VendorAccount{{ID: id, Provider: "claude", Status: "active", Proxy: shown}})
+		env.accounts.EXPECT().SetAccountProxy(mock.Anything, id, app.ProxyChoice{Mode: app.ProxyCustom, URL: "http://ops:pw-9@proxy.example.com:3128"}).Return(nil)
+		env.quota.EXPECT().QuotaSignals().Return(nil)
+
+		rec := env.do(http.MethodPatch, path, `{"proxy":{"mode":"custom","url":"http://ops:pw-9@proxy.example.com:3128"}}`, withCookie(env.signedIn(admin())))
+
+		var got api.ProviderAccount
+		decodeBody(t, rec, http.StatusOK, &got)
+		require.Equal(t, api.AccountProxyMode("custom"), got.Proxy.Mode)
+		require.NotNil(t, got.Proxy.Url)
+		require.Equal(t, "http://proxy.example.com:3128", *got.Proxy.Url)
+		require.NotNil(t, got.Proxy.HasCredentials)
+		require.True(t, *got.Proxy.HasCredentials)
+		require.NotContains(t, rec.Body.String(), "pw-9")
+	})
+
+	for body, field := range map[string]string{
+		`{"proxy":{"mode":"custom"}}`:                                              "proxy.url",
+		`{"proxy":{"mode":"sideways"}}`:                                            "proxy.mode",
+		`{"disabled":true,"proxy":{"mode":"direct","url":"http://p.example.com"}}`: "proxy.url",
+	} {
+		t.Run(body, func(t *testing.T) {
+			e := newEnv(t)
+			wantField(t, apiError(t, e.do(http.MethodPatch, path, body, withCookie(e.signedIn(admin()))), http.StatusUnprocessableEntity, codeInvalidInput), field)
+		})
+	}
 }
 
 func TestRemovingAProviderAccount(t *testing.T) {
