@@ -23,6 +23,8 @@ var proxySchemes = []string{"http", "https", "socks5", "socks5h"}
 // Validate checks c and returns it normalised: a custom URL trimmed, no URL
 // beside inherit or direct. It accepts what upstream's proxyutil.Parse reads
 // as a proxy, and refuses a port outside 1-65535 it would only fail to dial.
+// A socks5/socks5h URL needs an explicit port: upstream's BuildHTTPTransport
+// dials the SOCKS host as given, and x/net's socks dialer fails without one.
 // The refusal names the field, never the URL: it may carry a password.
 func (c ProxyChoice) Validate() (ProxyChoice, error) {
 	switch c.Mode {
@@ -37,7 +39,8 @@ func (c ProxyChoice) Validate() (ProxyChoice, error) {
 
 		u, err := url.Parse(raw)
 		if raw == "" || len(raw) > maxProxyURL || err != nil || !slices.Contains(proxySchemes, u.Scheme) ||
-			u.Hostname() == "" || !validProxyPort(u.Port()) {
+			u.Hostname() == "" || !validProxyPort(u.Port()) ||
+			(strings.HasPrefix(u.Scheme, "socks5") && u.Port() == "") {
 			return ProxyChoice{}, &InvalidInputError{Field: FieldProxyURL}
 		}
 

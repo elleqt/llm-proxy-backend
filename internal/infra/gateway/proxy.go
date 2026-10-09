@@ -89,8 +89,11 @@ func setProxy(auth *coreauth.Auth, value string) {
 // manager's copy changes first, so the next request goes the new way:
 // executors read the proxy from the account on every request and nothing has
 // to be re-registered. Then the credential is saved, so the choice survives a
-// restart. A failed save is reported like SetAccountDisabled's: the account
-// keeps the new proxy in memory and a retry converges.
+// restart. Accounts the store never holds — config-derived API keys,
+// runtime-only and plugin-virtual accounts — have nothing to save and come
+// back from configuration. A failed save is reported like
+// SetAccountDisabled's: the account keeps the new proxy in memory and a retry
+// converges.
 func (g *Gateway) SetAccountProxy(ctx context.Context, id string, p app.ProxyChoice) error {
 	value, err := proxyValue(p)
 	if err != nil {

@@ -23,6 +23,8 @@ func TestProxyChoiceValidate(t *testing.T) {
 		"custom with userinfo": {in: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5://u:p@proxy.example.com:1080"}, want: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5://u:p@proxy.example.com:1080"}},
 		"custom https no port": {in: app.ProxyChoice{Mode: app.ProxyCustom, URL: "https://proxy.example.com"}, want: app.ProxyChoice{Mode: app.ProxyCustom, URL: "https://proxy.example.com"}},
 		"custom socks5h":       {in: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5h://proxy.example.com:1080"}, want: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5h://proxy.example.com:1080"}},
+		"socks5 no port":       {in: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5://proxy.example.com"}, field: app.FieldProxyURL},
+		"socks5h no port":      {in: app.ProxyChoice{Mode: app.ProxyCustom, URL: "socks5h://proxy.example.com"}, field: app.FieldProxyURL},
 		"empty mode":           {in: app.ProxyChoice{}, field: app.FieldProxyMode},
 		"unknown mode":         {in: app.ProxyChoice{Mode: "none"}, field: app.FieldProxyMode},
 		"inherit with url":     {in: app.ProxyChoice{Mode: app.ProxyInherit, URL: "http://proxy.example.com"}, field: app.FieldProxyURL},

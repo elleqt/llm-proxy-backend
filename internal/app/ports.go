@@ -429,12 +429,13 @@ type CompatDetails struct {
 type ProxyMode string
 
 const (
-	// ProxyInherit sends it through the global proxy-url, or directly when
-	// none is set.
+	// ProxyInherit sends the account's traffic through the global proxy-url,
+	// or directly when none is set.
 	ProxyInherit ProxyMode = "inherit"
-	// ProxyDirect sends it directly, whatever the global proxy-url says.
+	// ProxyDirect sends the account's traffic directly, whatever the global
+	// proxy-url says.
 	ProxyDirect ProxyMode = "direct"
-	// ProxyCustom sends it through the account's own proxy.
+	// ProxyCustom sends the account's traffic through the account's own proxy.
 	ProxyCustom ProxyMode = "custom"
 )
 
@@ -461,7 +462,9 @@ type VendorAccounts interface {
 	SetAccountDisabled(ctx context.Context, id string, disabled bool) error
 	// SetAccountProxy sets how account id's traffic leaves the gateway, at
 	// once and across a restart: ErrNotFound for an id it does not hold, an
-	// *InvalidInputError for a choice it cannot apply.
+	// *InvalidInputError for a choice it cannot apply. Accounts the store
+	// never holds — config-derived API keys, runtime-only and plugin-virtual
+	// accounts — have nothing to save and come back from configuration.
 	SetAccountProxy(ctx context.Context, id string, p ProxyChoice) error
 	RemoveAccount(ctx context.Context, id string) error
 	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
