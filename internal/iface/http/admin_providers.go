@@ -1,13 +1,13 @@
 package http
 
 import (
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
 
@@ -48,7 +48,7 @@ func (rt *router) createCompatProvider(rw http.ResponseWriter, req *http.Request
 
 	account, err := rt.Providers.CreateCompat(req.Context(), actor.user, app.CompatProvider{
 		Name: body.Name, BaseURL: body.BaseURL, APIKey: deref(body.ApiKey), Prefix: deref(body.Prefix),
-		Models: compatModelsIn(body.Models),
+		Models: compatModelsIn(body.Models), Proxy: proxyIn(body.Proxy),
 	})
 	if errors.Is(err, app.ErrConflict) {
 		writeFieldError(rw, http.StatusConflict, codeConflict, "name", "a provider of that name exists")
@@ -75,6 +75,7 @@ func (rt *router) updateCompatProvider(rw http.ResponseWriter, req *http.Request
 
 	update := app.CompatProviderUpdate{
 		BaseURL: body.BaseURL, APIKey: body.ApiKey, Prefix: deref(body.Prefix), Models: compatModelsIn(body.Models),
+		Proxy: proxyIn(body.Proxy),
 	}
 	if update.APIKey == nil && body.ClearApiKey != nil && *body.ClearApiKey {
 		cleared := ""
@@ -99,7 +100,8 @@ func (rt *router) discoverCompatModels(rw http.ResponseWriter, req *http.Request
 		return
 	}
 
-	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId))
+	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId),
+		proxyIn(body.Proxy))
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 
@@ -192,24 +194,20 @@ func (rt *router) completeProviderLogin(rw http.ResponseWriter, req *http.Reques
 	writeJSON(rw, http.StatusCreated, providerAccountOf(account))
 }
 
-// updateProviderAccount requires `disabled`: a body without it (or with null) must
-// not read as "enable".
+// updateProviderAccount changes the fields the body names and keeps the rest.
+// A body naming none is refused by the service, so a malformed or empty patch
+// never reads as "enable".
 func (rt *router) updateProviderAccount(rw http.ResponseWriter, req *http.Request) {
 	actor, _ := callerFrom(req.Context())
 
-	var raw map[string]json.RawMessage
-	if !decodeJSON(rw, req, &raw) {
-		return
-	}
-
 	var body api.UpdateProviderAccountJSONBody
-	if v, ok := raw["disabled"]; !ok || string(v) == "null" || json.Unmarshal(v, &body.Disabled) != nil {
-		writeFieldError(rw, http.StatusUnprocessableEntity, codeInvalidInput, "disabled", "disabled must be true or false")
-
+	if !decodeJSON(rw, req, &body) {
 		return
 	}
 
-	account, err := rt.Providers.SetDisabled(req.Context(), actor.user, req.PathValue("accountId"), body.Disabled)
+	account, err := rt.Providers.Update(req.Context(), actor.user, req.PathValue("accountId"), providers.AccountChange{
+		Disabled: body.Disabled, Proxy: proxyIn(body.Proxy),
+	})
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 
@@ -217,6 +215,27 @@ func (rt *router) updateProviderAccount(rw http.ResponseWriter, req *http.Reques
 	}
 
 	writeJSON(rw, http.StatusOK, providerAccountOf(account))
+}
+
+// proxyIn is a proxy choice from the contract; nil when the request names none.
+func proxyIn(in *api.AccountProxyInput) *app.ProxyChoice {
+	if in == nil {
+		return nil
+	}
+
+	return &app.ProxyChoice{Mode: app.ProxyMode(in.Mode), URL: deref(in.Url)}
+}
+
+// proxyOut is an account's proxy as the contract shows it: the URL and the
+// credentials flag only for `custom`, and the URL already stripped of userinfo.
+func proxyOut(p app.AccountProxy) api.AccountProxy {
+	out := api.AccountProxy{Mode: api.AccountProxyMode(p.Mode)}
+	if p.Mode == app.ProxyCustom {
+		out.Url = nonEmpty(p.URL)
+		out.HasCredentials = &p.HasCredentials
+	}
+
+	return out
 }
 
 func (rt *router) removeProviderAccount(rw http.ResponseWriter, req *http.Request) {
@@ -243,6 +262,7 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 		LastError:       nonEmpty(account.LastError),
 		LastRefreshedAt: nonZero(account.LastRefreshedAt),
 		Quota:           make([]quotaSignal, 0, len(account.Quota)),
+		Proxy:           proxyOut(account.Proxy),
 	}
 	for _, q := range account.Quota {
 		out.Quota = append(out.Quota, quotaSignal{

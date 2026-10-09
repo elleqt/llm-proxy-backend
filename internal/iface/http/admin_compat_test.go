@@ -45,6 +45,20 @@ func TestCreateCompatProviderTakesTheKeyAndNeverShowsIt(t *testing.T) {
 	require.Equal(t, "m-fast", *got.Compat.Models[0].Alias)
 }
 
+// TestCreateCompatProviderTakesTheProxy: the request's proxy reaches the gateway.
+func TestCreateCompatProviderTakesTheProxy(t *testing.T) {
+	env := newEnv(t)
+	env.accounts.EXPECT().AddCompatProvider(mock.Anything, app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1",
+		Models: []app.CompatModel{{Name: "m"}}, Proxy: &app.ProxyChoice{Mode: app.ProxyDirect},
+	}).Return(compatWireAccount, nil)
+
+	rec := env.do(http.MethodPost, "/api/admin/providers/compat",
+		`{"name":"acme","baseURL":"https://api.example.com/v1","models":[{"name":"m"}],"proxy":{"mode":"direct"}}`,
+		withCookie(env.signedIn(admin())))
+	require.Equal(t, http.StatusCreated, rec.Code, "body %s", rec.Body)
+}
+
 func TestCreateCompatProviderRefusals(t *testing.T) {
 	body := `{"name":"acme","baseURL":"https://api.example.com/v1","models":[{"name":"m"}]}`
 
@@ -82,12 +96,13 @@ func TestUpdateCompatProviderKeyIntent(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			env := newEnv(t)
 			env.quota.EXPECT().QuotaSignals().Return(nil)
-			env.accounts.EXPECT().UpdateCompatProvider(mock.Anything, compatWireAccount.ID, mock.MatchedBy(func(u app.CompatProviderUpdate) bool {
+			env.accounts.EXPECT().UpdateCompatProvider(mock.Anything, compatWireAccount.ID, mock.MatchedBy(func(update app.CompatProviderUpdate) bool {
 				if tc.want == nil {
-					return u.APIKey == nil
+					// No proxy in the request keeps the stored one.
+					return update.APIKey == nil && update.Proxy == nil
 				}
 
-				return u.APIKey != nil && *u.APIKey == *tc.want
+				return update.APIKey != nil && *update.APIKey == *tc.want
 			})).Return(compatWireAccount, nil)
 
 			rec := env.do(http.MethodPut, "/api/admin/providers/compat/"+compatWireAccount.ID, tc.body, withCookie(env.signedIn(admin())))
@@ -101,7 +116,7 @@ func TestDiscoverCompatModels(t *testing.T) {
 
 	t.Run("listed", func(t *testing.T) {
 		env := newEnv(t)
-		env.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", compatWireKey, "").
+		env.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", compatWireKey, "", (*app.ProxyChoice)(nil)).
 			Return([]string{"m", "shared"}, nil)
 		env.accounts.EXPECT().Accounts().Return(nil)
 		env.catalog.EXPECT().Models().Return(map[string][]string{"other": {"shared"}})
@@ -111,6 +126,18 @@ func TestDiscoverCompatModels(t *testing.T) {
 			http.StatusOK, &got)
 		require.Equal(t, []string{"m", "shared"}, got.Models)
 		require.Equal(t, map[string][]string{"shared": {"other"}}, got.Conflicts)
+	})
+
+	t.Run("through the named proxy", func(t *testing.T) {
+		env := newEnv(t)
+		env.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", compatWireKey, "", &app.ProxyChoice{Mode: app.ProxyInherit}).
+			Return([]string{"m"}, nil)
+		env.accounts.EXPECT().Accounts().Return(nil)
+		env.catalog.EXPECT().Models().Return(nil)
+
+		inherit := `{"baseURL":"https://api.example.com/v1","apiKey":"` + compatWireKey + `","proxy":{"mode":"inherit"}}`
+		rec := env.do(http.MethodPost, "/api/admin/providers/compat/discover", inherit, withCookie(env.signedIn(admin())))
+		require.Equal(t, http.StatusOK, rec.Code, "body %s", rec.Body)
 	})
 
 	for name, tc := range map[string]struct {
@@ -124,7 +151,7 @@ func TestDiscoverCompatModels(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := newEnv(t)
-			env.accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, tc.err)
+			env.accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, tc.err)
 			rec := env.do(http.MethodPost, "/api/admin/providers/compat/discover", body, withCookie(env.signedIn(admin())))
 			apiError(t, rec, tc.status, tc.code)
 			require.NotContains(t, rec.Body.String(), compatWireKey)

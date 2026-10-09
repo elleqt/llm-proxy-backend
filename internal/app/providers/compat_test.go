@@ -124,14 +124,14 @@ func TestUpdateCompatPassesTheKeyChangeThrough(t *testing.T) {
 func TestDiscoverCompatReportsModelsOtherProvidersServe(t *testing.T) {
 	fixture := newProvidersFixture(t)
 
-	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID).
+	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID, (*app.ProxyChoice)(nil)).
 		Return([]string{"m", "shared", "fresh"}, nil)
 	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{compatAccount})
 	fixture.catalog.EXPECT().Models().Return(map[string][]string{
 		"acme": {"m", "shared"}, "other": {"shared"}, "claude": {"claude-x"},
 	})
 
-	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1/", "", compatAccount.ID)
+	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1/", "", compatAccount.ID, nil)
 	require.NoError(t, err)
 	require.Equal(t, providers.CompatDiscovery{
 		Models:    []string{"m", "shared", "fresh"},
@@ -146,8 +146,131 @@ func TestDiscoverCompatPassesTheRefusalThrough(t *testing.T) {
 	svc := providers.New(accounts, mocks.NewVendorLogins(t), mocks.NewModelCatalog(t), mocks.NewVendorQuota(t),
 		mocks.NewAccountMetrics(t), mocks.NewAuditSink(t), systemClock{}, discardLogger{})
 
-	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
+	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
 
-	_, err := svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "")
+	_, err := svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "", nil)
 	require.ErrorIs(t, err, app.ErrProviderAuthFailed)
+}
+
+// compatProxySecret is a proxy URL with credentials: an audit record must
+// never carry it.
+const compatProxySecret = "http://ops:proxy-pass@proxy.example.com:3128"
+
+// TestCreateCompatRefusesABadProxy names the proxy field and never reaches the
+// gateway (the strict mock has no expectations).
+func TestCreateCompatRefusesABadProxy(t *testing.T) {
+	fixture := newProvidersFixture(t)
+
+	_, err := fixture.svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: app.ProxyCustom, URL: "ftp://x.example.com"},
+	})
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, app.FieldProxyURL, invalid.Field)
+}
+
+// TestCreateCompatPassesTheProxyThrough: a valid proxy reaches the gateway
+// normalised, and the audit record carries its mode only.
+func TestCreateCompatPassesTheProxyThrough(t *testing.T) {
+	fixture := newProvidersFixture(t)
+	fixture.recordAudits()
+
+	fixture.accounts.EXPECT().AddCompatProvider(mock.Anything, app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: app.ProxyCustom, URL: compatProxySecret},
+	}).Return(compatAccount, nil)
+
+	_, err := fixture.svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + compatProxySecret + " "},
+	})
+	require.NoError(t, err)
+	require.Len(t, fixture.events, 1)
+	require.Equal(t, "custom", fixture.events[0].Detail["proxy_mode"])
+	assert.NotContains(t, fmt.Sprintf("%+v", fixture.events), "proxy-pass")
+}
+
+// TestCreateCompatWithoutAProxyInherits: no proxy is audited as inherit.
+func TestCreateCompatWithoutAProxyInherits(t *testing.T) {
+	fixture := newProvidersFixture(t)
+	fixture.recordAudits()
+
+	fixture.accounts.EXPECT().AddCompatProvider(mock.Anything, app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+	}).Return(compatAccount, nil)
+
+	_, err := fixture.svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
+		Name: "acme", BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, fixture.events, 1)
+	require.Equal(t, "inherit", fixture.events[0].Detail["proxy_mode"])
+}
+
+// TestUpdateCompatRefusesABadProxy names the proxy field and never reaches the
+// gateway (the strict mock has no expectations).
+func TestUpdateCompatRefusesABadProxy(t *testing.T) {
+	fixture := newProvidersFixture(t)
+
+	_, err := fixture.svc.UpdateCompat(context.Background(), providerAdmin(), compatAccount.ID, app.CompatProviderUpdate{
+		BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: "sideways"},
+	})
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, app.FieldProxyMode, invalid.Field)
+}
+
+// TestUpdateCompatAuditsTheProxyChange: a proxy change is passed through and
+// audited by its mode only.
+func TestUpdateCompatAuditsTheProxyChange(t *testing.T) {
+	fixture := newProvidersFixture(t)
+	fixture.recordAudits()
+	fixture.quota.EXPECT().QuotaSignals().Return(nil)
+
+	fixture.accounts.EXPECT().UpdateCompatProvider(mock.Anything, compatAccount.ID, app.CompatProviderUpdate{
+		BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: app.ProxyDirect},
+	}).Return(compatAccount, nil)
+
+	_, err := fixture.svc.UpdateCompat(context.Background(), providerAdmin(), compatAccount.ID, app.CompatProviderUpdate{
+		BaseURL: "https://api.example.com/v1", Models: []app.CompatModel{{Name: "m"}},
+		Proxy: &app.ProxyChoice{Mode: app.ProxyDirect},
+	})
+	require.NoError(t, err)
+	require.Len(t, fixture.events, 1)
+	require.Equal(t, true, fixture.events[0].Detail["proxy_changed"])
+	require.Equal(t, "direct", fixture.events[0].Detail["proxy_mode"])
+}
+
+// TestDiscoverCompatRefusesABadProxy names the proxy field and never reaches
+// the gateway (the strict mock has no expectations).
+func TestDiscoverCompatRefusesABadProxy(t *testing.T) {
+	fixture := newProvidersFixture(t)
+
+	_, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "",
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: "http://proxy.example.com:70000"})
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, err, &invalid)
+	require.Equal(t, app.FieldProxyURL, invalid.Field)
+}
+
+// TestDiscoverCompatPassesTheProxyThrough: discovery asks through the proxy
+// it is given, normalised.
+func TestDiscoverCompatPassesTheProxyThrough(t *testing.T) {
+	fixture := newProvidersFixture(t)
+
+	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "k", "",
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: compatProxySecret}).Return([]string{"m"}, nil)
+	fixture.accounts.EXPECT().Accounts().Return(nil)
+	fixture.catalog.EXPECT().Models().Return(nil)
+
+	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "",
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + compatProxySecret + " "})
+	require.NoError(t, err)
+	require.Equal(t, []string{"m"}, got.Models)
 }

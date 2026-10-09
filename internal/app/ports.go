@@ -372,8 +372,10 @@ type VendorAccount struct {
 	Label    string
 	Email    string
 	// Status is the gateway's lifecycle status: active, error, disabled, ...
-	Status          string
-	Disabled        bool
+	Status   string
+	Disabled bool
+	// Proxy is how the account's traffic leaves the gateway.
+	Proxy           AccountProxy
 	LastError       string
 	LastRefreshedAt time.Time // zero when never refreshed
 	// Quota is filled by providers.Service from the QuotaReader.
@@ -398,6 +400,8 @@ type CompatProvider struct {
 	APIKey  string
 	Prefix  string
 	Models  []CompatModel
+	// Proxy is the provider's proxy; nil is ProxyInherit.
+	Proxy *ProxyChoice
 }
 
 // CompatProviderUpdate replaces an OpenAI-compatible provider's definition. A
@@ -407,6 +411,8 @@ type CompatProviderUpdate struct {
 	APIKey  *string
 	Prefix  string
 	Models  []CompatModel
+	// Proxy replaces the provider's proxy; nil keeps it.
+	Proxy *ProxyChoice
 }
 
 // CompatDetails is an OpenAI-compatible provider as the admin API shows it:
@@ -419,11 +425,47 @@ type CompatDetails struct {
 	Models    []CompatModel
 }
 
+// ProxyMode is how a vendor account's traffic leaves the gateway.
+type ProxyMode string
+
+const (
+	// ProxyInherit sends the account's traffic through the global proxy-url,
+	// or directly when none is set.
+	ProxyInherit ProxyMode = "inherit"
+	// ProxyDirect sends the account's traffic directly, whatever the global
+	// proxy-url says.
+	ProxyDirect ProxyMode = "direct"
+	// ProxyCustom sends the account's traffic through the account's own proxy.
+	ProxyCustom ProxyMode = "custom"
+)
+
+// AccountProxy is an account's proxy as the admin API shows it. A custom URL
+// is reduced to scheme and host: its userinfo, which may hold the proxy's
+// password, is reported only as HasCredentials.
+type AccountProxy struct {
+	Mode           ProxyMode
+	URL            string
+	HasCredentials bool
+}
+
+// ProxyChoice is a proxy the administrator sets. URL is the whole proxy URL,
+// credentials included, for ProxyCustom only.
+type ProxyChoice struct {
+	Mode ProxyMode
+	URL  string
+}
+
 // VendorAccounts is the gateway's account surface. Account changes go through
 // it and nothing else: an id it does not hold is ErrNotFound.
 type VendorAccounts interface {
 	Accounts() []VendorAccount
 	SetAccountDisabled(ctx context.Context, id string, disabled bool) error
+	// SetAccountProxy sets how account id's traffic leaves the gateway, at
+	// once and across a restart: ErrNotFound for an id it does not hold, an
+	// *InvalidInputError for a choice it cannot apply. Accounts the store
+	// never holds — config-derived API keys, runtime-only and plugin-virtual
+	// accounts — have nothing to save and come back from configuration.
+	SetAccountProxy(ctx context.Context, id string, p ProxyChoice) error
 	RemoveAccount(ctx context.Context, id string) error
 	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
 	// at once: ErrConflict when its name is taken, an *InvalidInputError on
@@ -434,8 +476,10 @@ type VendorAccounts interface {
 	UpdateCompatProvider(ctx context.Context, id string, u CompatProviderUpdate) (VendorAccount, error)
 	// DiscoverModels lists the model ids the vendor at baseURL serves, asked with
 	// apiKey or, when that is empty and accountID names an OpenAI-compatible
-	// provider, with its stored key (ErrProviderUnreachable, ErrProviderAuthFailed).
-	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string) ([]string, error)
+	// provider with a stored key, with that key (ErrProviderUnreachable,
+	// ErrProviderAuthFailed). It goes out through proxy, else accountID's own
+	// proxy, else the global proxy-url.
+	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *ProxyChoice) ([]string, error)
 }
 
 // VendorLogin is a pending vendor sign-in: the administrator opens AuthURL in

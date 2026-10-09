@@ -292,6 +292,17 @@ func (g *Gateway) AddCompatProvider(ctx context.Context, provider app.CompatProv
 
 	id := CompatAccountID(provider.Name)
 
+	var proxy string
+
+	if provider.Proxy != nil {
+		value, err := proxyValue(*provider.Proxy)
+		if err != nil {
+			return app.VendorAccount{}, err
+		}
+
+		proxy = value
+	}
+
 	g.pushMu.Lock()
 	defer g.pushMu.Unlock()
 
@@ -315,6 +326,7 @@ func (g *Gateway) AddCompatProvider(ctx context.Context, provider app.CompatProv
 		Metadata: compatMetadata(provider),
 	}
 	applyCompatAttributes(auth)
+	setProxy(auth, proxy)
 
 	stored, err := g.addLocked(ctx, auth)
 	if err != nil {
@@ -326,7 +338,8 @@ func (g *Gateway) AddCompatProvider(ctx context.Context, provider app.CompatProv
 
 // UpdateCompatProvider replaces the definition of the OpenAI-compatible
 // provider id and serves it at once. The credential is saved first, so a
-// failed save changes nothing; the name and the disabled state are kept.
+// failed save changes nothing; the name, the disabled state and, unless the
+// update names one, the proxy are kept.
 // A stored key stays bound to its base URL: moving the provider to another
 // base URL while keeping the key is an *app.InvalidInputError on "apiKey"
 // (type the key again, or remove it), so the key never follows a URL the
@@ -359,12 +372,22 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
+	// The definition is rebuilt from the update; the proxy is not part of it
+	// unless the update names one, and must not be lost with the old metadata.
+	proxy := held.ProxyURL
+	if update.Proxy != nil {
+		if proxy, err = proxyValue(*update.Proxy); err != nil {
+			return app.VendorAccount{}, err
+		}
+	}
+
 	next := held.Clone()
 	next.Metadata = compatMetadata(app.CompatProvider{
 		Name: name, BaseURL: update.BaseURL, APIKey: apiKey, Prefix: update.Prefix, Models: update.Models,
 	})
 	next.Metadata[metadataDisabled] = held.Disabled
 	applyCompatAttributes(next)
+	setProxy(next, proxy)
 
 	if _, err := g.store.Save(ctx, next); err != nil {
 		return app.VendorAccount{}, fmt.Errorf("gateway: provider %q was not saved: %w", name, err)
@@ -386,25 +409,26 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 
 // DiscoverModels asks the vendor at baseURL which models it serves (GET
 // {baseURL}/models, the OpenAI model list) and returns their ids, sorted.
-// With no apiKey and accountID naming an OpenAI-compatible provider, that
-// provider's stored key is sent, and only to its stored base URL: for any
+// With no apiKey and accountID naming an OpenAI-compatible provider with a
+// stored key, that key is sent, and only to its stored base URL: for any
 // other baseURL it is an *app.InvalidInputError on "apiKey", so no request
 // can carry a stored key to a host the administrator merely typed. The
-// request goes through the running configuration's proxy-url, as the
-// provider's traffic does, follows redirects only within the same scheme and
-// host, and gives up after discoverTimeout or discoverMaxBytes. Errors name
-// neither the URL nor the vendor's answer: app.ErrProviderAuthFailed for 401
-// and 403, else app.ErrProviderUnreachable.
-func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string) ([]string, error) {
-	if apiKey == "" && accountID != "" && g.coreAuth != nil {
-		if held, ok := g.coreAuth.GetByID(accountID); ok && isCompatAccount(held) {
-			stored, _ := held.Metadata[compatMetaBaseURL].(string)
-			if strings.TrimRight(stored, "/") != strings.TrimRight(baseURL, "/") {
-				return nil, &app.InvalidInputError{Field: "apiKey"}
-			}
+// request goes through the chosen proxy (discoveryProxy), as the provider's
+// traffic does, follows redirects only within the same scheme and host, and
+// gives up after discoverTimeout or discoverMaxBytes. Errors name neither the
+// URL nor the vendor's answer: app.ErrProviderAuthFailed for 401 and 403,
+// else app.ErrProviderUnreachable.
+func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *app.ProxyChoice) ([]string, error) {
+	held := g.discoveryAccount(accountID)
 
-			apiKey, _ = held.Metadata[compatMetaAPIKey].(string)
-		}
+	apiKey, err := discoveryKey(held, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+
+	proxyURL, err := g.discoveryProxy(held, proxy)
+	if err != nil {
+		return nil, err
 	}
 
 	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + "/models")
@@ -418,7 +442,7 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 		return nil, err
 	}
 
-	client, err := g.discoveryClient(endpoint)
+	client, err := g.discoveryClient(endpoint, proxyURL)
 	if err != nil {
 		return nil, err
 	}
@@ -462,16 +486,67 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 	return modelIDs(body)
 }
 
-// discoveryClient is the client DiscoverModels asks endpoint with.
-func (g *Gateway) discoveryClient(endpoint *url.URL) (*http.Client, error) {
-	var proxyURL string
-	if cfg := g.CurrentConfig(); cfg != nil {
-		proxyURL = cfg.ProxyURL
+// discoveryAccount is the OpenAI-compatible provider accountID names, or nil.
+func (g *Gateway) discoveryAccount(accountID string) *coreauth.Auth {
+	if accountID == "" || g.coreAuth == nil {
+		return nil
 	}
 
+	if auth, ok := g.coreAuth.GetByID(accountID); ok && isCompatAccount(auth) {
+		return auth
+	}
+
+	return nil
+}
+
+// discoveryKey is the key discovery sends to baseURL: apiKey when given,
+// else held's stored key, which goes only to held's stored base URL (an
+// *app.InvalidInputError on "apiKey" for any other). Only a stored key is
+// bound to its base URL; with none there is nothing to send elsewhere.
+func discoveryKey(held *coreauth.Auth, baseURL, apiKey string) (string, error) {
+	if apiKey != "" || held == nil {
+		return apiKey, nil
+	}
+
+	stored, _ := held.Metadata[compatMetaAPIKey].(string)
+	if stored == "" {
+		return "", nil
+	}
+
+	storedURL, _ := held.Metadata[compatMetaBaseURL].(string)
+	if strings.TrimRight(storedURL, "/") != strings.TrimRight(baseURL, "/") {
+		return "", &app.InvalidInputError{Field: "apiKey"}
+	}
+
+	return stored, nil
+}
+
+// discoveryProxy is the proxy discovery goes out through, in the order
+// upstream's executors apply to the provider's traffic: the request's choice,
+// else the provider's own, else the running configuration's proxy-url. An
+// inherit choice in the request means the global proxy-url.
+func (g *Gateway) discoveryProxy(held *coreauth.Auth, proxy *app.ProxyChoice) (string, error) {
+	if proxy != nil {
+		value, err := proxyValue(*proxy)
+		if err != nil || value != "" {
+			return value, err
+		}
+	} else if held != nil && strings.TrimSpace(held.ProxyURL) != "" {
+		return held.ProxyURL, nil
+	}
+
+	if cfg := g.CurrentConfig(); cfg != nil {
+		return cfg.ProxyURL, nil
+	}
+
+	return "", nil
+}
+
+// discoveryClient is the client DiscoverModels asks endpoint with, through proxyURL.
+func (g *Gateway) discoveryClient(endpoint *url.URL, proxyURL string) (*http.Client, error) {
 	transport, mode, err := proxyutil.BuildHTTPTransport(proxyURL)
 	if err != nil {
-		return nil, fmt.Errorf("%w: the proxy-url is not usable", app.ErrProviderUnreachable)
+		return nil, fmt.Errorf("%w: the proxy is not usable", app.ErrProviderUnreachable)
 	}
 
 	if transport == nil {

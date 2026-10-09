@@ -59,6 +59,10 @@ func (s *Service) CreateCompat(ctx context.Context, actor identity.User, provide
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
+	if provider.Proxy, err = validProxy(provider.Proxy); err != nil {
+		return app.VendorAccount{}, err
+	}
+
 	provider.BaseURL, provider.Prefix, provider.Models = baseURL, prefix, models
 
 	account, err := s.accounts.AddCompatProvider(ctx, provider)
@@ -66,12 +70,16 @@ func (s *Service) CreateCompat(ctx context.Context, actor identity.User, provide
 		return app.VendorAccount{}, fmt.Errorf("app: add openai-compatible provider: %w", err)
 	}
 
+	// The mode is the request's choice, not the gateway's echo of it.
+	detail := compatAudit(account, provider.APIKey != "")
+	detail["proxy_mode"] = proxyMode(provider.Proxy)
+
 	if err := s.audit.Record(ctx, app.AuditEvent{
 		At:      s.clock.Now().UTC(),
 		ActorID: actor.ID,
 		Action:  "provider.compat_add",
 		Target:  "provider_account/" + account.ID,
-		Detail:  compatAudit(account, provider.APIKey != ""),
+		Detail:  detail,
 	}); err != nil {
 		return app.VendorAccount{}, s.withdraw(ctx, account, err)
 	}
@@ -96,6 +104,10 @@ func (s *Service) UpdateCompat(
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
+	if update.Proxy, err = validProxy(update.Proxy); err != nil {
+		return app.VendorAccount{}, err
+	}
+
 	update.BaseURL, update.Prefix, update.Models = baseURL, prefix, models
 
 	account, err := s.accounts.UpdateCompatProvider(ctx, id, update)
@@ -105,15 +117,24 @@ func (s *Service) UpdateCompat(
 
 	detail := compatAudit(account, account.Compat != nil && account.Compat.HasAPIKey)
 	detail["key_changed"] = update.APIKey != nil
+
+	detail["proxy_changed"] = update.Proxy != nil
+	if update.Proxy != nil {
+		detail["proxy_mode"] = proxyMode(update.Proxy)
+	}
+
 	s.record(ctx, actor, "provider.compat_update", "provider_account/"+account.ID, detail)
 
 	return s.withQuota(account), nil
 }
 
 // DiscoverCompat lists the models the vendor at baseURL serves, asked with
-// apiKey or, when that is empty, the stored key of provider accountID. Nothing
-// is saved.
-func (s *Service) DiscoverCompat(ctx context.Context, actor identity.User, baseURL, apiKey, accountID string) (CompatDiscovery, error) {
+// apiKey or, when that is empty, the stored key of provider accountID, and
+// sent through proxy, else the provider's own, else the global proxy-url.
+// Nothing is saved.
+func (s *Service) DiscoverCompat(
+	ctx context.Context, actor identity.User, baseURL, apiKey, accountID string, proxy *app.ProxyChoice,
+) (CompatDiscovery, error) {
 	if err := app.RequireAdmin(actor); err != nil {
 		return CompatDiscovery{}, err
 	}
@@ -123,7 +144,11 @@ func (s *Service) DiscoverCompat(ctx context.Context, actor identity.User, baseU
 		return CompatDiscovery{}, err
 	}
 
-	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID)
+	if proxy, err = validProxy(proxy); err != nil {
+		return CompatDiscovery{}, err
+	}
+
+	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID, proxy)
 	if err != nil {
 		return CompatDiscovery{}, fmt.Errorf("app: discover models: %w", err)
 	}
@@ -227,4 +252,27 @@ func compatAudit(account app.VendorAccount, hasKey bool) map[string]any {
 	}
 
 	return detail
+}
+
+// validProxy checks an optional proxy choice; nil stays nil.
+func validProxy(p *app.ProxyChoice) (*app.ProxyChoice, error) {
+	if p == nil {
+		return nil, nil //nolint:nilnil // nil is "not given", a valid answer.
+	}
+
+	valid, err := p.Validate()
+	if err != nil {
+		return nil, err
+	}
+
+	return &valid, nil
+}
+
+// proxyMode is the mode a choice sets, for an audit detail; nil is inherit.
+func proxyMode(p *app.ProxyChoice) string {
+	if p == nil {
+		return string(app.ProxyInherit)
+	}
+
+	return string(p.Mode)
 }

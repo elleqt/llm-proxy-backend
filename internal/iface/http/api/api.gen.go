@@ -9,6 +9,48 @@ import (
 	openapi_types "github.com/oapi-codegen/runtime/types"
 )
 
+// Defines values for AccountProxyMode.
+const (
+	AccountProxyModeCustom  AccountProxyMode = "custom"
+	AccountProxyModeDirect  AccountProxyMode = "direct"
+	AccountProxyModeInherit AccountProxyMode = "inherit"
+)
+
+// Valid indicates whether the value is a known member of the AccountProxyMode enum.
+func (e AccountProxyMode) Valid() bool {
+	switch e {
+	case AccountProxyModeCustom:
+		return true
+	case AccountProxyModeDirect:
+		return true
+	case AccountProxyModeInherit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for AccountProxyInputMode.
+const (
+	AccountProxyInputModeCustom  AccountProxyInputMode = "custom"
+	AccountProxyInputModeDirect  AccountProxyInputMode = "direct"
+	AccountProxyInputModeInherit AccountProxyInputMode = "inherit"
+)
+
+// Valid indicates whether the value is a known member of the AccountProxyInputMode enum.
+func (e AccountProxyInputMode) Valid() bool {
+	switch e {
+	case AccountProxyInputModeCustom:
+		return true
+	case AccountProxyInputModeDirect:
+		return true
+	case AccountProxyInputModeInherit:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for AdminUserSignIn.
 const (
 	AdminUserSignInOidc     AdminUserSignIn = "oidc"
@@ -207,6 +249,33 @@ func (e UsageBucket) Valid() bool {
 	}
 }
 
+// AccountProxy How the account's vendor traffic leaves the gateway. `inherit` uses the global `proxyURL` setting (direct when it is empty), `direct` bypasses it, `custom` uses the account's own proxy.
+type AccountProxy struct {
+	// HasCredentials `custom` only: whether the stored URL carries a user name or password.
+	HasCredentials *bool            `json:"hasCredentials,omitempty"`
+	Mode           AccountProxyMode `json:"mode"`
+
+	// Url `custom` only: the proxy's scheme, host and port. Userinfo, path and query are never returned.
+	Url *string `json:"url,omitempty"`
+}
+
+// AccountProxyMode defines model for AccountProxy.Mode.
+type AccountProxyMode string
+
+// AccountProxyInput defines model for AccountProxyInput.
+type AccountProxyInput struct {
+	Mode AccountProxyInputMode `json:"mode"`
+
+	// Url Required for `custom` and refused otherwise: the whole proxy URL, credentials included (`http`, `https`, `socks5` or `socks5h`). Replaces the stored one.
+	//
+	//
+	// Examples: http://user:password@proxy.example.com:3128
+	Url *string `json:"url,omitempty"`
+}
+
+// AccountProxyInputMode defines model for AccountProxyInput.Mode.
+type AccountProxyInputMode string
+
 // Activity defines model for Activity.
 type Activity struct {
 	Audit []struct {
@@ -292,10 +361,13 @@ type Catalog struct {
 
 // CompatDiscoverRequest defines model for CompatDiscoverRequest.
 type CompatDiscoverRequest struct {
-	// AccountId An existing provider whose stored key is used when `apiKey` is absent.
+	// AccountId An existing provider whose stored key is used when `apiKey` is absent, and whose proxy is used when `proxy` is absent.
 	AccountId *string `json:"accountId,omitempty"`
 	ApiKey    *string `json:"apiKey,omitempty"`
 	BaseURL   string  `json:"baseURL"`
+
+	// Proxy The proxy to ask through. Absent, the proxy of `accountId`, else the global one.
+	Proxy *AccountProxyInput `json:"proxy,omitempty"`
 }
 
 // CompatDiscoverResult defines model for CompatDiscoverResult.
@@ -339,6 +411,9 @@ type CompatProviderRequest struct {
 
 	// Prefix Optional model prefix: clients request `prefix/model`.
 	Prefix *string `json:"prefix,omitempty"`
+
+	// Proxy Absent is `inherit`.
+	Proxy *AccountProxyInput `json:"proxy,omitempty"`
 }
 
 // CompatProviderUpdate defines model for CompatProviderUpdate.
@@ -351,6 +426,9 @@ type CompatProviderUpdate struct {
 	ClearApiKey *bool         `json:"clearApiKey,omitempty"`
 	Models      []CompatModel `json:"models"`
 	Prefix      *string       `json:"prefix,omitempty"`
+
+	// Proxy Absent keeps the stored proxy.
+	Proxy *AccountProxyInput `json:"proxy,omitempty"`
 }
 
 // Config defines model for Config.
@@ -605,6 +683,9 @@ type ProviderAccount struct {
 	// Provider Policy-facing provider name.
 	Provider string `json:"provider"`
 
+	// Proxy How the account's vendor traffic leaves the gateway. `inherit` uses the global `proxyURL` setting (direct when it is empty), `direct` bypasses it, `custom` uses the account's own proxy.
+	Proxy AccountProxy `json:"proxy"`
+
 	// Quota Direct vendor signals. No capacity estimate.
 	Quota []struct {
 		ObservedAt *time.Time `json:"observedAt,omitempty"`
@@ -839,7 +920,8 @@ type ReplacePricesJSONBody = []ModelPrice
 
 // UpdateProviderAccountJSONBody defines parameters for UpdateProviderAccount.
 type UpdateProviderAccountJSONBody struct {
-	Disabled bool `json:"disabled"`
+	Disabled *bool              `json:"disabled,omitempty"`
+	Proxy    *AccountProxyInput `json:"proxy,omitempty"`
 }
 
 // GetUserActivityParams defines parameters for GetUserActivity.
