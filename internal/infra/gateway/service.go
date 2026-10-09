@@ -791,7 +791,8 @@ func (g *Gateway) Accounts() []app.VendorAccount {
 // VendorAccount is auth as the admin API shows it, for Accounts and
 // gateway/login. Email is the one metadata field read; tokens, attributes and
 // storage never leave the gateway. An OpenAI-compatible provider goes by its
-// own name and carries its definition, never its key.
+// own name and carries its definition, never its key. The proxy is shown
+// without its credentials (accountProxy).
 func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 	account := app.VendorAccount{
 		ID:              auth.ID,
@@ -800,6 +801,7 @@ func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 		Status:          string(auth.Status),
 		Disabled:        auth.Disabled,
 		LastRefreshedAt: lastRefreshed(auth),
+		Proxy:           accountProxy(auth.ProxyURL),
 	}
 	if email, ok := auth.Metadata["email"].(string); ok {
 		account.Email = email

@@ -123,7 +123,7 @@ func (s *Service) DiscoverCompat(ctx context.Context, actor identity.User, baseU
 		return CompatDiscovery{}, err
 	}
 
-	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID)
+	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID, nil)
 	if err != nil {
 		return CompatDiscovery{}, fmt.Errorf("app: discover models: %w", err)
 	}

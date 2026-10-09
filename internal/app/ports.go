@@ -400,6 +400,8 @@ type CompatProvider struct {
 	APIKey  string
 	Prefix  string
 	Models  []CompatModel
+	// Proxy is the provider's proxy; nil is ProxyInherit.
+	Proxy *ProxyChoice
 }
 
 // CompatProviderUpdate replaces an OpenAI-compatible provider's definition. A
@@ -409,6 +411,8 @@ type CompatProviderUpdate struct {
 	APIKey  *string
 	Prefix  string
 	Models  []CompatModel
+	// Proxy replaces the provider's proxy; nil keeps it.
+	Proxy *ProxyChoice
 }
 
 // CompatDetails is an OpenAI-compatible provider as the admin API shows it:
@@ -455,6 +459,10 @@ type ProxyChoice struct {
 type VendorAccounts interface {
 	Accounts() []VendorAccount
 	SetAccountDisabled(ctx context.Context, id string, disabled bool) error
+	// SetAccountProxy sets how account id's traffic leaves the gateway, at
+	// once and across a restart: ErrNotFound for an id it does not hold, an
+	// *InvalidInputError for a choice it cannot apply.
+	SetAccountProxy(ctx context.Context, id string, p ProxyChoice) error
 	RemoveAccount(ctx context.Context, id string) error
 	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
 	// at once: ErrConflict when its name is taken, an *InvalidInputError on
@@ -465,8 +473,10 @@ type VendorAccounts interface {
 	UpdateCompatProvider(ctx context.Context, id string, u CompatProviderUpdate) (VendorAccount, error)
 	// DiscoverModels lists the model ids the vendor at baseURL serves, asked with
 	// apiKey or, when that is empty and accountID names an OpenAI-compatible
-	// provider, with its stored key (ErrProviderUnreachable, ErrProviderAuthFailed).
-	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string) ([]string, error)
+	// provider with a stored key, with that key (ErrProviderUnreachable,
+	// ErrProviderAuthFailed). It goes out through proxy, else accountID's own
+	// proxy, else the global proxy-url.
+	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *ProxyChoice) ([]string, error)
 }
 
 // VendorLogin is a pending vendor sign-in: the administrator opens AuthURL in

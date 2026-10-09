@@ -124,7 +124,7 @@ func TestUpdateCompatPassesTheKeyChangeThrough(t *testing.T) {
 func TestDiscoverCompatReportsModelsOtherProvidersServe(t *testing.T) {
 	fixture := newProvidersFixture(t)
 
-	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID).
+	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID, (*app.ProxyChoice)(nil)).
 		Return([]string{"m", "shared", "fresh"}, nil)
 	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{compatAccount})
 	fixture.catalog.EXPECT().Models().Return(map[string][]string{
@@ -146,7 +146,7 @@ func TestDiscoverCompatPassesTheRefusalThrough(t *testing.T) {
 	svc := providers.New(accounts, mocks.NewVendorLogins(t), mocks.NewModelCatalog(t), mocks.NewVendorQuota(t),
 		mocks.NewAccountMetrics(t), mocks.NewAuditSink(t), systemClock{}, discardLogger{})
 
-	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
+	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
 
 	_, err := svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "")
 	require.ErrorIs(t, err, app.ErrProviderAuthFailed)

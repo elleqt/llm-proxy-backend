@@ -101,7 +101,7 @@ func TestDiscoverCompatModels(t *testing.T) {
 
 	t.Run("listed", func(t *testing.T) {
 		env := newEnv(t)
-		env.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", compatWireKey, "").
+		env.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", compatWireKey, "", (*app.ProxyChoice)(nil)).
 			Return([]string{"m", "shared"}, nil)
 		env.accounts.EXPECT().Accounts().Return(nil)
 		env.catalog.EXPECT().Models().Return(map[string][]string{"other": {"shared"}})
@@ -124,7 +124,7 @@ func TestDiscoverCompatModels(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			env := newEnv(t)
-			env.accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, tc.err)
+			env.accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, tc.err)
 			rec := env.do(http.MethodPost, "/api/admin/providers/compat/discover", body, withCookie(env.signedIn(admin())))
 			apiError(t, rec, tc.status, tc.code)
 			require.NotContains(t, rec.Body.String(), compatWireKey)
