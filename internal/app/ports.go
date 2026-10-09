@@ -372,8 +372,10 @@ type VendorAccount struct {
 	Label    string
 	Email    string
 	// Status is the gateway's lifecycle status: active, error, disabled, ...
-	Status          string
-	Disabled        bool
+	Status   string
+	Disabled bool
+	// Proxy is how the account's traffic leaves the gateway.
+	Proxy           AccountProxy
 	LastError       string
 	LastRefreshedAt time.Time // zero when never refreshed
 	// Quota is filled by providers.Service from the QuotaReader.
@@ -417,6 +419,35 @@ type CompatDetails struct {
 	Prefix    string
 	HasAPIKey bool
 	Models    []CompatModel
+}
+
+// ProxyMode is how a vendor account's traffic leaves the gateway.
+type ProxyMode string
+
+const (
+	// ProxyInherit sends it through the global proxy-url, or directly when
+	// none is set.
+	ProxyInherit ProxyMode = "inherit"
+	// ProxyDirect sends it directly, whatever the global proxy-url says.
+	ProxyDirect ProxyMode = "direct"
+	// ProxyCustom sends it through the account's own proxy.
+	ProxyCustom ProxyMode = "custom"
+)
+
+// AccountProxy is an account's proxy as the admin API shows it. A custom URL
+// is reduced to scheme and host: its userinfo, which may hold the proxy's
+// password, is reported only as HasCredentials.
+type AccountProxy struct {
+	Mode           ProxyMode
+	URL            string
+	HasCredentials bool
+}
+
+// ProxyChoice is a proxy the administrator sets. URL is the whole proxy URL,
+// credentials included, for ProxyCustom only.
+type ProxyChoice struct {
+	Mode ProxyMode
+	URL  string
 }
 
 // VendorAccounts is the gateway's account surface. Account changes go through
