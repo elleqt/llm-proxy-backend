@@ -48,6 +48,10 @@ const (
 	compatMetaPrefix  = "prefix"
 	compatMetaModels  = "models"
 	compatMetaLabel   = "label"
+
+	// compatModelReasoningLevels is the key of a model's own reasoning levels
+	// in a models entry; absent for a model that follows the default set.
+	compatModelReasoningLevels = "reasoning_levels"
 )
 
 // Attributes upstream routes an openai-compatibility auth by
@@ -122,10 +126,14 @@ func applyCompatAttributes(auth *coreauth.Auth) {
 // compatMetadata is the credential of the OpenAI-compatible provider p.
 func compatMetadata(provider app.CompatProvider) map[string]any {
 	models := make([]any, 0, len(provider.Models))
-	for _, m := range provider.Models {
-		entry := map[string]any{"name": m.Name}
-		if m.Alias != "" {
-			entry["alias"] = m.Alias
+	for _, model := range provider.Models {
+		entry := map[string]any{"name": model.Name}
+		if model.Alias != "" {
+			entry["alias"] = model.Alias
+		}
+
+		if model.ReasoningLevels != nil {
+			entry[compatModelReasoningLevels] = slices.Clone(model.ReasoningLevels)
 		}
 
 		models = append(models, entry)
@@ -150,7 +158,9 @@ func compatMetadata(provider app.CompatProvider) map[string]any {
 }
 
 // compatModels reads the models an OpenAI-compatible provider's metadata
-// lists. The metadata went through JSON, so the list is []any of objects.
+// lists. The metadata went through JSON, so the list is []any of objects and
+// a model's reasoning levels are []any of strings; a model without its own
+// list has nil.
 func compatModels(meta map[string]any) []app.CompatModel {
 	raw, _ := meta[compatMetaModels].([]any)
 
@@ -165,11 +175,33 @@ func compatModels(meta map[string]any) []app.CompatModel {
 		alias, _ := entry["alias"].(string)
 
 		if name != "" {
-			out = append(out, app.CompatModel{Name: name, Alias: alias})
+			out = append(out, app.CompatModel{Name: name, Alias: alias, ReasoningLevels: reasoningLevels(entry[compatModelReasoningLevels])})
 		}
 	}
 
 	return out
+}
+
+// reasoningLevels reads a model's stored reasoning levels: a []string as
+// compatMetadata wrote it, or a []any of strings after JSON. Anything else,
+// absent included, is nil.
+func reasoningLevels(stored any) []string {
+	switch levels := stored.(type) {
+	case []string:
+		return slices.Clone(levels)
+	case []any:
+		out := make([]string, 0, len(levels))
+
+		for _, level := range levels {
+			if s, ok := level.(string); ok {
+				out = append(out, s)
+			}
+		}
+
+		return out
+	default:
+		return nil
+	}
 }
 
 // compatDetails is the admin view of an OpenAI-compatible provider's auth.
@@ -200,8 +232,40 @@ func compatEntry(auth *coreauth.Auth) cliproxyconfig.OpenAICompatibility {
 	}
 
 	for _, m := range models {
-		entry.Models = append(entry.Models, cliproxyconfig.OpenAICompatibilityModel{Name: m.Name, Alias: m.Alias})
+		entry.Models = append(entry.Models, compatModelEntry(m))
 	}
+
+	return entry
+}
+
+// compatModelEntry is m as upstream's configuration entry, with its reasoning
+// levels — the model's own list, else the default set — declared. Without a
+// declaration upstream registers a compat model as low/medium/high
+// (sdk/cliproxy/service_models.go) and rewrites every other reasoning_effort
+// to the nearest of those (internal/thinking/validate.go): "none" reached
+// Ollama as "low", "max" as "high". Upstream's ThinkingSupport type is
+// internal, so the tagged thinking field is decoded rather than the type
+// named, and each call gets a fresh value.
+func compatModelEntry(m app.CompatModel) cliproxyconfig.OpenAICompatibilityModel {
+	entry := cliproxyconfig.OpenAICompatibilityModel{Name: m.Name, Alias: m.Alias}
+
+	levels := m.ReasoningLevels
+	if levels == nil {
+		levels = app.DefaultReasoningLevels
+	}
+
+	var declared struct {
+		Thinking struct {
+			Levels []string `json:"levels"`
+		} `json:"thinking"`
+	}
+
+	declared.Thinking.Levels = levels
+
+	// Marshalling a struct of strings, and decoding a []string into the
+	// tagged []string field, cannot fail.
+	raw, _ := json.Marshal(declared) //nolint:errchkjson // a struct of strings cannot fail to encode
+	_ = json.Unmarshal(raw, &entry)
 
 	return entry
 }

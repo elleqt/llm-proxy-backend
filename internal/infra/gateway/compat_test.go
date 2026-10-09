@@ -1,7 +1,9 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -251,6 +253,122 @@ func TestCompatProvidersPoolAModel(t *testing.T) {
 
 	assert.NotEmpty(t, va.Requests(), "the pooled model never reached the first provider")
 	assert.NotEmpty(t, vb.Requests(), "the pooled model never reached the second provider")
+}
+
+// sentEffort sends a chat completion for model with reasoning_effort effort
+// ("" leaves the key out), requires it served, and returns the body vendor
+// last received.
+func sentEffort(t *testing.T, srv *running, vendor *faketest.Vendor, model, effort string) map[string]any {
+	t.Helper()
+
+	payload := map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
+	if effort != "" {
+		payload["reasoning_effort"] = effort
+	}
+
+	raw, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, srv.baseURL+"/v1/chat/completions", bytes.NewReader(raw))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+wireSecret)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "reasoning_effort %q", effort)
+
+	reqs := vendor.Requests()
+	require.NotEmpty(t, reqs)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(reqs[len(reqs)-1].Body, &body))
+
+	return body
+}
+
+// compatAccountModels is the models Accounts() reports for the account id.
+func compatAccountModels(t *testing.T, g *Gateway, id string) []app.CompatModel {
+	t.Helper()
+
+	for _, account := range g.Accounts() {
+		if account.ID == id {
+			require.NotNil(t, account.Compat)
+
+			return account.Compat.Models
+		}
+	}
+
+	require.Failf(t, "account not listed", "%s", id)
+
+	return nil
+}
+
+// TestCompatProviderPassesReasoningEffort: a model without its own list
+// passes every level of the default set unchanged, sends "auto" as "medium",
+// and adds nothing to a request without reasoning_effort.
+func TestCompatProviderPassesReasoningEffort(t *testing.T) {
+	vendor := compatVendor()
+	vendorSrv := faketest.Start(t, vendor)
+	name, model := compatName(t, "effort"), compatModel(t, "m")
+
+	srv := startCompat(t, pgtest.NewTestPool(t))
+
+	_, err := srv.gateway.AddCompatProvider(t.Context(), app.CompatProvider{
+		Name: name, BaseURL: vendorSrv.URL, Models: []app.CompatModel{{Name: model}},
+	})
+	require.NoError(t, err)
+	awaitProviders(t, srv.gateway.catalog, model, []string{name})
+
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		assert.Equal(t, effort, sentEffort(t, srv, vendor, model, effort)["reasoning_effort"], "sent %q", effort)
+	}
+
+	assert.Equal(t, "medium", sentEffort(t, srv, vendor, model, "auto")["reasoning_effort"], "sent auto")
+	assert.NotContains(t, sentEffort(t, srv, vendor, model, ""), "reasoning_effort", "added to a request without it")
+}
+
+// TestCompatProviderOwnReasoningLevels: a model's own list is passed
+// unchanged, a level off it goes out as the nearest listed one, and the list
+// survives a restart; a model without one reports none.
+func TestCompatProviderOwnReasoningLevels(t *testing.T) {
+	pool := pgtest.NewTestPool(t)
+	vendor := compatVendor()
+	vendorSrv := faketest.Start(t, vendor)
+	name, model, plain := compatName(t, "own"), compatModel(t, "m"), compatModel(t, "plain")
+	own := []string{"none", "high", "ultra"}
+
+	first := startCompat(t, pool)
+
+	account, err := first.gateway.AddCompatProvider(t.Context(), app.CompatProvider{
+		Name: name, BaseURL: vendorSrv.URL,
+		Models: []app.CompatModel{{Name: model, ReasoningLevels: own}, {Name: plain}},
+	})
+	require.NoError(t, err)
+
+	want := []app.CompatModel{{Name: model, ReasoningLevels: own}, {Name: plain}}
+	require.Equal(t, want, account.Compat.Models)
+	require.Equal(t, want, compatAccountModels(t, first.gateway, account.ID))
+
+	check := func(srv *running) {
+		t.Helper()
+		awaitProviders(t, srv.gateway.catalog, model, []string{name})
+
+		for _, effort := range own {
+			assert.Equal(t, effort, sentEffort(t, srv, vendor, model, effort)["reasoning_effort"], "sent %q", effort)
+		}
+
+		assert.Equal(t, "high", sentEffort(t, srv, vendor, model, "max")["reasoning_effort"], "sent max")
+	}
+
+	check(first)
+	require.ErrorIs(t, first.stop(), context.Canceled, "stop: Run must return context.Canceled")
+
+	second := startCompat(t, pool)
+	require.Equal(t, want, compatAccountModels(t, second.gateway, account.ID), "after a restart")
+	check(second)
 }
 
 // TestCompatProviderNames: a name a built-in provider goes by is refused as
