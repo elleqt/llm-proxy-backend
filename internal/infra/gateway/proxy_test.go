@@ -203,6 +203,61 @@ func TestSetAccountProxyRefusals(t *testing.T) {
 		var invalid *app.InvalidInputError
 		require.ErrorAs(t, srv.gateway.SetAccountProxy(t.Context(), "no-such.json", bad), &invalid, "%+v", bad)
 	}
+
+	zeroPort := app.ProxyChoice{Mode: app.ProxyCustom, URL: "http://proxy.example.com:0"}
+
+	var invalid *app.InvalidInputError
+	require.ErrorAs(t, srv.gateway.SetAccountProxy(t.Context(), "no-such.json", zeroPort), &invalid, "port 0")
+	require.Equal(t, app.FieldProxyURL, invalid.Field, "port 0")
+}
+
+// TestReSignInKeepsTheAccountsProxy: signing an account in again (a fresh
+// login carries no proxy) keeps the proxy the account had; a login that names
+// its own proxy wins.
+func TestReSignInKeepsTheAccountsProxy(t *testing.T) {
+	const proxy = "http://proxy.example.com:3128"
+
+	srv, manager := startProduction(t)
+	ctx := t.Context()
+
+	grant := claudeGrant(t)
+	_, err := srv.gateway.AddAccount(ctx, grant)
+	require.NoError(t, err, "AddAccount")
+	require.NoError(t, srv.gateway.SetAccountProxy(ctx, grant.ID, app.ProxyChoice{Mode: app.ProxyCustom, URL: proxy}))
+
+	again := claudeGrant(t)
+	again.Metadata["access_token"] = "fresh-claude-access-token"
+	_, err = srv.gateway.AddAccount(ctx, again)
+	require.NoError(t, err, "re-sign-in")
+
+	held, ok := manager.GetByID(grant.ID)
+	require.True(t, ok, "the re-signed-in account is gone")
+	require.Equal(t, proxy, held.ProxyURL, "a re-sign-in dropped the account's proxy")
+	require.Equal(t, "fresh-claude-access-token", held.Metadata["access_token"], "the re-sign-in was not applied")
+
+	found := false
+
+	for _, account := range srv.gateway.Accounts() {
+		if account.ID == grant.ID {
+			found = true
+
+			require.Equal(t, app.ProxyCustom, account.Proxy.Mode)
+		}
+	}
+
+	require.True(t, found, "Accounts() lacks the account")
+
+	const own = "http://other.example.com:8080"
+
+	named := claudeGrant(t)
+	setProxy(named, own)
+
+	_, err = srv.gateway.AddAccount(ctx, named)
+	require.NoError(t, err, "re-sign-in naming its own proxy")
+
+	held, ok = manager.GetByID(grant.ID)
+	require.True(t, ok)
+	require.Equal(t, own, held.ProxyURL, "a re-sign-in naming its own proxy must keep it")
 }
 
 // TestAccountProxyView: the admin view of each stored form.

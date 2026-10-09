@@ -997,6 +997,19 @@ func (g *Gateway) addLocked(ctx context.Context, auth *coreauth.Auth) (*coreauth
 		key = auth.ID
 	}
 
+	// A re-sign-in (say after the token expired) brings a fresh login with no
+	// proxy; saving it as is would silently move the account to another
+	// egress. Keep the held account's proxy unless the new auth names its own.
+	if strings.TrimSpace(auth.ProxyURL) == "" {
+		for _, held := range g.coreAuth.List() {
+			if credentialKey(held) == key && held.ProxyURL != "" {
+				setProxy(auth, held.ProxyURL)
+
+				break
+			}
+		}
+	}
+
 	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {
 		return nil, fmt.Errorf("gateway: account %q was not saved: %w", auth.ID, err)
 	}

@@ -35,7 +35,7 @@ func proxyValue(choice app.ProxyChoice) (string, error) {
 		return proxyDirect, nil
 	case app.ProxyCustom:
 		setting, err := proxyutil.Parse(choice.URL)
-		if err != nil || setting.Mode != proxyutil.ModeProxy {
+		if err != nil || setting.Mode != proxyutil.ModeProxy || !proxyutil.ValidRequestProxy(choice.URL) {
 			return "", &app.InvalidInputError{Field: app.FieldProxyURL}
 		}
 
