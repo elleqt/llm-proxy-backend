@@ -184,24 +184,29 @@ func compatModels(meta map[string]any) []app.CompatModel {
 
 // reasoningLevels reads a model's stored reasoning levels: a []string as
 // compatMetadata wrote it, or a []any of strings after JSON. Anything else,
-// absent included, is nil.
+// absent included, is nil, and so is a list with no string left: corrupt
+// metadata takes the default set rather than declaring no levels at all.
 func reasoningLevels(stored any) []string {
+	var out []string
+
 	switch levels := stored.(type) {
 	case []string:
-		return slices.Clone(levels)
+		out = slices.Clone(levels)
 	case []any:
-		out := make([]string, 0, len(levels))
+		out = make([]string, 0, len(levels))
 
 		for _, level := range levels {
 			if s, ok := level.(string); ok {
 				out = append(out, s)
 			}
 		}
+	}
 
-		return out
-	default:
+	if len(out) == 0 {
 		return nil
 	}
+
+	return out
 }
 
 // compatDetails is the admin view of an OpenAI-compatible provider's auth.

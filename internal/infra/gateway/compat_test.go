@@ -557,3 +557,12 @@ func TestDiscoverModelsWithTheStoredKey(t *testing.T) {
 	require.Equal(t, "apiKey", invalid.Field)
 	require.False(t, elsewhereAsked, "another host was asked with the stored key")
 }
+
+// TestReasoningLevelsFallBackOnCorruptMetadata: a stored list with no string
+// left takes the default set rather than declaring no levels at all.
+func TestReasoningLevelsFallBackOnCorruptMetadata(t *testing.T) {
+	require.Nil(t, reasoningLevels([]any{1, true}))
+	require.Nil(t, reasoningLevels([]any{}))
+	require.Nil(t, reasoningLevels([]string{}))
+	require.Equal(t, []string{"low"}, reasoningLevels([]any{"low", 2}))
+}
