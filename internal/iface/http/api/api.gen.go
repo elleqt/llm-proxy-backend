@@ -359,6 +359,12 @@ type Catalog struct {
 	} `json:"providers"`
 }
 
+// CompatDefaults defines model for CompatDefaults.
+type CompatDefaults struct {
+	// ReasoningLevels The reasoning levels a model without its own list passes unchanged.
+	ReasoningLevels []string `json:"reasoningLevels"`
+}
+
 // CompatDiscoverRequest defines model for CompatDiscoverRequest.
 type CompatDiscoverRequest struct {
 	// AccountId An existing provider whose stored key is used when `apiKey` is absent, and whose proxy is used when `proxy` is absent.
@@ -384,6 +390,9 @@ type CompatModel struct {
 
 	// Name The model as the vendor names it.
 	Name string `json:"name"`
+
+	// ReasoningLevels The `reasoning_effort` values passed to the vendor unchanged. A standard level off the list becomes the nearest listed one, so the vendor does not reject it; an unknown value off the list is refused. Known levels are kept in canonical order. Absent: the default set (`CompatDefaults`). Responses carry it only for a model's own list.
+	ReasoningLevels *[]string `json:"reasoningLevels,omitempty"`
 }
 
 // CompatProviderDetails defines model for CompatProviderDetails.

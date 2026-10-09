@@ -2,6 +2,7 @@ package http
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
@@ -157,4 +158,75 @@ func TestDiscoverCompatModels(t *testing.T) {
 			require.NotContains(t, rec.Body.String(), compatWireKey)
 		})
 	}
+}
+
+// TestCompatReasoningLevelsOnTheWire: a model's own list reaches the gateway on
+// create and update, an absent one stays nil, and the answer carries the list.
+func TestCompatReasoningLevelsOnTheWire(t *testing.T) {
+	own := app.VendorAccount{
+		ID: compatWireAccount.ID, Provider: "acme", Status: "active", Label: "acme",
+		Compat: &app.CompatDetails{
+			Name: "acme", BaseURL: "https://api.example.com/v1",
+			Models: []app.CompatModel{{Name: "m", ReasoningLevels: []string{"low", "max"}}, {Name: "n"}},
+		},
+	}
+	models := []app.CompatModel{{Name: "m", ReasoningLevels: []string{"low", "max"}}, {Name: "n"}}
+	modelsJSON := `"models":[{"name":"m","reasoningLevels":["low","max"]},{"name":"n"}]`
+
+	t.Run("create", func(t *testing.T) {
+		env := newEnv(t)
+		env.accounts.EXPECT().AddCompatProvider(mock.Anything, app.CompatProvider{
+			Name: "acme", BaseURL: "https://api.example.com/v1", Models: models,
+		}).Return(own, nil)
+
+		rec := env.do(http.MethodPost, "/api/admin/providers/compat",
+			`{"name":"acme","baseURL":"https://api.example.com/v1",`+modelsJSON+`}`, withCookie(env.signedIn(admin())))
+
+		var got api.ProviderAccount
+		decodeBody(t, rec, http.StatusCreated, &got)
+		require.NotNil(t, got.Compat)
+		require.Len(t, got.Compat.Models, 2)
+		require.NotNil(t, got.Compat.Models[0].ReasoningLevels)
+		require.Equal(t, []string{"low", "max"}, *got.Compat.Models[0].ReasoningLevels)
+		require.Nil(t, got.Compat.Models[1].ReasoningLevels, "the default set is not echoed")
+	})
+
+	t.Run("update", func(t *testing.T) {
+		env := newEnv(t)
+		env.quota.EXPECT().QuotaSignals().Return(nil)
+		env.accounts.EXPECT().UpdateCompatProvider(mock.Anything, own.ID, mock.MatchedBy(func(update app.CompatProviderUpdate) bool {
+			return len(update.Models) == 2 &&
+				slices.Equal(update.Models[0].ReasoningLevels, []string{"low", "max"}) && update.Models[1].ReasoningLevels == nil
+		})).Return(own, nil)
+
+		rec := env.do(http.MethodPut, "/api/admin/providers/compat/"+own.ID,
+			`{"baseURL":"https://api.example.com/v1",`+modelsJSON+`}`, withCookie(env.signedIn(admin())))
+		require.Equal(t, http.StatusOK, rec.Code, "body %s", rec.Body)
+	})
+
+	t.Run("refused list", func(t *testing.T) {
+		env := newEnv(t)
+		rec := env.do(http.MethodPost, "/api/admin/providers/compat",
+			`{"name":"acme","baseURL":"https://api.example.com/v1","models":[{"name":"m","reasoningLevels":["low","low"]}]}`,
+			withCookie(env.signedIn(admin())))
+		apiError(t, rec, http.StatusUnprocessableEntity, codeInvalidInput)
+		require.Contains(t, rec.Body.String(), `"models"`)
+	})
+}
+
+func TestGetCompatDefaults(t *testing.T) {
+	t.Run("admin", func(t *testing.T) {
+		env := newEnv(t)
+
+		var got api.CompatDefaults
+		decodeBody(t, env.do(http.MethodGet, "/api/admin/providers/compat/defaults", "", withCookie(env.signedIn(admin()))),
+			http.StatusOK, &got)
+		require.Equal(t, app.DefaultReasoningLevels, got.ReasoningLevels)
+	})
+
+	t.Run("user", func(t *testing.T) {
+		env := newEnv(t)
+		apiError(t, env.do(http.MethodGet, "/api/admin/providers/compat/defaults", "",
+			withCookie(env.signedIn(person("someone@example.com")))), http.StatusNotFound, codeNotFound)
+	})
 }

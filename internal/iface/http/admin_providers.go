@@ -33,6 +33,7 @@ func (rt *router) registerAdminProviders(routes map[string]http.HandlerFunc) {
 	routes["POST /api/admin/providers/compat"] = rt.createCompatProvider
 	routes["PUT /api/admin/providers/compat/{accountId}"] = rt.updateCompatProvider
 	routes["POST /api/admin/providers/compat/discover"] = rt.discoverCompatModels
+	routes["GET /api/admin/providers/compat/defaults"] = rt.getCompatDefaults
 	routes["PATCH /api/admin/providers/{accountId}"] = rt.updateProviderAccount
 	routes["DELETE /api/admin/providers/{accountId}"] = rt.removeProviderAccount
 }
@@ -111,10 +112,30 @@ func (rt *router) discoverCompatModels(rw http.ResponseWriter, req *http.Request
 	writeJSON(rw, http.StatusOK, api.CompatDiscoverResult{Models: found.Models, Conflicts: found.Conflicts})
 }
 
+// getCompatDefaults answers the reasoning levels a model without its own list passes.
+func (rt *router) getCompatDefaults(rw http.ResponseWriter, req *http.Request) {
+	actor, _ := callerFrom(req.Context())
+
+	levels, err := rt.Providers.CompatDefaults(actor.user)
+	if err != nil {
+		rt.adminFailure(rw, req, err)
+
+		return
+	}
+
+	writeJSON(rw, http.StatusOK, api.CompatDefaults{ReasoningLevels: levels})
+}
+
+// compatModelsIn keeps an absent reasoningLevels nil: the model takes the default set.
 func compatModelsIn(in []api.CompatModel) []app.CompatModel {
 	out := make([]app.CompatModel, 0, len(in))
 	for _, m := range in {
-		out = append(out, app.CompatModel{Name: m.Name, Alias: deref(m.Alias)})
+		model := app.CompatModel{Name: m.Name, Alias: deref(m.Alias)}
+		if m.ReasoningLevels != nil {
+			model.ReasoningLevels = *m.ReasoningLevels
+		}
+
+		out = append(out, model)
 	}
 
 	return out
@@ -276,7 +297,12 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 	if compat := account.Compat; compat != nil {
 		models := make([]api.CompatModel, 0, len(compat.Models))
 		for _, m := range compat.Models {
-			models = append(models, api.CompatModel{Name: m.Name, Alias: nonEmpty(m.Alias)})
+			model := api.CompatModel{Name: m.Name, Alias: nonEmpty(m.Alias)}
+			if m.ReasoningLevels != nil { // only a model's own list
+				model.ReasoningLevels = &m.ReasoningLevels
+			}
+
+			models = append(models, model)
 		}
 
 		out.Compat = &api.CompatProviderDetails{

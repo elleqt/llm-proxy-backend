@@ -710,6 +710,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/admin/providers/compat/defaults:
+    get:
+      tags: [admin-providers]
+      operationId: getCompatDefaults
+      summary: The defaults an OpenAI-compatible provider's form starts from.
+      responses:
+        "200":
+          description: The default set of reasoning levels.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CompatDefaults" }
+
   /api/admin/providers/compat/discover:
     post:
       tags: [admin-providers]
@@ -1299,6 +1311,25 @@ components:
       properties:
         name: { type: string, description: The model as the vendor names it. }
         alias: { type: string, description: "The name clients request it by; absent serves it as `name`." }
+        reasoningLevels:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items: { type: string, pattern: "^[a-z][a-z0-9_-]{0,31}$" }
+          description: >
+            The `reasoning_effort` values passed to the vendor unchanged. A standard level off the
+            list becomes the nearest listed one, so the vendor does not reject it; an unknown value
+            off the list is refused. Known levels are kept in canonical order. Absent: the default
+            set (`CompatDefaults`). Responses carry it only for a model's own list.
+
+    CompatDefaults:
+      type: object
+      required: [reasoningLevels]
+      properties:
+        reasoningLevels:
+          type: array
+          items: { type: string }
+          description: The reasoning levels a model without its own list passes unchanged.
 
     CompatProviderDetails:
       type: object

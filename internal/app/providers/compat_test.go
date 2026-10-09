@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 	"github.com/elleqt/llm-proxy-backend/internal/app/mocks"
 	"github.com/elleqt/llm-proxy-backend/internal/app/providers"
+	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -273,4 +275,98 @@ func TestDiscoverCompatPassesTheProxyThrough(t *testing.T) {
 		&app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + compatProxySecret + " "})
 	require.NoError(t, err)
 	require.Equal(t, []string{"m"}, got.Models)
+}
+
+// TestCreateCompatNormalisesReasoningLevels: an own list reaches the gateway
+// trimmed, lower-cased and with known levels first in canonical order, and a
+// model without one still has none, so it follows the default set.
+func TestCreateCompatNormalisesReasoningLevels(t *testing.T) {
+	longest := "a" + strings.Repeat("b", 31)
+
+	for name, tc := range map[string]struct {
+		in, want []string
+	}{
+		"own list":         {[]string{" None ", "HIGH", "ultra_2", "x-y"}, []string{"none", "high", "ultra_2", "x-y"}},
+		"canonical order":  {[]string{"high", "ultra", "low", "none"}, []string{"none", "low", "high", "ultra"}},
+		"longest value":    {[]string{longest}, []string{longest}},
+		"follows defaults": {nil, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newProvidersFixture(t)
+			fixture.recordAudits()
+
+			fixture.accounts.EXPECT().AddCompatProvider(mock.Anything, app.CompatProvider{
+				Name: "acme", BaseURL: "https://api.example.com/v1",
+				Models: []app.CompatModel{{Name: "m", ReasoningLevels: tc.want}},
+			}).Return(compatAccount, nil)
+
+			_, err := fixture.svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
+				Name: "acme", BaseURL: "https://api.example.com/v1",
+				Models: []app.CompatModel{{Name: "m", ReasoningLevels: tc.in}},
+			})
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestCreateCompatRefusesBadReasoningLevels names the models field and never
+// reaches the gateway (the strict mock has no expectations).
+func TestCreateCompatRefusesBadReasoningLevels(t *testing.T) {
+	tooMany := make([]string, 17)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("level%d", i)
+	}
+
+	for name, levels := range map[string][]string{
+		"empty list":           {},
+		"blank value":          {" "},
+		"leading digit":        {"1high"},
+		"leading underscore":   {"_high"},
+		"space inside":         {"very high"},
+		"dot inside":           {"v1.5"},
+		"too long":             {"a" + strings.Repeat("b", 32)},
+		"duplicate":            {"high", "high"},
+		"duplicate after case": {"High", " high "},
+		"more than sixteen":    tooMany,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := newProvidersFixture(t).svc.CreateCompat(context.Background(), providerAdmin(), app.CompatProvider{
+				Name: "acme", BaseURL: "https://api.example.com/v1",
+				Models: []app.CompatModel{{Name: "m", ReasoningLevels: levels}},
+			})
+
+			var invalid *app.InvalidInputError
+			require.ErrorAs(t, err, &invalid)
+			require.Equal(t, "models", invalid.Field)
+		})
+	}
+}
+
+// TestCompatDefaultsIsTheDefaultSet: an administrator gets the default set as
+// a copy, so changing it cannot change what the next caller gets.
+func TestCompatDefaultsIsTheDefaultSet(t *testing.T) {
+	svc := newProvidersFixture(t).svc
+	want := []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+	got, err := svc.CompatDefaults(providerAdmin())
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+
+	got[0] = "auto"
+
+	again, err := svc.CompatDefaults(providerAdmin())
+	require.NoError(t, err)
+	require.Equal(t, want, again)
+	require.Equal(t, want, app.DefaultReasoningLevels)
+}
+
+// TestCompatDefaultsRefusesANonAdmin: the default set is admin-only, like the
+// rest of the provider configuration.
+func TestCompatDefaultsRefusesANonAdmin(t *testing.T) {
+	user := providerAdmin()
+	user.Role = identity.RoleUser
+
+	got, err := newProvidersFixture(t).svc.CompatDefaults(user)
+	require.ErrorIs(t, err, app.ErrForbidden)
+	require.Nil(t, got)
 }
