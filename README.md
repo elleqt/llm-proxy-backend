@@ -169,7 +169,7 @@ services:
 
   backend:
     # Keep one version for both images.
-    image: yoonaowo/llm-proxy-backend:0.6.0
+    image: yoonaowo/llm-proxy-backend:0.7.0
     environment:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
@@ -190,7 +190,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: yoonaowo/llm-proxy-frontend:0.6.0
+    image: yoonaowo/llm-proxy-frontend:0.7.0
     ports:
       - "8081:8080"
 
