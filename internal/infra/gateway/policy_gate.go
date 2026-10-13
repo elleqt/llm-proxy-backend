@@ -240,7 +240,7 @@ func refuseAuthentication(ginCtx *gin.Context, authErr *sdkaccess.AuthError, obs
 		observe.AuthFailed(gate.AuthMissing)
 	case sdkaccess.AuthErrorCodeInvalidCredential:
 		observe.AuthFailed(gate.AuthInvalid)
-	case sdkaccess.AuthErrorCodeNotHandled, sdkaccess.AuthErrorCodeInternal:
+	case sdkaccess.AuthErrorCodeNotHandled, sdkaccess.AuthErrorCodeInternal, sdkaccess.AuthErrorCodeRequestTooLarge:
 		// Not a credential the client got wrong: nothing to observe.
 	}
 

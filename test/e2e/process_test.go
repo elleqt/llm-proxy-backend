@@ -236,6 +236,13 @@ func TestThePlaceholderCredentialsKeyServesWithAWarning(t *testing.T) {
 // CONNECT asks for it.
 const catalogueHost = "raw.githubusercontent.com:443"
 
+// grokVersionHost is where upstream looks up the current Grok CLI version, at
+// start and every three hours, whatever LLMPROXY_MODEL_CATALOG_UPDATES says
+// (sdk/cliproxy/service_lifecycle.go startModelCatalogUpdaters, and
+// internal/runtime/executor/helps/xai_version.go StartXAIVersionUpdater). No
+// SDK switch turns it off; the xAI executor needs the version it finds.
+const grokVersionHost = "registry.npmjs.org:443"
+
 // refusingProxy is an HTTP(S) proxy that refuses every request with 502 and
 // records the hosts asked for, so nothing the process sends through it reaches
 // the internet.
@@ -295,7 +302,8 @@ func TestModelCatalogUpdatersStartWhenOn(t *testing.T) {
 }
 
 // TestModelCatalogUpdatersStayOffWhenOff: with LLMPROXY_MODEL_CATALOG_UPDATES
-// off, nothing is fetched. On, the fetches follow the start within
+// off, no catalogue is fetched, and the only host asked for at all is upstream's
+// Grok CLI version lookup. On, the fetches follow the start within
 // milliseconds, each refused at once.
 func TestModelCatalogUpdatersStayOffWhenOff(t *testing.T) {
 	if !inFreshProcess(t) {
@@ -306,7 +314,9 @@ func TestModelCatalogUpdatersStayOffWhenOff(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 
-	require.Empty(t, proxy.asked(), "the process fetched through the proxy with the updates off")
+	asked := proxy.asked()
+	require.Zero(t, countOf(asked, catalogueHost), "a catalogue was fetched with the updates off")
+	require.Len(t, asked, countOf(asked, grokVersionHost), "the process fetched more than the Grok CLI version with the updates off: %v", asked)
 }
 
 // countOf is how many of hosts are host.
