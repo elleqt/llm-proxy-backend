@@ -151,6 +151,12 @@ var routes = map[string]route{
 	"GET /openai/v1/videos/:video_id":         {kind: routeDenied},
 	"GET /openai/v1/videos/:video_id/content": {kind: routeDenied},
 
+	// Denied: xAI text-to-speech, on OpenAI's speech route and on Grok's own.
+	// Nothing here prices audio, and admitting a new kind of output is a
+	// decision of its own rather than a side effect of an upgrade.
+	"POST /v1/audio/speech": {kind: routeDenied},
+	"POST /v1/tts":          {kind: routeDenied},
+
 	// Denied: upstream's banner, its management panel, and the OAuth
 	// callbacks of logins its management API starts, which write into the
 	// auth directory.

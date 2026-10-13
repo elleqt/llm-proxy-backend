@@ -790,7 +790,7 @@ All settings are environment variables, set in the backend's `environment` in th
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLMPROXY_MODEL_CATALOG_UPDATES` | `on` | `on` fetches CLIProxyAPI's model catalog from the internet at start and every 3 h; `off` keeps the one compiled into the build (air-gapped installs) |
+| `LLMPROXY_MODEL_CATALOG_UPDATES` | `on` | `on` fetches CLIProxyAPI's model catalog from the internet at start and every 3 h; `off` keeps the one compiled into the build (air-gapped installs). Either way CLIProxyAPI looks up the current Grok CLI version on `registry.npmjs.org` at start and every 3 h (through `proxy-url` when set); without network it logs a warning and keeps a built-in version |
 
 **Prices**
 

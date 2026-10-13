@@ -25,17 +25,28 @@ import (
 // admin API is built from may show it.
 const proxyPassword = "proxy-pass-3e1f"
 
-// forwardingProxy is an HTTP forward proxy on loopback: it counts the
-// requests it carries and passes each on to its target.
+// forwardingProxy is an HTTP forward proxy on loopback: it counts the plain
+// HTTP requests it carries and passes each on to its target. A CONNECT is
+// refused and not counted: the fake vendors speak plain HTTP, and the only
+// tunnel asked for is upstream's own background lookup of the Grok CLI
+// version on the npm registry (sdk/cliproxy/service_lifecycle.go
+// startModelCatalogUpdaters), which takes the global proxy-url and would
+// otherwise race the counts.
 func forwardingProxy(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	t.Helper()
 
 	var carried atomic.Int64
 
-	srv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodConnect {
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+
 		carried.Add(1)
 
-		out := r.Clone(r.Context())
+		out := req.Clone(req.Context())
 		out.RequestURI = ""
 		out.Header.Del("Proxy-Authorization")
 
