@@ -46,8 +46,8 @@ type onTheWire struct {
 //     provider for model".
 //   - once config-derived credentials exist, Run keeps registering their models
 //     after the watcher is created (service_lifecycle.go syncPluginModelRuntime),
-//     reading s.cfg without cfgMu (service_models.go registerModelsForAuthWithCache),
-//     so a push straight after WaitReload is a data race inside upstream.
+//     and a push meanwhile would change the configuration they register from
+//     (before v8.0.28 it was also a data race inside upstream).
 func startOnTheWire(t *testing.T, v *faketest.Vendor) *onTheWire {
 	t.Helper()
 
