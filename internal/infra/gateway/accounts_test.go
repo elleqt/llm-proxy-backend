@@ -73,10 +73,10 @@ func startProduction(t *testing.T) (*running, *coreauth.Manager) {
 // the gateway starts. Upstream goes on booting after the watcher exists:
 // it hands the watcher the configuration and then registers the models of
 // every account the manager holds (service_lifecycle.go Service.Run,
-// syncPluginModelRuntime), reading the service configuration without its
-// lock, and reports nowhere when it is done. An account change re-applies the
-// configuration under the lock and would race it, and an account registered
-// meanwhile would get its models from boot instead of from the change (see
+// syncPluginModelRuntime), and reports nowhere when it is done. An account
+// change meanwhile re-applies the configuration under it (before v8.0.28 a
+// data race inside upstream), and an account registered meanwhile would get
+// its models from boot instead of from the change (see
 // WaitReload). So the token store holds one credential before boot, which
 // only that last step registers models for — the manager loads it without
 // any, unlike a config-derived account — and startBooted returns once its

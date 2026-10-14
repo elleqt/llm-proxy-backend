@@ -877,14 +877,14 @@ func (g *Gateway) CurrentConfig() *cliproxyconfig.Config {
 // watcher on an unusable auth directory or a provider load error — WaitReload
 // returns Run's error instead of waiting for ctx.
 //
-// It does not make a push race-free. Upstream creates the watcher (Service.Run
-// in sdk/cliproxy/service_lifecycle.go) before Run finishes booting: it then
-// registers models for every account it holds (syncPluginModelRuntime), and
-// those registration workers read the service configuration without its
-// lock, while a push writes it under the lock. Nothing on the SDK surface
-// reports that boot has finished. The contract is therefore: production builds
-// the boot configuration before New, and neither pushes nor changes accounts
-// immediately after boot.
+// It does not tell when boot has finished. Upstream creates the watcher
+// (Service.Run in sdk/cliproxy/service_lifecycle.go) before Run finishes
+// booting: it then registers models for every account it holds
+// (syncPluginModelRuntime), and nothing on the SDK surface reports when that
+// is done. Before v8.0.28 those registration workers read the service
+// configuration without its lock, so a push then was a data race. The
+// contract stays: production builds the boot configuration before New, and
+// neither pushes nor changes accounts immediately after boot.
 func (g *Gateway) WaitReload(ctx context.Context) error {
 	select {
 	case <-g.ready:
