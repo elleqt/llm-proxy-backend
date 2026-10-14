@@ -139,10 +139,14 @@ type process struct {
 	// adminEmail and adminPassword are the bootstrap administrator's.
 	adminEmail, adminPassword string
 
-	// returnedAt is when Run returned, read after p.done delivers.
+	// returnedAt and runErr are when Run returned and what; read them only
+	// after done is closed.
 	returnedAt time.Time
+	runErr     error
 
-	done     chan error
+	// done is closed once Run has returned. Closing rather than sending lets
+	// every reader see it: the startup checks and stop both wait on it.
+	done     chan struct{}
 	stopOnce sync.Once
 	stopErr  error
 	cancel   context.CancelFunc
@@ -192,7 +196,7 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 	entryA.APIKeyEntries = append(entryA.APIKeyEntries, cliproxyconfig.OpenAICompatibilityAPIKey{APIKey: "vendor-key-a2"})
 	entryB := faketest.Compatibility(proc.b.policyName, srvB.URL, "vendor-key-b", "upstream-model-b", proc.b.alias)
 
-	apiAddr, webAddr, metricsAddr := freeAddr(t), freeAddr(t), freeAddr(t)
+	apiAddr, webAddr, metricsAddr := freeAddrs(t)
 	proc.apiURL, proc.webURL, proc.metricsURL = "http://"+apiAddr, "http://"+webAddr, "http://"+metricsAddr
 	vars := bootEnv(t, pool, apiAddr, webAddr, metricsAddr)
 	maps.Copy(vars, env)
@@ -209,12 +213,12 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	proc.cancel, proc.done = cancel, make(chan error, 1)
+	proc.cancel, proc.done = cancel, make(chan struct{})
 	go func() {
 		err := boot.Run(ctx, boot.Options{Output: proc.out, Compatibility: []cliproxyconfig.OpenAICompatibility{entryA, entryB}})
 
-		proc.returnedAt = time.Now()
-		proc.done <- err
+		proc.returnedAt, proc.runErr = time.Now(), err
+		close(proc.done)
 	}()
 
 	t.Cleanup(func() {
@@ -224,8 +228,8 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 	for _, probe := range []string{proc.apiURL + "/healthz", proc.webURL + "/api/auth/config", proc.metricsURL + "/metrics"} {
 		eventually(t, "GET "+probe+" answers 200", func() bool {
 			select {
-			case err := <-proc.done:
-				require.Failf(t, "the process stopped while starting", "Run returned %v", err)
+			case <-proc.done:
+				require.Failf(t, "the process stopped while starting", "Run returned %v", proc.runErr)
 			default:
 			}
 
@@ -242,8 +246,8 @@ func startProcessOn(t *testing.T, pool *pgxpool.Pool, settingsDoc string, env ma
 
 	select {
 	case <-watching.seen:
-	case err := <-proc.done:
-		require.Failf(t, "the process stopped while starting", "Run returned %v", err)
+	case <-proc.done:
+		require.Failf(t, "the process stopped while starting", "Run returned %v", proc.runErr)
 	case <-time.After(30 * time.Second):
 		require.Fail(t, "upstream never finished starting: no file watcher")
 	}
@@ -336,7 +340,8 @@ func (p *process) stop() error {
 func (p *process) awaitReturn(within time.Duration) error {
 	p.stopOnce.Do(func() {
 		select {
-		case p.stopErr = <-p.done:
+		case <-p.done:
+			p.stopErr = p.runErr
 		case <-time.After(within):
 			p.stopErr = fmt.Errorf("Run did not return within %s", within)
 		}
@@ -345,16 +350,29 @@ func (p *process) awaitReturn(within time.Duration) error {
 	return p.stopErr
 }
 
-func freeAddr(t *testing.T) string {
+// freeAddrs returns three distinct loopback addresses free at the time of the
+// call. Each port is held until all three are picked: a port closed at once can
+// be handed out again by the next pick, and two listeners on one address stop
+// the process while it starts.
+func freeAddrs(t *testing.T) (string, string, string) {
 	t.Helper()
 
-	listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err, "reserve port")
+	held := make([]net.Listener, 0, 3)
 
-	addr := listener.Addr().String()
-	require.NoError(t, listener.Close())
+	defer func() {
+		for _, listener := range held {
+			_ = listener.Close()
+		}
+	}()
 
-	return addr
+	for range 3 {
+		listener, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+		require.NoError(t, err, "reserve port")
+
+		held = append(held, listener)
+	}
+
+	return held[0].Addr().String(), held[1].Addr().String(), held[2].Addr().String()
 }
 
 // get is http.Get bound to the test's context.
