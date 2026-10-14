@@ -38,7 +38,8 @@ func TestBootStopsOnAnAccountTheKeyCannotOpen(t *testing.T) {
 		ID: accountID, Provider: "claude", Sealed: sealed, CreatedAt: now, UpdatedAt: now,
 	}), "seed the account")
 
-	for k, v := range bootEnv(t, pool, freeAddr(t), freeAddr(t), freeAddr(t)) {
+	apiAddr, webAddr, metricsAddr := freeAddrs(t)
+	for k, v := range bootEnv(t, pool, apiAddr, webAddr, metricsAddr) {
 		t.Setenv(k, v)
 	}
 
