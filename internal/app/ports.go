@@ -374,6 +374,8 @@ type VendorAccount struct {
 	// Status is the gateway's lifecycle status: active, error, disabled, ...
 	Status   string
 	Disabled bool
+	// Priority is shared by every managed account, regardless of credential kind.
+	Priority int32
 	// Proxy is how the account's traffic leaves the gateway.
 	Proxy           AccountProxy
 	LastError       string
@@ -442,7 +444,6 @@ type CompatDetails struct {
 	Prefix      string
 	HasAPIKey   bool
 	Models      []CompatModel
-	Priority    int32
 	HeaderNames []string
 }
 
@@ -487,6 +488,8 @@ type VendorAccounts interface {
 	// never holds — config-derived API keys, runtime-only and plugin-virtual
 	// accounts — have nothing to save and come back from configuration.
 	SetAccountProxy(ctx context.Context, id string, p ProxyChoice) error
+	// SetAccountPriority changes the shared routing preference of a held account.
+	SetAccountPriority(ctx context.Context, id string, priority int32) error
 	RemoveAccount(ctx context.Context, id string) error
 	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
 	// at once: ErrConflict when its name is taken, an *InvalidInputError on

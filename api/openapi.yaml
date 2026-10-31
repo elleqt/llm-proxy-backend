@@ -769,6 +769,12 @@ paths:
               properties:
                 disabled: { type: boolean }
                 proxy: { $ref: "#/components/schemas/AccountProxyInput" }
+                priority:
+                  type: integer
+                  format: int32
+                  minimum: -2147483648
+                  maximum: 2147483647
+                  description: Routing priority for any account type. Omission preserves its current value.
       responses:
         "200":
           description: Updated.
@@ -1279,7 +1285,7 @@ components:
 
     ProviderAccount:
       type: object
-      required: [id, provider, status, disabled, quota, proxy]
+      required: [id, provider, status, disabled, quota, proxy, priority]
       properties:
         id: { type: string }
         provider: { type: string, description: Policy-facing provider name. }
@@ -1287,6 +1293,10 @@ components:
         email: { type: [string, "null"] }
         status: { type: string, examples: [active, error, disabled] }
         disabled: { type: boolean }
+        priority:
+          type: integer
+          format: int32
+          description: Effective shared routing priority; absent stored configuration is neutral (zero).
         proxy: { $ref: "#/components/schemas/AccountProxy" }
         lastError: { type: [string, "null"] }
         lastRefreshedAt: { type: [string, "null"], format: date-time }
@@ -1343,13 +1353,12 @@ components:
 
     CompatProviderDetails:
       type: object
-      required: [name, baseURL, hasApiKey, models, priority, headerNames]
+      required: [name, baseURL, hasApiKey, models, headerNames]
       properties:
         name: { type: string }
         baseURL: { type: string }
         prefix: { type: string }
         hasApiKey: { type: boolean, description: Whether a key is stored. The key itself is never returned. }
-        priority: { type: integer, format: int32 }
         headerNames:
           type: array
           items: { type: string }

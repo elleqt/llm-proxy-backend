@@ -29,7 +29,7 @@ func TestCompatProviderHeadersSurviveRestart(t *testing.T) {
 	awaitProviders(t, first.gateway.catalog, alias, []string{name})
 	require.Equal(t, http.StatusOK, chatVia(t, first, alias))
 	require.Equal(t, secret, vendor.Requests()[0].Header.Get("X-Vendor-Token"))
-	require.Equal(t, int32(7), account.Compat.Priority)
+	require.Equal(t, int32(7), account.Priority)
 	require.Equal(t, []string{"x-vendor-token"}, account.Compat.HeaderNames)
 	assertNoKey(t, first.gateway, secret)
 	require.ErrorIs(t, first.stop(), context.Canceled)
@@ -44,7 +44,7 @@ func TestCompatProviderHeadersSurviveRestart(t *testing.T) {
 		BaseURL: endpoint.URL, Models: []app.CompatModel{{Name: "m", Alias: alias}},
 	})
 	require.NoError(t, err)
-	require.Equal(t, int32(7), kept.Compat.Priority)
+	require.Equal(t, int32(7), kept.Priority)
 	require.Equal(t, http.StatusOK, chatVia(t, second, alias))
 	require.Equal(t, secret, vendor.Requests()[2].Header.Get("X-Vendor-Token"))
 
@@ -70,7 +70,7 @@ func TestCompatProviderHeadersSurviveRestart(t *testing.T) {
 		BaseURL: endpoint.URL, Headers: map[string]string{}, Models: []app.CompatModel{{Name: "m", Alias: alias}},
 	})
 	require.NoError(t, err)
-	require.Equal(t, int32(0), cleared.Compat.Priority)
+	require.Equal(t, int32(0), cleared.Priority)
 	require.Equal(t, []string{}, cleared.Compat.HeaderNames)
 	require.Equal(t, http.StatusOK, chatVia(t, second, alias))
 	require.Empty(t, vendor.Requests()[4].Header.Get("X-Replaced"))

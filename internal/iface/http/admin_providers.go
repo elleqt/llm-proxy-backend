@@ -243,7 +243,7 @@ func (rt *router) updateProviderAccount(rw http.ResponseWriter, req *http.Reques
 	}
 
 	account, err := rt.Providers.Update(req.Context(), actor.user, req.PathValue("accountId"), providers.AccountChange{
-		Disabled: body.Disabled, Proxy: proxyIn(body.Proxy),
+		Disabled: body.Disabled, Proxy: proxyIn(body.Proxy), Priority: body.Priority,
 	})
 	if err != nil {
 		rt.adminFailure(rw, req, err)
@@ -294,6 +294,7 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 		Provider:        account.Provider,
 		Status:          account.Status,
 		Disabled:        account.Disabled,
+		Priority:        account.Priority,
 		Label:           nonEmpty(account.Label),
 		Email:           nonEmpty(account.Email),
 		LastError:       nonEmpty(account.LastError),
@@ -323,7 +324,7 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 
 		out.Compat = &api.CompatProviderDetails{
 			Name: compat.Name, BaseURL: compat.BaseURL, Prefix: nonEmpty(compat.Prefix), HasApiKey: compat.HasAPIKey, Models: models,
-			Priority: compat.Priority, HeaderNames: append([]string{}, compat.HeaderNames...),
+			HeaderNames: append([]string{}, compat.HeaderNames...),
 		}
 	}
 

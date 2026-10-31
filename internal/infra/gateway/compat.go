@@ -44,14 +44,13 @@ import (
 
 // Metadata keys of an OpenAI-compatible provider's credential.
 const (
-	compatMetaName     = "compat_name"
-	compatMetaBaseURL  = "base_url"
-	compatMetaAPIKey   = "api_key"
-	compatMetaPrefix   = "prefix"
-	compatMetaModels   = "models"
-	compatMetaLabel    = "label"
-	compatMetaHeaders  = "headers"
-	compatMetaPriority = "priority"
+	compatMetaName    = "compat_name"
+	compatMetaBaseURL = "base_url"
+	compatMetaAPIKey  = "api_key"
+	compatMetaPrefix  = "prefix"
+	compatMetaModels  = "models"
+	compatMetaLabel   = "label"
+	compatMetaHeaders = "headers"
 
 	// compatModelReasoningLevels is the key of a model's own reasoning levels
 	// in a models entry; absent for a model that follows the default set.
@@ -123,7 +122,6 @@ func applyCompatAttributes(auth *coreauth.Auth) {
 		delete(auth.Attributes, compatAttrAPIKey)
 	}
 
-	auth.Attributes[compatMetaPriority] = strconv.FormatInt(int64(compatPriority(auth.Metadata)), 10)
 	for key := range auth.Attributes {
 		if strings.HasPrefix(key, "header:") {
 			delete(auth.Attributes, key)
@@ -134,19 +132,6 @@ func applyCompatAttributes(auth *coreauth.Auth) {
 
 	auth.Label = name
 	auth.Prefix = prefix
-}
-
-// compatPriority reads our decimal metadata representation after JSON round trips.
-// Old credentials have no priority and remain in the neutral tier.
-func compatPriority(metadata map[string]any) int32 {
-	raw, _ := metadata[compatMetaPriority].(string)
-
-	value, err := strconv.ParseInt(raw, 10, 32)
-	if err != nil {
-		return 0
-	}
-
-	return int32(value)
 }
 
 // compatMetadata is the credential of the OpenAI-compatible provider p.
@@ -166,13 +151,13 @@ func compatMetadata(provider app.CompatProvider) map[string]any {
 	}
 
 	meta := map[string]any{
-		metadataType:       OpenAICompatibilityKey,
-		compatMetaLabel:    provider.Name,
-		compatMetaName:     provider.Name,
-		compatMetaBaseURL:  provider.BaseURL,
-		compatMetaModels:   models,
-		compatMetaPriority: strconv.FormatInt(int64(provider.Priority), 10),
-		compatMetaHeaders:  maps.Clone(provider.Headers),
+		metadataType:      OpenAICompatibilityKey,
+		compatMetaLabel:   provider.Name,
+		compatMetaName:    provider.Name,
+		compatMetaBaseURL: provider.BaseURL,
+		compatMetaModels:  models,
+		metadataPriority:  strconv.FormatInt(int64(provider.Priority), 10),
+		compatMetaHeaders: maps.Clone(provider.Headers),
 	}
 	if provider.APIKey != "" {
 		meta[compatMetaAPIKey] = provider.APIKey
@@ -254,7 +239,7 @@ func compatDetails(auth *coreauth.Auth) *app.CompatDetails {
 
 	return &app.CompatDetails{
 		Name: name, BaseURL: baseURL, Prefix: prefix, HasAPIKey: apiKey != "",
-		Models: compatModels(auth.Metadata), Priority: compatPriority(auth.Metadata), HeaderNames: names,
+		Models: compatModels(auth.Metadata), HeaderNames: names,
 	}
 }
 
@@ -269,7 +254,7 @@ func compatEntry(auth *coreauth.Auth) cliproxyconfig.OpenAICompatibility {
 	entry := cliproxyconfig.OpenAICompatibility{
 		Name:     name,
 		BaseURL:  baseURL,
-		Priority: int(compatPriority(auth.Metadata)),
+		Priority: int(accountPriority(auth)),
 		Models:   make([]cliproxyconfig.OpenAICompatibilityModel, 0, len(models)),
 	}
 
@@ -482,7 +467,7 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 		return app.VendorAccount{}, err
 	}
 
-	priority := compatPriority(held.Metadata)
+	priority := accountPriority(held)
 	if update.Priority != nil {
 		priority = *update.Priority
 	}
@@ -501,8 +486,8 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 		Name: held.Label, BaseURL: update.BaseURL, APIKey: apiKey, Prefix: update.Prefix, Models: update.Models,
 		Headers: headers, Priority: priority,
 	})
-	next.Metadata[metadataDisabled] = held.Disabled
 	applyCompatAttributes(next)
+	applyAccountPriority(next)
 	setProxy(next, proxy)
 
 	if _, err := g.store.Save(ctx, next); err != nil {

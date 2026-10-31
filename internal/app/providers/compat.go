@@ -332,7 +332,7 @@ func compatAudit(account app.VendorAccount, hasKey bool) map[string]any {
 	if account.Compat != nil {
 		detail["base_url"] = account.Compat.BaseURL
 		detail[fieldModels] = len(account.Compat.Models)
-		detail["priority"] = account.Compat.Priority
+		detail["priority"] = account.Priority
 		detail["header_names"] = account.Compat.HeaderNames
 	}
 

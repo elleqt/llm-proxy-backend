@@ -12,6 +12,10 @@
 
 **Execution:** The user approved the written specification and explicitly chose sequential inline execution. Continue on the existing isolated `feat/opencode-go` worktrees, updating backend PR #47 and frontend PR #29. Do not ask the execution-style question again.
 
+**Execution completed:** Shared root priority and generic mutation, Claude/Codex persistence and reauthentication, two-account native selection/affinity/cooldown, role presets in both editors and rows, and the single Providers sticky switch are implemented. Final checks: `go vet ./...`, `go test ./... -race` (32 packages), lint (0 issues), README/compose consistency, frontend build, and 330 frontend tests. An isolated real gateway/browser smoke verified role saves from both row and drawer, reload persistence, explicit sticky-off persistence across a backend restart, and desktop/mobile layout without horizontal overflow.
+
+**Implementation adjustments:** Keep the small preset selector, controlled editor, and parser together in `AccountRoutingFields.tsx` instead of three separate modules. The required response-only root `priority` omits OpenAPI `readOnly` because the pinned Go generator otherwise emits a nullable pointer and drops zero. Shared priority edits use native `Manager.Modify`, with checked persistence inside its account mutation gate, to preserve concurrently rotated tokens.
+
 ## Global Constraints
 
 - Continue using CLIProxyAPI v8.0.38; do not build a second selector or retry system.

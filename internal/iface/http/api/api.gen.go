@@ -413,7 +413,6 @@ type CompatProviderDetails struct {
 	Models      []CompatModel `json:"models"`
 	Name        string        `json:"name"`
 	Prefix      *string       `json:"prefix,omitempty"`
-	Priority    int32         `json:"priority"`
 }
 
 // CompatProviderRequest defines model for CompatProviderRequest.
@@ -711,6 +710,9 @@ type ProviderAccount struct {
 	LastError       *string                `json:"lastError,omitempty"`
 	LastRefreshedAt *time.Time             `json:"lastRefreshedAt,omitempty"`
 
+	// Priority Effective shared routing priority; absent stored configuration is neutral (zero).
+	Priority int32 `json:"priority"`
+
 	// Provider Policy-facing provider name.
 	Provider string `json:"provider"`
 
@@ -951,7 +953,10 @@ type ReplacePricesJSONBody = []ModelPrice
 
 // UpdateProviderAccountJSONBody defines parameters for UpdateProviderAccount.
 type UpdateProviderAccountJSONBody struct {
-	Disabled *bool              `json:"disabled,omitempty"`
+	Disabled *bool `json:"disabled,omitempty"`
+
+	// Priority Routing priority for any account type. Omission preserves its current value.
+	Priority *int32             `json:"priority,omitempty"`
 	Proxy    *AccountProxyInput `json:"proxy,omitempty"`
 }
 

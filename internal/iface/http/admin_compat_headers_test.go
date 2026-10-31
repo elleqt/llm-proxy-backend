@@ -32,8 +32,9 @@ func TestCompatHeaderInjectionIsAFieldError(t *testing.T) {
 func TestCompatResponseNeverReturnsHeaderValues(t *testing.T) {
 	env := newEnv(t)
 	account := compatWireAccount
+	account.Priority = 7
 	account.Compat = &app.CompatDetails{
-		Name: "acme", BaseURL: "https://api.example.com/v1", Priority: 7,
+		Name: "acme", BaseURL: "https://api.example.com/v1",
 		HeaderNames: []string{"x-token"}, Models: []app.CompatModel{{Name: "m"}},
 	}
 	env.accounts.EXPECT().AddCompatProvider(mock.Anything, mock.Anything).Return(account, nil)

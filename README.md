@@ -625,6 +625,10 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 
 **Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add provider** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
+Every account, including Claude and ChatGPT subscriptions, has a **Usage role** saved immediately from its row: **Preferred** (`1`), **Normal** (`0`, the default for new accounts), or **Reserve** (`-1`). For the same model, the highest available tier is selected; equal-tier accounts use the configured routing strategy (round-robin by default). With sticky sessions, new conversations are distributed while established conversations keep their available account. A second ChatGPT identity is Normal by default and shares new conversations with other Normal identities. The account editor also offers a custom signed integer priority; existing custom values are preserved.
+
+**Sticky sessions** are controlled once, at the top of **Admin → Providers**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
+
 #### OpenAI-compatible providers
 
 **Add provider → OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
@@ -634,7 +638,7 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 - **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it. A stored key is bound to its base URL: changing the base URL needs the key typed again (or removed), so a key never follows a provider to another host.
 - **Models**: **Discover models** asks the vendor (`GET <base URL>/models`, through `proxy-url` when set) and lets you pick which to serve, each optionally under an alias. A model can also be typed by hand. The list does not follow the vendor by itself: discover again and save to change it.
 - **Prefix** (optional): clients then request `<prefix>/<model>`.
-- **Priority** (Advanced): a signed whole number, default `0`. Larger values are preferred when several accounts serve the same model. An established sticky-session binding takes precedence over priority.
+- **Usage role**: the same Preferred/Normal/Reserve control as subscription accounts, with a custom priority in the account editor.
 - **HTTP headers** (Advanced): custom vendor headers, encrypted with the credential. Only their names are returned; values are never shown again. Keep the saved map, replace it completely, or remove it. Changing the base URL requires explicitly replacing or removing saved headers, independently of the API key. Authentication and HTTP transport/framing headers cannot be overridden.
 
 Two providers may serve the same model name or alias. CLIProxyAPI selects the highest available priority tier and handles failover and cooldowns; accounts at the same tier follow the configured routing strategy. Such a model is admitted only to users allowed it on **every** provider serving it (see [Access control](#access-control)); the form warns when a discovered model is already served by another provider. Give one of them a prefix or different aliases to keep them apart instead. Set prices for their models in **Admin → Prices**. The usage ledger attributes a request to the provider/account that actually served it.
@@ -645,8 +649,8 @@ Header values can use CLIProxyAPI's dynamic expansion: `$CPA-SESSION-ID` uses th
 
 Go is the subscription service, not the Zen/pay-as-you-go endpoint:
 
-1. Add an OpenAI-compatible provider named `opencode-go`, using base URL `https://opencode.ai/inference/go/openai/v1` and your Go key. In Advanced, set priority `1` and header `x-opencode-session` to `$CPA-SESSION-ID`. Do not put the key in a custom Authorization header; use the dedicated API-key field. DeepSeek requires the Go workspace's Privacy → Regions setting to allow Global.
-2. Add the official API as provider `deepseek`, base URL `https://api.deepseek.com`, its own key, priority `0`.
+1. Add an OpenAI-compatible provider named `opencode-go`, using base URL `https://opencode.ai/inference/go/openai/v1` and your Go key. Select the **Preferred** role; in Advanced, set header `x-opencode-session` to `$CPA-SESSION-ID`. Do not put the key in a custom Authorization header; use the dedicated API-key field. DeepSeek requires the Go workspace's Privacy → Regions setting to allow Global.
+2. Add the official API as provider `deepseek`, base URL `https://api.deepseek.com`, its own key, and the **Reserve** role.
 3. Configure the same public aliases on both providers, without conflicting prefixes:
 
    | Client-facing alias | Go model name | Official API model name |
@@ -665,7 +669,7 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval, sticky sessions) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change here can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it. The immediate sticky-session switch lives on **Admin → Providers**.
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.

@@ -198,3 +198,20 @@ func TestCompatCanceledRequestDoesNotUseFallback(t *testing.T) {
 	require.Len(t, route.primary.Requests(), 1)
 	require.Empty(t, route.fallback.Requests())
 }
+
+func TestGenericPriorityEditChangesCompatibleRoutingWithoutMovingSessions(t *testing.T) {
+	route := startCompatRoute(t, routingVendor("primary"))
+	status, body, err := route.request(t, "before-role-edit", false)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status, "%s", body)
+	require.Contains(t, string(body), "primary")
+	require.NoError(t, route.server.gateway.SetAccountPriority(t.Context(), route.primaryID, -1))
+	status, body, err = route.request(t, "after-role-edit", false)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status, "%s", body)
+	require.Contains(t, string(body), "fallback")
+	status, body, err = route.request(t, "before-role-edit", false)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, status, "%s", body)
+	require.Contains(t, string(body), "primary")
+}
