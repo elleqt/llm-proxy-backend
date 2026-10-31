@@ -3,6 +3,8 @@
 Date: 2026-10-31
 Status: Written specification approved; implementation verified by automated suites and isolated live client checks.
 
+The compatible-only priority response and numeric-priority UI described here are superseded by [Universal account routing](2026-10-31-universal-account-routing-design.md). The original OpenCode Go and secret-header requirements remain applicable.
+
 ## Goal
 
 Support OpenCode Go subscriptions through the existing OpenAI-compatible provider flow. Prefer Go for DeepSeek requests and use the official DeepSeek API as a paid fallback. Clients, including omp and LibreChat, use the gateway with their ordinary DeepSeek model names and gateway keys; they do not implement fallback or receive vendor credentials.
