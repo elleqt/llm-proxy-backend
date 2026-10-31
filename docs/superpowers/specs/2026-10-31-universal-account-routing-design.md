@@ -1,7 +1,7 @@
 # Universal account routing and role-based provider management
 
 Date: 2026-10-31
-Status: Visual direction and behavior approved; written specification awaiting review.
+Status: Written specification approved by the user; sequential implementation authorized.
 
 ## Goal and scope
 
