@@ -87,7 +87,7 @@ func TestProvidersRefuseAnyoneButAnActiveAdmin(t *testing.T) {
 			_, calls["Update"] = fixture.svc.Update(ctx, actor, codexAccount.ID, providers.AccountChange{Disabled: &yes})
 			_, calls["CreateCompat"] = fixture.svc.CreateCompat(ctx, actor, app.CompatProvider{Name: "acme"})
 			_, calls["UpdateCompat"] = fixture.svc.UpdateCompat(ctx, actor, "openai-compatible-acme", app.CompatProviderUpdate{})
-			_, calls["DiscoverCompat"] = fixture.svc.DiscoverCompat(ctx, actor, "https://api.example.com/v1", "", "", nil)
+			_, calls["DiscoverCompat"] = fixture.svc.DiscoverCompat(ctx, actor, "https://api.example.com/v1", "", "", nil, nil)
 
 			calls["Remove"] = fixture.svc.Remove(ctx, actor, codexAccount.ID)
 			for method, err := range calls {

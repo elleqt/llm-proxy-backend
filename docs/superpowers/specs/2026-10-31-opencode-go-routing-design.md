@@ -1,7 +1,7 @@
 # OpenCode Go and prioritized DeepSeek routing
 
 Date: 2026-10-31
-Status: Written specification approved by the user; implementation not started.
+Status: Written specification approved; implementation verified by automated suites and isolated live client checks.
 
 ## Goal
 
@@ -99,7 +99,9 @@ Live acceptance uses the user's permitted local deployment and existing OpenCode
 - omp and LibreChat can use their usual DeepSeek setup against the gateway; verify an actual request from each client and the resulting provider attribution.
 - Restore any temporarily changed configuration and remove probe resources. Preserve real usage records unless cleanup is explicitly required by the deployment procedure.
 
-This specification records source inspection, not a completed live test. Live results must be reported separately with their actual observations.
+The design was based on source inspection; the following observations were collected during implementation.
+
+Live verification completed against an isolated stack using the real Go subscription and the official DeepSeek credential. Flash and Pro returned successful Go and official-fallback responses. The Go responses reported billing source `go`; streaming completed normally. Real omp and LibreChat requests used their ordinary DeepSeek model name, and both succeeded through Go and the official fallback. LibreChat's fallback also worked on a subsequent turn in the same conversation. Existing-session recovery stayed on the official source while a new session returned to Go. The actual provider/account was confirmed in the usage ledger. Test containers, copied credentials, temporary keys, and browser tabs were removed; production containers and provider definitions were unchanged.
 
 ## Deployment and rollback
 

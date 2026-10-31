@@ -47,9 +47,15 @@ func (rt *router) createCompatProvider(rw http.ResponseWriter, req *http.Request
 		return
 	}
 
+	var priority int32
+	if body.Priority != nil {
+		priority = *body.Priority
+	}
+
 	account, err := rt.Providers.CreateCompat(req.Context(), actor.user, app.CompatProvider{
 		Name: body.Name, BaseURL: body.BaseURL, APIKey: deref(body.ApiKey), Prefix: deref(body.Prefix),
 		Models: compatModelsIn(body.Models), Proxy: proxyIn(body.Proxy),
+		Priority: priority, Headers: headersIn(body.Headers),
 	})
 	if errors.Is(err, app.ErrConflict) {
 		writeFieldError(rw, http.StatusConflict, codeConflict, "name", "a provider of that name exists")
@@ -76,7 +82,8 @@ func (rt *router) updateCompatProvider(rw http.ResponseWriter, req *http.Request
 
 	update := app.CompatProviderUpdate{
 		BaseURL: body.BaseURL, APIKey: body.ApiKey, Prefix: deref(body.Prefix), Models: compatModelsIn(body.Models),
-		Proxy: proxyIn(body.Proxy),
+		Proxy:    proxyIn(body.Proxy),
+		Priority: body.Priority, Headers: headersIn(body.Headers),
 	}
 	if update.APIKey == nil && body.ClearApiKey != nil && *body.ClearApiKey {
 		cleared := ""
@@ -102,7 +109,7 @@ func (rt *router) discoverCompatModels(rw http.ResponseWriter, req *http.Request
 	}
 
 	found, err := rt.Providers.DiscoverCompat(req.Context(), actor.user, body.BaseURL, deref(body.ApiKey), deref(body.AccountId),
-		proxyIn(body.Proxy))
+		proxyIn(body.Proxy), headersIn(body.Headers))
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 
@@ -139,6 +146,15 @@ func compatModelsIn(in []api.CompatModel) []app.CompatModel {
 	}
 
 	return out
+}
+
+// headersIn preserves the difference between omission and an explicit empty map.
+func headersIn(in *api.CompatHeaders) map[string]string {
+	if in == nil {
+		return nil
+	}
+
+	return map[string]string(*in)
 }
 
 func deref(s *string) string {
@@ -307,6 +323,7 @@ func providerAccountOf(account app.VendorAccount) api.ProviderAccount {
 
 		out.Compat = &api.CompatProviderDetails{
 			Name: compat.Name, BaseURL: compat.BaseURL, Prefix: nonEmpty(compat.Prefix), HasApiKey: compat.HasAPIKey, Models: models,
+			Priority: compat.Priority, HeaderNames: append([]string{}, compat.HeaderNames...),
 		}
 	}
 

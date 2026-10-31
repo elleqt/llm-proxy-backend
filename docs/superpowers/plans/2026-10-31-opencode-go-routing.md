@@ -24,7 +24,7 @@
 - No layout redesign, new UI dependency, or dedicated OpenCode preset is included.
 - Code comments, fixtures, and public examples use generic infrastructure and `example.com`; real deployment coordinates and keys belong only in private notes.
 - Use existing test conventions: testify assertions, no parallel gateway tests, Postgres through `pgtest.NewTestPool(t)`, strict generated mocks, frontend contract-typed handlers. Do not add hand-written service fakes.
-- Create execution worktrees/branches before implementation. Keep unrelated `.codegraph/` files untouched. No pushing, PRs, release tagging, or remote branch changes are authorized by this plan.
+- Create execution worktrees/branches before implementation. Keep unrelated `.codegraph/` files untouched. The user subsequently authorized pushing the feature branches and opening pull requests in both repositories; merging, release tagging, and changing release image pins are not authorized.
 - Inspect symbols through LSP when available. The planning session found no configured language server; if still unavailable, enumerate all callers with targeted searches before changing exported signatures.
 - Task commands below are to be run during execution, not claimed as already passed. Dependency generation is required when its inputs change; do not run full suites or formatters inside parallel implementation slices. The integration owner runs final gates once.
 
@@ -409,3 +409,14 @@ Regeneration was already performed where inputs changed; verify the two OpenAPI 
 - [x] Dynamic inference headers use upstream resolution; discovery omits unresolved conversation variables without a dummy shared session.
 - [x] Planned priority recovery preserves the current binding; no global affinity change or own retry machinery is planned.
 - [x] Live evidence is not represented as already collected, and private coordinates/keys are absent from public documents.
+
+## Execution receipt
+
+Implementation and acceptance checks completed on 2026-10-31. The checkbox steps above preserve the original implementation plan.
+
+- Backend: `make build`, `go vet ./...`, `make test` (`go test ./... -race`), `make lint`, and `scripts/check-readme-compose.sh` passed.
+- Frontend: `npm run build` and `npm test` passed, with 323 tests across 48 files. The build emitted a non-failing large-chunk advisory.
+- The backend and frontend OpenAPI copies compare equal. Generated mocks and API types were produced through the pinned generators.
+- Independent read-only backend/frontend reviews completed. The discovered removed-key/discovery interaction was reproduced, corrected, and covered by inherit/direct regressions.
+- Real isolated-stack smoke covered Go billing source, Flash/Pro, streaming, official fallback, session recovery, ordinary omp and LibreChat usage, header editing/removal, and failed discovery with manual model entry.
+- All test services and temporary credentials were removed. The production containers and provider definitions remained unchanged.

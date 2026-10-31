@@ -372,6 +372,9 @@ type CompatDiscoverRequest struct {
 	ApiKey    *string `json:"apiKey,omitempty"`
 	BaseURL   string  `json:"baseURL"`
 
+	// Headers Secret custom HTTP headers. Omission preserves saved headers on update or discovery; an empty object removes them, and a nonempty object replaces the full map. Saved headers are bound to the provider's base URL. Unresolved dynamic values are omitted during model discovery; inference uses upstream header expansion.
+	Headers *CompatHeaders `json:"headers,omitempty"`
+
 	// Proxy The proxy to ask through. Absent, the proxy of `accountId`, else the global one.
 	Proxy *AccountProxyInput `json:"proxy,omitempty"`
 }
@@ -382,6 +385,9 @@ type CompatDiscoverResult struct {
 	Conflicts map[string][]string `json:"conflicts"`
 	Models    []string            `json:"models"`
 }
+
+// CompatHeaders Secret custom HTTP headers. Omission preserves saved headers on update or discovery; an empty object removes them, and a nonempty object replaces the full map. Saved headers are bound to the provider's base URL. Unresolved dynamic values are omitted during model discovery; inference uses upstream header expansion.
+type CompatHeaders map[string]string
 
 // CompatModel defines model for CompatModel.
 type CompatModel struct {
@@ -400,10 +406,14 @@ type CompatProviderDetails struct {
 	BaseURL string `json:"baseURL"`
 
 	// HasApiKey Whether a key is stored. The key itself is never returned.
-	HasApiKey bool          `json:"hasApiKey"`
-	Models    []CompatModel `json:"models"`
-	Name      string        `json:"name"`
-	Prefix    *string       `json:"prefix,omitempty"`
+	HasApiKey bool `json:"hasApiKey"`
+
+	// HeaderNames Stored header names only; values are never returned.
+	HeaderNames []string      `json:"headerNames"`
+	Models      []CompatModel `json:"models"`
+	Name        string        `json:"name"`
+	Prefix      *string       `json:"prefix,omitempty"`
+	Priority    int32         `json:"priority"`
 }
 
 // CompatProviderRequest defines model for CompatProviderRequest.
@@ -412,14 +422,20 @@ type CompatProviderRequest struct {
 	ApiKey *string `json:"apiKey,omitempty"`
 
 	// BaseURL Examples: https://api.example.com/v1
-	BaseURL string        `json:"baseURL"`
-	Models  []CompatModel `json:"models"`
+	BaseURL string `json:"baseURL"`
+
+	// Headers Secret custom HTTP headers. Omission preserves saved headers on update or discovery; an empty object removes them, and a nonempty object replaces the full map. Saved headers are bound to the provider's base URL. Unresolved dynamic values are omitted during model discovery; inference uses upstream header expansion.
+	Headers *CompatHeaders `json:"headers,omitempty"`
+	Models  []CompatModel  `json:"models"`
 
 	// Name The policy provider name; immutable. Stored in lower case (upstream matches names case-insensitively), then it must match `^[a-z0-9][a-z0-9._-]{0,62}$`.
 	Name string `json:"name"`
 
 	// Prefix Optional model prefix: clients request `prefix/model`.
 	Prefix *string `json:"prefix,omitempty"`
+
+	// Priority Larger values are preferred; absent is zero.
+	Priority *int32 `json:"priority,omitempty"`
 
 	// Proxy Absent is `inherit`.
 	Proxy *AccountProxyInput `json:"proxy,omitempty"`
@@ -432,9 +448,15 @@ type CompatProviderUpdate struct {
 	BaseURL string  `json:"baseURL"`
 
 	// ClearApiKey Remove the stored key. Ignored when `apiKey` is set.
-	ClearApiKey *bool         `json:"clearApiKey,omitempty"`
-	Models      []CompatModel `json:"models"`
-	Prefix      *string       `json:"prefix,omitempty"`
+	ClearApiKey *bool `json:"clearApiKey,omitempty"`
+
+	// Headers Secret custom HTTP headers. Omission preserves saved headers on update or discovery; an empty object removes them, and a nonempty object replaces the full map. Saved headers are bound to the provider's base URL. Unresolved dynamic values are omitted during model discovery; inference uses upstream header expansion.
+	Headers *CompatHeaders `json:"headers,omitempty"`
+	Models  []CompatModel  `json:"models"`
+	Prefix  *string        `json:"prefix,omitempty"`
+
+	// Priority Larger values are preferred; absent preserves the stored value.
+	Priority *int32 `json:"priority,omitempty"`
 
 	// Proxy Absent keeps the stored proxy.
 	Proxy *AccountProxyInput `json:"proxy,omitempty"`

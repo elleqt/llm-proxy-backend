@@ -307,31 +307,31 @@ func TestDiscoverModelsGoesThroughTheChosenProxy(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", account.ID, nil)
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", account.ID, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), viaOwn.Load(), "the provider's own proxy")
 
 	// No stored key: another base URL is not refused, and still goes through the provider's proxy.
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL+"/v1", "", account.ID, nil)
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL+"/v1", "", account.ID, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), viaOwn.Load())
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", account.ID, &app.ProxyChoice{Mode: app.ProxyInherit})
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", account.ID, &app.ProxyChoice{Mode: app.ProxyInherit}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), viaGlobal.Load(), "inherit in the request: the global proxy-url")
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", "", &app.ProxyChoice{Mode: app.ProxyDirect})
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", "", &app.ProxyChoice{Mode: app.ProxyDirect}, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(1), viaGlobal.Load(), "direct: a proxy carried it")
 	require.Equal(t, int64(2), viaOwn.Load(), "direct: a proxy carried it")
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", "", nil)
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL, "", "", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(2), viaGlobal.Load(), "no account, no choice: the global proxy-url")
 
 	// A link-local target stays refused whatever the proxy.
 	for _, p := range []*app.ProxyChoice{{Mode: app.ProxyDirect}, {Mode: app.ProxyCustom, URL: own.URL}} {
-		_, err = srv.gateway.DiscoverModels(t.Context(), "http://169.254.169.254/latest", "", "", p)
+		_, err = srv.gateway.DiscoverModels(t.Context(), "http://169.254.169.254/latest", "", "", p, nil)
 
 		var invalid *app.InvalidInputError
 		require.ErrorAs(t, err, &invalid)
