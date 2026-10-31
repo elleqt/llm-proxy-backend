@@ -1,7 +1,7 @@
 # OpenCode Go and prioritized DeepSeek routing
 
 Date: 2026-10-31
-Status: Design sections approved; written specification awaiting user review.
+Status: Written specification approved by the user; implementation not started.
 
 ## Goal
 
