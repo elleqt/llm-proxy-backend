@@ -126,14 +126,14 @@ func TestUpdateCompatPassesTheKeyChangeThrough(t *testing.T) {
 func TestDiscoverCompatReportsModelsOtherProvidersServe(t *testing.T) {
 	fixture := newProvidersFixture(t)
 
-	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID, (*app.ProxyChoice)(nil)).
+	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "", compatAccount.ID, (*app.ProxyChoice)(nil), map[string]string(nil)).
 		Return([]string{"m", "shared", "fresh"}, nil)
 	fixture.accounts.EXPECT().Accounts().Return([]app.VendorAccount{compatAccount})
 	fixture.catalog.EXPECT().Models().Return(map[string][]string{
 		"acme": {"m", "shared"}, "other": {"shared"}, "claude": {"claude-x"},
 	})
 
-	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1/", "", compatAccount.ID, nil)
+	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1/", "", compatAccount.ID, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, providers.CompatDiscovery{
 		Models:    []string{"m", "shared", "fresh"},
@@ -148,9 +148,9 @@ func TestDiscoverCompatPassesTheRefusalThrough(t *testing.T) {
 	svc := providers.New(accounts, mocks.NewVendorLogins(t), mocks.NewModelCatalog(t), mocks.NewVendorQuota(t),
 		mocks.NewAccountMetrics(t), mocks.NewAuditSink(t), systemClock{}, discardLogger{})
 
-	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
+	accounts.EXPECT().DiscoverModels(mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil, app.ErrProviderAuthFailed)
 
-	_, err := svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "", nil)
+	_, err := svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "", nil, nil)
 	require.ErrorIs(t, err, app.ErrProviderAuthFailed)
 }
 
@@ -254,7 +254,7 @@ func TestDiscoverCompatRefusesABadProxy(t *testing.T) {
 	fixture := newProvidersFixture(t)
 
 	_, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "",
-		&app.ProxyChoice{Mode: app.ProxyCustom, URL: "http://proxy.example.com:70000"})
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: "http://proxy.example.com:70000"}, nil)
 
 	var invalid *app.InvalidInputError
 	require.ErrorAs(t, err, &invalid)
@@ -267,12 +267,12 @@ func TestDiscoverCompatPassesTheProxyThrough(t *testing.T) {
 	fixture := newProvidersFixture(t)
 
 	fixture.accounts.EXPECT().DiscoverModels(mock.Anything, "https://api.example.com/v1", "k", "",
-		&app.ProxyChoice{Mode: app.ProxyCustom, URL: compatProxySecret}).Return([]string{"m"}, nil)
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: compatProxySecret}, map[string]string(nil)).Return([]string{"m"}, nil)
 	fixture.accounts.EXPECT().Accounts().Return(nil)
 	fixture.catalog.EXPECT().Models().Return(nil)
 
 	got, err := fixture.svc.DiscoverCompat(context.Background(), providerAdmin(), "https://api.example.com/v1", "k", "",
-		&app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + compatProxySecret + " "})
+		&app.ProxyChoice{Mode: app.ProxyCustom, URL: " " + compatProxySecret + " "}, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"m"}, got.Models)
 }

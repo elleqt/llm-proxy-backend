@@ -56,6 +56,7 @@ Clients: Claude Code, [omp](https://github.com/can1357/oh-my-pi), any OpenAI-com
 | Claude (Pro/Max subscription) | Browser sign-in wizard ([Quick start](#7-add-a-vendor-account)) | `claude` |
 | ChatGPT (Plus/Pro subscription, Codex backend) | Browser sign-in wizard | `chatgpt` |
 | Any OpenAI-compatible API: a hosted vendor, a router, a local Ollama or vLLM | Base URL, optional API key and models in the admin panel ([details](#openai-compatible-providers)) | the name you give it |
+| OpenCode Go subscription | OpenAI-compatible provider with its Go base URL, API key and session header ([recipe](#opencode-go-with-official-deepseek-fallback)) | the name you give it |
 
 Each kind can be added as many times as needed: several subscription accounts, several OpenAI-compatible providers. OpenAI-compatible providers are tested end to end against [DeepSeek](https://api-docs.deepseek.com/) (model discovery, chat, streaming, and the Anthropic `/v1/messages` route translated to it); other vendors that speak the same `/models` and `/chat/completions` API are expected to work the same way.
 
@@ -624,6 +625,10 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 
 **Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add provider** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
+Every account, including Claude and ChatGPT subscriptions, has a **Usage role** saved immediately from its row: **Preferred** (`1`), **Normal** (`0`, the default for new accounts), or **Reserve** (`-1`). For the same model, the highest available tier is selected; equal-tier accounts use the configured routing strategy (round-robin by default). With sticky sessions, new conversations are distributed while established conversations keep their available account. A second ChatGPT identity is Normal by default and shares new conversations with other Normal identities. The account editor also offers a custom signed integer priority; existing custom values are preserved.
+
+**Sticky sessions** are controlled once, at the top of **Admin → Providers**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
+
 #### OpenAI-compatible providers
 
 **Add provider → OpenAI-compatible** adds any vendor that speaks the OpenAI API: a hosted API, a router, a local Ollama or vLLM. It takes effect at once, without a restart, and you can add as many as you like.
@@ -633,14 +638,38 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 - **API key**: optional (a local vendor usually needs none). It is stored encrypted like the vendor accounts' credentials and never shown again; when editing, leave it empty to keep it. A stored key is bound to its base URL: changing the base URL needs the key typed again (or removed), so a key never follows a provider to another host.
 - **Models**: **Discover models** asks the vendor (`GET <base URL>/models`, through `proxy-url` when set) and lets you pick which to serve, each optionally under an alias. A model can also be typed by hand. The list does not follow the vendor by itself: discover again and save to change it.
 - **Prefix** (optional): clients then request `<prefix>/<model>`.
+- **Usage role**: the same Preferred/Normal/Reserve control as subscription accounts, with a custom priority in the account editor.
+- **HTTP headers** (Advanced): custom vendor headers, encrypted with the credential. Only their names are returned; values are never shown again. Keep the saved map, replace it completely, or remove it. Changing the base URL requires explicitly replacing or removing saved headers, independently of the API key. Authentication and HTTP transport/framing headers cannot be overridden.
 
-Two providers may serve the same model name, for example two keys of one vendor: requests to it are spread across them. Such a model is admitted only to users allowed it on **every** provider serving it (see [Access control](#access-control)); the form warns when a discovered model is already served by another provider. Give one of them a prefix or aliases to keep them apart instead. Set prices for their models in **Admin → Prices**.
+Two providers may serve the same model name or alias. CLIProxyAPI selects the highest available priority tier and handles failover and cooldowns; accounts at the same tier follow the configured routing strategy. Such a model is admitted only to users allowed it on **every** provider serving it (see [Access control](#access-control)); the form warns when a discovered model is already served by another provider. Give one of them a prefix or different aliases to keep them apart instead. Set prices for their models in **Admin → Prices**. The usage ledger attributes a request to the provider/account that actually served it.
+
+Header values can use CLIProxyAPI's dynamic expansion: `$CPA-SESSION-ID` uses the gateway's session identity, and `$Header-Name` copies a client header when present. Unresolved variables are omitted. Model discovery has no conversation session, so a vendor requiring that header may reject discovery; enter its models manually instead. In the API, omit `headers` to preserve saved values, send `{}` to remove them, or send a complete replacement map. Omitted update `priority` preserves the saved value. Details expose `headerNames`, not values. Saved keys and headers are not forwarded to an edited discovery destination or a redirect to another host.
+
+##### OpenCode Go with official DeepSeek fallback
+
+Go is the subscription service, not the Zen/pay-as-you-go endpoint:
+
+1. Add an OpenAI-compatible provider named `opencode-go`, using base URL `https://opencode.ai/inference/go/openai/v1` and your Go key. Select the **Preferred** role; in Advanced, set header `x-opencode-session` to `$CPA-SESSION-ID`. Do not put the key in a custom Authorization header; use the dedicated API-key field. DeepSeek requires the Go workspace's Privacy → Regions setting to allow Global.
+2. Add the official API as provider `deepseek`, base URL `https://api.deepseek.com`, its own key, and the **Reserve** role.
+3. Configure the same public aliases on both providers, without conflicting prefixes:
+
+   | Client-facing alias | Go model name | Official API model name |
+   | --- | --- | --- |
+   | `deepseek-flash` | `deepseek-v4.1-flash` | `deepseek-flash` |
+   | `deepseek-v4-pro` | `deepseek-v4-pro` | `deepseek-v4-pro` |
+
+   The official [`deepseek-flash` alias currently serves V4.1 Flash](https://api-docs.deepseek.com/quick_start/pricing/). Check both vendors' current catalogs before mapping other generations or tiers.
+4. Give each intended user or service account access on both providers, for example `opencode-go:deepseek-*` and `deepseek:deepseek-*`. Do not bypass the normal shared-model access rule.
+5. Keep clients ordinary: omp uses its `deepseek` provider with the gateway's `/v1` base URL and a personal gateway key; LibreChat uses its normal DeepSeek custom endpoint against that same gateway. Neither client needs the Go key, session header, or a fallback mechanism.
+
+New sessions prefer available Go capacity. Go authentication/access failures, exhausted allowance, rate limits, or temporary outages can cause **paid official-API fallback**, following CLIProxyAPI's native rules. Invalid client requests are not retried through another source, and an answer already being streamed is not replayed. With sticky sessions enabled, a conversation switched to the official API stays there until its binding expires or that account becomes unavailable, even after Go recovers; a new session prefers available Go again. Subscription use and the ledger's model-cost estimate are not the same as actual subscription billing.
+
 
 ### Gateway settings
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval, sticky sessions) or as YAML. Every change can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change here can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it. The immediate sticky-session switch lives on **Admin → Providers**.
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.

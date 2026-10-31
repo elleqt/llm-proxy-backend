@@ -800,6 +800,7 @@ func VendorAccount(auth *coreauth.Auth) app.VendorAccount {
 		Label:           auth.Label,
 		Status:          string(auth.Status),
 		Disabled:        auth.Disabled,
+		Priority:        accountPriority(auth),
 		LastRefreshedAt: lastRefreshed(auth),
 		Proxy:           accountProxy(auth.ProxyURL),
 	}
@@ -997,17 +998,22 @@ func (g *Gateway) addLocked(ctx context.Context, auth *coreauth.Auth) (*coreauth
 		key = auth.ID
 	}
 
-	// A re-sign-in (say after the token expired) brings a fresh login with no
-	// proxy; saving it as is would silently move the account to another
-	// egress. Keep the held account's proxy unless the new auth names its own.
-	if strings.TrimSpace(auth.ProxyURL) == "" {
-		for _, held := range g.coreAuth.List() {
-			if credentialKey(held) == key && held.ProxyURL != "" {
-				setProxy(auth, held.ProxyURL)
-
-				break
-			}
+	// Reauthentication replaces vendor tokens, not administrator-owned routing.
+	// Preserve its priority and, unless explicitly replaced, its proxy.
+	for _, held := range g.coreAuth.List() {
+		if credentialKey(held) != key {
+			continue
 		}
+
+		if strings.TrimSpace(auth.ProxyURL) == "" && held.ProxyURL != "" {
+			setProxy(auth, held.ProxyURL)
+		}
+
+		if _, assigned := held.Metadata[metadataPriority]; assigned {
+			setAccountPriority(auth, accountPriority(held))
+		}
+
+		break
 	}
 
 	if _, err := g.store.Save(coreauth.WithAuthCreationIntent(ctx), auth); err != nil {

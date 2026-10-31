@@ -469,22 +469,22 @@ func TestDiscoverModels(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	ids, err := gw.DiscoverModels(ctx, vendor.URL+"/ok/", "sk-discover", "", nil)
+	ids, err := gw.DiscoverModels(ctx, vendor.URL+"/ok/", "sk-discover", "", nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, []string{"a", "b"}, ids)
 	require.Equal(t, "Bearer sk-discover", gotAuth)
 
-	ids, err = gw.DiscoverModels(ctx, vendor.URL+"/here", "", "", nil)
+	ids, err = gw.DiscoverModels(ctx, vendor.URL+"/here", "", "", nil, nil)
 	require.NoError(t, err, "a redirect on the same host is followed")
 	require.Equal(t, []string{"a", "b"}, ids)
 	require.Empty(t, gotAuth, "a key was sent though none was given")
 
-	_, err = gw.DiscoverModels(ctx, vendor.URL+"/denied", "sk-discover", "", nil)
+	_, err = gw.DiscoverModels(ctx, vendor.URL+"/denied", "sk-discover", "", nil, nil)
 	require.ErrorIs(t, err, app.ErrProviderAuthFailed)
 	require.NotContains(t, err.Error(), vendorSecret)
 
 	for _, path := range []string{"/broken", "/html", "/huge", "/away"} {
-		_, err = gw.DiscoverModels(ctx, vendor.URL+path, "sk-discover", "", nil)
+		_, err = gw.DiscoverModels(ctx, vendor.URL+path, "sk-discover", "", nil, nil)
 		require.ErrorIs(t, err, app.ErrProviderUnreachable, path)
 		require.NotContains(t, err.Error(), vendorSecret, path)
 		require.NotContains(t, err.Error(), vendor.URL, "%s: the error names the URL", path)
@@ -510,7 +510,7 @@ func TestDiscoverModelsRefusesLinkLocalTargets(t *testing.T) {
 			gw := &Gateway{current: &cliproxyconfig.Config{ProxyURL: proxyURL}}
 
 			for _, base := range []string{"http://169.254.169.254/latest", "http://[fe80::1]/v1", "http://0.0.0.0:1/v1"} {
-				_, err := gw.DiscoverModels(t.Context(), base, "sk-discover", "", nil)
+				_, err := gw.DiscoverModels(t.Context(), base, "sk-discover", "", nil, nil)
 
 				var invalid *app.InvalidInputError
 				require.ErrorAs(t, err, &invalid, "%s was asked", base)
@@ -526,7 +526,7 @@ func TestDiscoverModelsRefusesLinkLocalTargets(t *testing.T) {
 	}))
 	t.Cleanup(vendor.Close)
 
-	ids, err := (&Gateway{}).DiscoverModels(t.Context(), vendor.URL, "", "", nil)
+	ids, err := (&Gateway{}).DiscoverModels(t.Context(), vendor.URL, "", "", nil, nil)
 	require.NoError(t, err, "a loopback vendor is allowed")
 	require.Equal(t, []string{"local"}, ids)
 }
@@ -546,7 +546,7 @@ func TestDiscoverModelsGivesUpOnASlowVendor(t *testing.T) {
 	t.Cleanup(func() { close(release); slow.Close() })
 
 	started := time.Now()
-	_, err := (&Gateway{discoverWait: 200 * time.Millisecond}).DiscoverModels(t.Context(), slow.URL, "", "", nil)
+	_, err := (&Gateway{discoverWait: 200 * time.Millisecond}).DiscoverModels(t.Context(), slow.URL, "", "", nil, nil)
 	require.ErrorIs(t, err, app.ErrProviderUnreachable)
 	require.Less(t, time.Since(started), 5*time.Second, "discovery waited past its timeout")
 }
@@ -577,11 +577,11 @@ func TestDiscoverModelsWithTheStoredKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL+"/", "", account.ID, nil)
+	_, err = srv.gateway.DiscoverModels(t.Context(), vendor.URL+"/", "", account.ID, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, "Bearer "+compatKey, gotAuth)
 
-	_, err = srv.gateway.DiscoverModels(t.Context(), elsewhere.URL, "", account.ID, nil)
+	_, err = srv.gateway.DiscoverModels(t.Context(), elsewhere.URL, "", account.ID, nil, nil)
 
 	var invalid *app.InvalidInputError
 	require.ErrorAs(t, err, &invalid, "the stored key was offered to another host")

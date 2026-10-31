@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -48,6 +50,7 @@ const (
 	compatMetaPrefix  = "prefix"
 	compatMetaModels  = "models"
 	compatMetaLabel   = "label"
+	compatMetaHeaders = "headers"
 
 	// compatModelReasoningLevels is the key of a model's own reasoning levels
 	// in a models entry; absent for a model that follows the default set.
@@ -119,6 +122,14 @@ func applyCompatAttributes(auth *coreauth.Auth) {
 		delete(auth.Attributes, compatAttrAPIKey)
 	}
 
+	for key := range auth.Attributes {
+		if strings.HasPrefix(key, "header:") {
+			delete(auth.Attributes, key)
+		}
+	}
+
+	coreauth.ApplyCustomHeadersFromMetadata(auth)
+
 	auth.Label = name
 	auth.Prefix = prefix
 }
@@ -145,6 +156,8 @@ func compatMetadata(provider app.CompatProvider) map[string]any {
 		compatMetaName:    provider.Name,
 		compatMetaBaseURL: provider.BaseURL,
 		compatMetaModels:  models,
+		metadataPriority:  strconv.FormatInt(int64(provider.Priority), 10),
+		compatMetaHeaders: maps.Clone(provider.Headers),
 	}
 	if provider.APIKey != "" {
 		meta[compatMetaAPIKey] = provider.APIKey
@@ -215,10 +228,18 @@ func compatDetails(auth *coreauth.Auth) *app.CompatDetails {
 	baseURL, _ := auth.Metadata[compatMetaBaseURL].(string)
 	apiKey, _ := auth.Metadata[compatMetaAPIKey].(string)
 	prefix, _ := auth.Metadata[compatMetaPrefix].(string)
+	headers := coreauth.ExtractCustomHeadersFromMetadata(auth.Metadata)
+
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+
+	slices.Sort(names)
 
 	return &app.CompatDetails{
 		Name: name, BaseURL: baseURL, Prefix: prefix, HasAPIKey: apiKey != "",
-		Models: compatModels(auth.Metadata),
+		Models: compatModels(auth.Metadata), HeaderNames: names,
 	}
 }
 
@@ -231,9 +252,10 @@ func compatEntry(auth *coreauth.Auth) cliproxyconfig.OpenAICompatibility {
 
 	models := compatModels(auth.Metadata)
 	entry := cliproxyconfig.OpenAICompatibility{
-		Name:    name,
-		BaseURL: baseURL,
-		Models:  make([]cliproxyconfig.OpenAICompatibilityModel, 0, len(models)),
+		Name:     name,
+		BaseURL:  baseURL,
+		Priority: int(accountPriority(auth)),
+		Models:   make([]cliproxyconfig.OpenAICompatibilityModel, 0, len(models)),
 	}
 
 	for _, m := range models {
@@ -430,7 +452,6 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 		return app.VendorAccount{}, fmt.Errorf("%w: %q", errCompatNotHeld, id)
 	}
 
-	name, _ := held.Metadata[compatMetaName].(string)
 	apiKey, _ := held.Metadata[compatMetaAPIKey].(string)
 	storedURL, _ := held.Metadata[compatMetaBaseURL].(string)
 
@@ -439,6 +460,16 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 		apiKey = *update.APIKey
 	case apiKey != "" && strings.TrimRight(storedURL, "/") != strings.TrimRight(update.BaseURL, "/"):
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
+	}
+
+	headers, err := compatHeadersFor(held, update.BaseURL, update.Headers)
+	if err != nil {
+		return app.VendorAccount{}, err
+	}
+
+	priority := accountPriority(held)
+	if update.Priority != nil {
+		priority = *update.Priority
 	}
 
 	// The definition is rebuilt from the update; the proxy is not part of it
@@ -452,19 +483,20 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 
 	next := held.Clone()
 	next.Metadata = compatMetadata(app.CompatProvider{
-		Name: name, BaseURL: update.BaseURL, APIKey: apiKey, Prefix: update.Prefix, Models: update.Models,
+		Name: held.Label, BaseURL: update.BaseURL, APIKey: apiKey, Prefix: update.Prefix, Models: update.Models,
+		Headers: headers, Priority: priority,
 	})
-	next.Metadata[metadataDisabled] = held.Disabled
 	applyCompatAttributes(next)
+	applyAccountPriority(next)
 	setProxy(next, proxy)
 
 	if _, err := g.store.Save(ctx, next); err != nil {
-		return app.VendorAccount{}, fmt.Errorf("gateway: provider %q was not saved: %w", name, err)
+		return app.VendorAccount{}, fmt.Errorf("gateway: provider %q was not saved: %w", held.Label, err)
 	}
 
 	updated, err := g.coreAuth.Update(ctx, next)
 	if err != nil {
-		return app.VendorAccount{}, fmt.Errorf("gateway: provider %q was saved but not applied (retry): %w", name, err)
+		return app.VendorAccount{}, fmt.Errorf("gateway: provider %q was saved but not applied (retry): %w", held.Label, err)
 	}
 
 	if updated == nil {
@@ -487,10 +519,17 @@ func (g *Gateway) UpdateCompatProvider(ctx context.Context, id string, update ap
 // gives up after discoverTimeout or discoverMaxBytes. Errors name neither the
 // URL nor the vendor's answer: app.ErrProviderAuthFailed for 401 and 403,
 // else app.ErrProviderUnreachable.
-func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *app.ProxyChoice) ([]string, error) {
+func (g *Gateway) DiscoverModels(
+	ctx context.Context, baseURL, apiKey, accountID string, proxy *app.ProxyChoice, headers map[string]string,
+) ([]string, error) {
 	held := g.discoveryAccount(accountID)
 
 	apiKey, err := discoveryKey(held, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+
+	headers, err = compatHeadersFor(held, baseURL, headers)
 	if err != nil {
 		return nil, err
 	}
@@ -524,11 +563,7 @@ func (g *Gateway) DiscoverModels(ctx context.Context, baseURL, apiKey, accountID
 		return nil, &app.InvalidInputError{Field: fieldBaseURL}
 	}
 
-	req.Header.Set("Accept", "application/json")
-
-	if apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	applyDiscoveryHeaders(req, apiKey, headers)
 
 	resp, err := client.Do(req)
 	if err != nil {

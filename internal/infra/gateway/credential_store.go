@@ -340,6 +340,11 @@ func (s *CredentialStore) credentialFields(auth *coreauth.Auth) (map[string]any,
 		return nil, errTokenlessCredential
 	}
 
+	// Vendor serializers do not own the administrator's routing preference.
+	if priority, assigned := auth.Metadata[metadataPriority]; assigned {
+		fields[metadataPriority] = priority
+	}
+
 	return fields, nil
 }
 
@@ -532,6 +537,7 @@ func authFromRow(row app.VendorCredential, plaintext []byte) (*coreauth.Auth, er
 	}
 
 	coreauth.ApplyCustomHeadersFromMetadata(auth)
+	applyAccountPriority(auth)
 
 	if isCompatAccount(auth) {
 		applyCompatAttributes(auth)

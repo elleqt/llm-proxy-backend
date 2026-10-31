@@ -374,6 +374,8 @@ type VendorAccount struct {
 	// Status is the gateway's lifecycle status: active, error, disabled, ...
 	Status   string
 	Disabled bool
+	// Priority is shared by every managed account, regardless of credential kind.
+	Priority int32
 	// Proxy is how the account's traffic leaves the gateway.
 	Proxy           AccountProxy
 	LastError       string
@@ -411,6 +413,10 @@ type CompatProvider struct {
 	APIKey  string
 	Prefix  string
 	Models  []CompatModel
+	// Priority prefers larger values across accounts serving the same model.
+	Priority int32
+	// Headers are sealed with the credential and never returned as values.
+	Headers map[string]string
 	// Proxy is the provider's proxy; nil is ProxyInherit.
 	Proxy *ProxyChoice
 }
@@ -422,6 +428,10 @@ type CompatProviderUpdate struct {
 	APIKey  *string
 	Prefix  string
 	Models  []CompatModel
+	// Priority is preserved when nil.
+	Priority *int32
+	// Headers are preserved when nil; a non-nil empty map removes them.
+	Headers map[string]string
 	// Proxy replaces the provider's proxy; nil keeps it.
 	Proxy *ProxyChoice
 }
@@ -429,11 +439,12 @@ type CompatProviderUpdate struct {
 // CompatDetails is an OpenAI-compatible provider as the admin API shows it:
 // whether it has a key, never the key.
 type CompatDetails struct {
-	Name      string
-	BaseURL   string
-	Prefix    string
-	HasAPIKey bool
-	Models    []CompatModel
+	Name        string
+	BaseURL     string
+	Prefix      string
+	HasAPIKey   bool
+	Models      []CompatModel
+	HeaderNames []string
 }
 
 // ProxyMode is how a vendor account's traffic leaves the gateway.
@@ -477,6 +488,8 @@ type VendorAccounts interface {
 	// never holds — config-derived API keys, runtime-only and plugin-virtual
 	// accounts — have nothing to save and come back from configuration.
 	SetAccountProxy(ctx context.Context, id string, p ProxyChoice) error
+	// SetAccountPriority changes the shared routing preference of a held account.
+	SetAccountPriority(ctx context.Context, id string, priority int32) error
 	RemoveAccount(ctx context.Context, id string) error
 	// AddCompatProvider adds an OpenAI-compatible provider and serves its models
 	// at once: ErrConflict when its name is taken, an *InvalidInputError on
@@ -490,7 +503,7 @@ type VendorAccounts interface {
 	// provider with a stored key, with that key (ErrProviderUnreachable,
 	// ErrProviderAuthFailed). It goes out through proxy, else accountID's own
 	// proxy, else the global proxy-url.
-	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *ProxyChoice) ([]string, error)
+	DiscoverModels(ctx context.Context, baseURL, apiKey, accountID string, proxy *ProxyChoice, headers map[string]string) ([]string, error)
 }
 
 // VendorLogin is a pending vendor sign-in: the administrator opens AuthURL in

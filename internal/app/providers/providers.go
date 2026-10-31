@@ -120,6 +120,7 @@ func (s *Service) CompleteLogin(ctx context.Context, actor identity.User, sessio
 type AccountChange struct {
 	Disabled *bool
 	Proxy    *app.ProxyChoice
+	Priority *int32
 }
 
 // Update applies change to account id and returns the account as it now is.
@@ -131,7 +132,7 @@ func (s *Service) Update(ctx context.Context, actor identity.User, id string, ch
 		return app.VendorAccount{}, err
 	}
 
-	if change.Disabled == nil && change.Proxy == nil {
+	if change.Disabled == nil && change.Proxy == nil && change.Priority == nil {
 		return app.VendorAccount{}, &app.InvalidInputError{}
 	}
 
@@ -158,6 +159,15 @@ func (s *Service) Update(ctx context.Context, actor identity.User, id string, ch
 
 		s.record(ctx, actor, "provider.account_proxy", target,
 			map[string]any{auditAccountID: before.ID, auditProvider: before.Provider, "mode": string(change.Proxy.Mode)})
+	}
+
+	if change.Priority != nil {
+		if err := s.accounts.SetAccountPriority(ctx, id, *change.Priority); err != nil {
+			return app.VendorAccount{}, fmt.Errorf("app: set vendor account priority: %w", err)
+		}
+
+		s.record(ctx, actor, "provider.account_priority", target,
+			map[string]any{auditAccountID: before.ID, auditProvider: before.Provider, "priority": *change.Priority})
 	}
 
 	if change.Disabled != nil {

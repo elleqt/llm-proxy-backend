@@ -160,8 +160,8 @@ func (_c *VendorAccounts_AddCompatProvider_Call) RunAndReturn(run func(ctx conte
 }
 
 // DiscoverModels provides a mock function for the type VendorAccounts
-func (_mock *VendorAccounts) DiscoverModels(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice) ([]string, error) {
-	ret := _mock.Called(ctx, baseURL, apiKey, accountID, proxy)
+func (_mock *VendorAccounts) DiscoverModels(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice, headers map[string]string) ([]string, error) {
+	ret := _mock.Called(ctx, baseURL, apiKey, accountID, proxy, headers)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DiscoverModels")
@@ -169,18 +169,18 @@ func (_mock *VendorAccounts) DiscoverModels(ctx context.Context, baseURL string,
 
 	var r0 []string
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, *app.ProxyChoice) ([]string, error)); ok {
-		return returnFunc(ctx, baseURL, apiKey, accountID, proxy)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, *app.ProxyChoice, map[string]string) ([]string, error)); ok {
+		return returnFunc(ctx, baseURL, apiKey, accountID, proxy, headers)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, *app.ProxyChoice) []string); ok {
-		r0 = returnFunc(ctx, baseURL, apiKey, accountID, proxy)
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, string, string, *app.ProxyChoice, map[string]string) []string); ok {
+		r0 = returnFunc(ctx, baseURL, apiKey, accountID, proxy, headers)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]string)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, *app.ProxyChoice) error); ok {
-		r1 = returnFunc(ctx, baseURL, apiKey, accountID, proxy)
+	if returnFunc, ok := ret.Get(1).(func(context.Context, string, string, string, *app.ProxyChoice, map[string]string) error); ok {
+		r1 = returnFunc(ctx, baseURL, apiKey, accountID, proxy, headers)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -198,11 +198,12 @@ type VendorAccounts_DiscoverModels_Call struct {
 //   - apiKey string
 //   - accountID string
 //   - proxy *app.ProxyChoice
-func (_e *VendorAccounts_Expecter) DiscoverModels(ctx any, baseURL any, apiKey any, accountID any, proxy any) *VendorAccounts_DiscoverModels_Call {
-	return &VendorAccounts_DiscoverModels_Call{Call: _e.mock.On("DiscoverModels", ctx, baseURL, apiKey, accountID, proxy)}
+//   - headers map[string]string
+func (_e *VendorAccounts_Expecter) DiscoverModels(ctx any, baseURL any, apiKey any, accountID any, proxy any, headers any) *VendorAccounts_DiscoverModels_Call {
+	return &VendorAccounts_DiscoverModels_Call{Call: _e.mock.On("DiscoverModels", ctx, baseURL, apiKey, accountID, proxy, headers)}
 }
 
-func (_c *VendorAccounts_DiscoverModels_Call) Run(run func(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice)) *VendorAccounts_DiscoverModels_Call {
+func (_c *VendorAccounts_DiscoverModels_Call) Run(run func(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice, headers map[string]string)) *VendorAccounts_DiscoverModels_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
@@ -224,12 +225,17 @@ func (_c *VendorAccounts_DiscoverModels_Call) Run(run func(ctx context.Context, 
 		if args[4] != nil {
 			arg4 = args[4].(*app.ProxyChoice)
 		}
+		var arg5 map[string]string
+		if args[5] != nil {
+			arg5 = args[5].(map[string]string)
+		}
 		run(
 			arg0,
 			arg1,
 			arg2,
 			arg3,
 			arg4,
+			arg5,
 		)
 	})
 	return _c
@@ -240,7 +246,7 @@ func (_c *VendorAccounts_DiscoverModels_Call) Return(strings []string, err error
 	return _c
 }
 
-func (_c *VendorAccounts_DiscoverModels_Call) RunAndReturn(run func(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice) ([]string, error)) *VendorAccounts_DiscoverModels_Call {
+func (_c *VendorAccounts_DiscoverModels_Call) RunAndReturn(run func(ctx context.Context, baseURL string, apiKey string, accountID string, proxy *app.ProxyChoice, headers map[string]string) ([]string, error)) *VendorAccounts_DiscoverModels_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -361,6 +367,69 @@ func (_c *VendorAccounts_SetAccountDisabled_Call) Return(err error) *VendorAccou
 }
 
 func (_c *VendorAccounts_SetAccountDisabled_Call) RunAndReturn(run func(ctx context.Context, id string, disabled bool) error) *VendorAccounts_SetAccountDisabled_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// SetAccountPriority provides a mock function for the type VendorAccounts
+func (_mock *VendorAccounts) SetAccountPriority(ctx context.Context, id string, priority int32) error {
+	ret := _mock.Called(ctx, id, priority)
+
+	if len(ret) == 0 {
+		panic("no return value specified for SetAccountPriority")
+	}
+
+	var r0 error
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string, int32) error); ok {
+		r0 = returnFunc(ctx, id, priority)
+	} else {
+		r0 = ret.Error(0)
+	}
+	return r0
+}
+
+// VendorAccounts_SetAccountPriority_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'SetAccountPriority'
+type VendorAccounts_SetAccountPriority_Call struct {
+	*mock.Call
+}
+
+// SetAccountPriority is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id string
+//   - priority int32
+func (_e *VendorAccounts_Expecter) SetAccountPriority(ctx any, id any, priority any) *VendorAccounts_SetAccountPriority_Call {
+	return &VendorAccounts_SetAccountPriority_Call{Call: _e.mock.On("SetAccountPriority", ctx, id, priority)}
+}
+
+func (_c *VendorAccounts_SetAccountPriority_Call) Run(run func(ctx context.Context, id string, priority int32)) *VendorAccounts_SetAccountPriority_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		var arg0 context.Context
+		if args[0] != nil {
+			arg0 = args[0].(context.Context)
+		}
+		var arg1 string
+		if args[1] != nil {
+			arg1 = args[1].(string)
+		}
+		var arg2 int32
+		if args[2] != nil {
+			arg2 = args[2].(int32)
+		}
+		run(
+			arg0,
+			arg1,
+			arg2,
+		)
+	})
+	return _c
+}
+
+func (_c *VendorAccounts_SetAccountPriority_Call) Return(err error) *VendorAccounts_SetAccountPriority_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *VendorAccounts_SetAccountPriority_Call) RunAndReturn(run func(ctx context.Context, id string, priority int32) error) *VendorAccounts_SetAccountPriority_Call {
 	_c.Call.Return(run)
 	return _c
 }

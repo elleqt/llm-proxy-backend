@@ -64,6 +64,10 @@ func (s *Service) CreateCompat(ctx context.Context, actor identity.User, provide
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
+	if provider.Headers, err = validCompatHeaders(provider.Headers); err != nil {
+		return app.VendorAccount{}, err
+	}
+
 	if provider.Proxy, err = validProxy(provider.Proxy); err != nil {
 		return app.VendorAccount{}, err
 	}
@@ -109,6 +113,10 @@ func (s *Service) UpdateCompat(
 		return app.VendorAccount{}, &app.InvalidInputError{Field: "apiKey"}
 	}
 
+	if update.Headers, err = validCompatHeaders(update.Headers); err != nil {
+		return app.VendorAccount{}, err
+	}
+
 	if update.Proxy, err = validProxy(update.Proxy); err != nil {
 		return app.VendorAccount{}, err
 	}
@@ -122,6 +130,7 @@ func (s *Service) UpdateCompat(
 
 	detail := compatAudit(account, account.Compat != nil && account.Compat.HasAPIKey)
 	detail["key_changed"] = update.APIKey != nil
+	detail["headers_changed"] = update.Headers != nil
 
 	detail["proxy_changed"] = update.Proxy != nil
 	if update.Proxy != nil {
@@ -149,6 +158,7 @@ func (s *Service) CompatDefaults(actor identity.User) ([]string, error) {
 // Nothing is saved.
 func (s *Service) DiscoverCompat(
 	ctx context.Context, actor identity.User, baseURL, apiKey, accountID string, proxy *app.ProxyChoice,
+	headers map[string]string,
 ) (CompatDiscovery, error) {
 	if err := app.RequireAdmin(actor); err != nil {
 		return CompatDiscovery{}, err
@@ -159,11 +169,15 @@ func (s *Service) DiscoverCompat(
 		return CompatDiscovery{}, err
 	}
 
+	if headers, err = validCompatHeaders(headers); err != nil {
+		return CompatDiscovery{}, err
+	}
+
 	if proxy, err = validProxy(proxy); err != nil {
 		return CompatDiscovery{}, err
 	}
 
-	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID, proxy)
+	ids, err := s.accounts.DiscoverModels(ctx, base, apiKey, accountID, proxy, headers)
 	if err != nil {
 		return CompatDiscovery{}, fmt.Errorf("app: discover models: %w", err)
 	}
@@ -318,6 +332,8 @@ func compatAudit(account app.VendorAccount, hasKey bool) map[string]any {
 	if account.Compat != nil {
 		detail["base_url"] = account.Compat.BaseURL
 		detail[fieldModels] = len(account.Compat.Models)
+		detail["priority"] = account.Priority
+		detail["header_names"] = account.Compat.HeaderNames
 	}
 
 	return detail
