@@ -627,7 +627,7 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 
 Every account, including Claude and ChatGPT subscriptions, has a **Usage role** saved immediately from its row: **Preferred** (`1`), **Normal** (`0`, the default for new accounts), or **Reserve** (`-1`). For the same model, the highest available tier is selected; equal-tier accounts use the configured routing strategy (round-robin by default). With sticky sessions, new conversations are distributed while established conversations keep their available account. A second ChatGPT identity is Normal by default and shares new conversations with other Normal identities. The account editor also offers a custom signed integer priority; existing custom values are preserved.
 
-**Sticky sessions** are controlled once, at the top of **Admin → Providers**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
+**Sticky sessions** are controlled once in **Admin → Settings**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
 
 #### OpenAI-compatible providers
 
@@ -669,7 +669,7 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change here can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it. The immediate sticky-session switch lives on **Admin → Providers**.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. These editor changes can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply them. The separate **Sticky sessions** switch on this same page saves immediately and preserves an explicit off setting.
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
