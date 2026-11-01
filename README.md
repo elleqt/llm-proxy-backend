@@ -675,6 +675,14 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
 - The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `models`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**; where the model catalogs come from (`models`) is `LLMPROXY_MODEL_CATALOG_UPDATES`. Cooldowns stay in memory and CLIProxyAPI writes no request or error log files, so the last three would have no effect.
 
+#### Unknown upstream errors
+
+**Admin → Settings → Mask unknown upstream errors** is **on by default**. It replaces unclassified HTTP **500–599** diagnostics with a stable `upstream_error`, such as `Upstream error (HTTP 504)`, while preserving the HTTP status. It does not parse HTML or infer failures from successful responses. HTTP 200, 4xx and already committed streams pass through unchanged, and native retries, fallback and cooldown decisions happen before response masking.
+
+Recognition uses concrete machine-readable error codes/types, not merely a generic `server_error`/`api_error` wrapper. Auth-selection wrappers (`auth_unavailable` / `auth_not_found`) retain their classification with a canonical message instead of copying nested upstream diagnostics. More specific authentication classifications take precedence. Existing `Retry-After` headers and structured retry timing/flags are preserved; masking does not invent a retry delay.
+
+The preference is stored with response-visibility settings, separate from upstream YAML. A missing preference in an older installation enables masking; an explicitly saved **off** survives restart. Turn it off only when inspecting original diagnostics, which may expose provider internals. Admin config updates apply only supplied fields, so changing cost visibility does not reset this preference.
+
 ### Prices
 
 The price list (US dollars per million tokens: input, output, cache read, cache write) is used only for cost estimates.

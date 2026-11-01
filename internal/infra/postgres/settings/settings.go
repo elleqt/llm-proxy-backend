@@ -28,10 +28,11 @@ const spendLimitsKey = "spend_limits"
 // displayKey is the settings row holding app.DisplayConfig as displayRow.
 const displayKey = "display"
 
-// displayRow is the stored form of app.DisplayConfig; a field missing from a
-// row saved by an older build reads as its zero value, which shows the least.
+// displayRow stores response-visibility preferences. Missing mask_unknown_errors
+// in a legacy row keeps masking enabled; an explicit false remains false.
 type displayRow struct {
-	CostsVisible bool `json:"costs_visible"`
+	CostsVisible      bool `json:"costs_visible"`
+	MaskUnknownErrors bool `json:"mask_unknown_errors"`
 }
 
 type Repo struct{ pool *pgxpool.Pool }
@@ -111,14 +112,14 @@ func (r *Repo) DisplayConfig(ctx context.Context) (app.DisplayConfig, error) {
 
 	err := r.pool.QueryRow(ctx, `SELECT value FROM settings WHERE key = $1`, displayKey).Scan(&raw)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return app.DisplayConfig{}, nil
+		return app.DisplayConfig{MaskUnknownErrors: true}, nil
 	}
 
 	if err != nil {
 		return app.DisplayConfig{}, fmt.Errorf("postgres: read display config: %w", err)
 	}
 
-	var row displayRow
+	row := displayRow{MaskUnknownErrors: true}
 	if err := json.Unmarshal(raw, &row); err != nil {
 		return app.DisplayConfig{}, fmt.Errorf("postgres: decode display config: %w", err)
 	}
