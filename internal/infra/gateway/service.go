@@ -89,6 +89,8 @@ type Params struct {
 	// Costs says whether a spend-limit refusal names the limit's amount in US
 	// dollars. Nil never names it.
 	Costs app.CostVisibility
+	// ErrorVisibility controls response detail masking. Nil uses safe defaults.
+	ErrorVisibility app.ErrorVisibility
 	// Observer is told what the policy gate refuses. Nil observes nothing.
 	Observer gate.Observer
 	// Log receives the policy gate's own failures. Nil discards them.
@@ -428,7 +430,8 @@ func New(params Params) (*Gateway, error) {
 		}).
 		WithServerOptions(
 			sdkapi.WithEngineConfigurator(gw.configureEngine),
-			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, spend, params.Observer, params.Log)),
+			sdkapi.WithMiddleware(policyGate(params.Resolver, catalog, spend, params.Observer, params.Log),
+				maskUnknownUpstreamErrors(params.ErrorVisibility)),
 			sdkapi.WithRequestLoggerFactory(noRequestLogger),
 		)
 	if len(params.Middleware) > 0 {

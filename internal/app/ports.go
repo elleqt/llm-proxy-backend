@@ -698,19 +698,25 @@ type SettingsRepo interface {
 	SetDisplayConfig(ctx context.Context, cfg DisplayConfig, by uuid.UUID, at time.Time) error
 }
 
-// DisplayConfig is what administrators let users see of the deployment. The zero
-// value shows the least.
+// DisplayConfig controls which deployment details are exposed in responses.
 type DisplayConfig struct {
 	// CostsVisible shows users their costs in US dollars: in the cabinet, and the
 	// amount in a spend-limit refusal. Without it they see tokens and each
 	// limit's share only.
 	CostsVisible bool
+	// MaskUnknownErrors hides unclassified upstream 5xx details. On by default.
+	MaskUnknownErrors bool
 }
 
 // CostVisibility answers from memory whether users are shown their costs in US
 // dollars (DisplayConfig.CostsVisible).
 type CostVisibility interface {
 	CostsVisible() bool
+}
+
+// ErrorVisibility supplies the administrator's response-detail policy from memory.
+type ErrorVisibility interface {
+	MaskUnknownErrors() bool
 }
 
 // VendorCredential is a vendor account's stored credential. Sealed is opaque to the

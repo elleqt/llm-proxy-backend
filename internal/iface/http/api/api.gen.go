@@ -305,6 +305,15 @@ type Activity struct {
 type AdminConfig struct {
 	// CostsVisible Show users their costs in US dollars: in the cabinet, and the amount in the proxied API's spend-limit refusal. Off by default.
 	CostsVisible bool `json:"costsVisible"`
+
+	// MaskUnknownErrors Mask unrecognized upstream HTTP 5xx error details. On by default; recognized errors, HTTP 200, 4xx and committed streams are unchanged.
+	MaskUnknownErrors bool `json:"maskUnknownErrors"`
+}
+
+// AdminConfigUpdate defines model for AdminConfigUpdate.
+type AdminConfigUpdate struct {
+	CostsVisible      *bool `json:"costsVisible,omitempty"`
+	MaskUnknownErrors *bool `json:"maskUnknownErrors,omitempty"`
 }
 
 // AdminUser defines model for AdminUser.
@@ -985,7 +994,7 @@ type GetMyUsageParams struct {
 }
 
 // ReplaceAdminConfigJSONRequestBody defines body for ReplaceAdminConfig for application/json ContentType.
-type ReplaceAdminConfigJSONRequestBody = AdminConfig
+type ReplaceAdminConfigJSONRequestBody = AdminConfigUpdate
 
 // ReplaceDefaultLimitsJSONRequestBody defines body for ReplaceDefaultLimits for application/json ContentType.
 type ReplaceDefaultLimitsJSONRequestBody = ReplaceDefaultLimitsJSONBody
