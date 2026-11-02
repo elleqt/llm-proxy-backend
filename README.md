@@ -170,7 +170,7 @@ services:
 
   backend:
     # Keep one version for both images.
-    image: yoonaowo/llm-proxy-backend:0.8.0
+    image: yoonaowo/llm-proxy-backend:0.8.2
     environment:
       LLMPROXY_DATABASE_URL: postgres://llmproxy@postgres:5432/llmproxy?sslmode=disable
       # CHANGE ME: the same value as POSTGRES_PASSWORD above.
@@ -191,7 +191,7 @@ services:
         condition: service_healthy
 
   frontend:
-    image: yoonaowo/llm-proxy-frontend:0.8.0
+    image: yoonaowo/llm-proxy-frontend:0.8.2
     ports:
       - "8081:8080"
 
@@ -627,7 +627,7 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 
 Every account, including Claude and ChatGPT subscriptions, has a **Usage role** saved immediately from its row: **Preferred** (`1`), **Normal** (`0`, the default for new accounts), or **Reserve** (`-1`). For the same model, the highest available tier is selected; equal-tier accounts use the configured routing strategy (round-robin by default). With sticky sessions, new conversations are distributed while established conversations keep their available account. A second ChatGPT identity is Normal by default and shares new conversations with other Normal identities. The account editor also offers a custom signed integer priority; existing custom values are preserved.
 
-**Sticky sessions** are controlled once, at the top of **Admin → Providers**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
+**Sticky sessions** are controlled once in **Admin → Settings**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.
 
 #### OpenAI-compatible providers
 
@@ -669,11 +669,19 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 
 ![Admin: settings](https://raw.githubusercontent.com/elleqt/llm-proxy-frontend/main/docs/screenshots/admin-settings.png)
 
-**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. Every change here can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply it. The immediate sticky-session switch lives on **Admin → Providers**.
+**Admin → Settings** edits the embedded CLIProxyAPI configuration. It is stored in Postgres and applied without a restart. You can edit it as typed fields (`proxy-url`, request retries, maximum retry interval) or as YAML. These editor changes can be checked with a **dry run**, which shows a unified diff against the running configuration before you apply them. The separate **Sticky sessions** switch on this same page saves immediately and preserves an explicit off setting.
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
 - The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `models`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**; where the model catalogs come from (`models`) is `LLMPROXY_MODEL_CATALOG_UPDATES`. Cooldowns stay in memory and CLIProxyAPI writes no request or error log files, so the last three would have no effect.
+
+#### Unknown upstream errors
+
+**Admin → Settings → Mask unknown upstream errors** is **on by default**. It replaces unclassified HTTP **500–599** diagnostics with a stable `upstream_error`, such as `Upstream error (HTTP 504)`, while preserving the HTTP status. It does not parse HTML or infer failures from successful responses. HTTP 200, 4xx and already committed streams pass through unchanged, and native retries, fallback and cooldown decisions happen before response masking.
+
+Recognition uses concrete machine-readable error codes/types, not merely a generic `server_error`/`api_error` wrapper. Auth-selection wrappers (`auth_unavailable` / `auth_not_found`) retain their classification with a canonical message instead of copying nested upstream diagnostics. More specific authentication classifications take precedence. Existing `Retry-After` headers and structured retry timing/flags are preserved; masking does not invent a retry delay.
+
+The preference is stored with response-visibility settings, separate from upstream YAML. A missing preference in an older installation enables masking; an explicitly saved **off** survives restart. Turn it off only when inspecting original diagnostics, which may expose provider internals. Admin config updates apply only supplied fields, so changing cost visibility does not reset this preference.
 
 ### Prices
 

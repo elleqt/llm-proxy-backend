@@ -21,6 +21,7 @@ packages:
       SpendWindowRepo:
       SpendGate:
       CostVisibility:
+      ErrorVisibility:
       AuditSink:
       IdentityProvider:
       IdentityRepo:
