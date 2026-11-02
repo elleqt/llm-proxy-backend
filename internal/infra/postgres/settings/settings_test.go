@@ -62,14 +62,30 @@ func TestDisplayConfig(t *testing.T) {
 
 	got, err := repo.DisplayConfig(ctx)
 	require.NoError(t, err, "DisplayConfig before any save")
-	require.Equal(t, app.DisplayConfig{}, got, "DisplayConfig before any save")
+	require.Equal(t, app.DisplayConfig{MaskUnknownErrors: true}, got, "DisplayConfig before any save")
 
 	at := time.Now().UTC().Truncate(time.Microsecond)
-	for _, want := range []app.DisplayConfig{{CostsVisible: true}, {CostsVisible: false}} {
+	for _, want := range []app.DisplayConfig{{CostsVisible: true, MaskUnknownErrors: false}, {CostsVisible: false, MaskUnknownErrors: true}} {
 		require.NoError(t, repo.SetDisplayConfig(ctx, want, uuid.Nil, at), "save %+v", want)
 
 		got, err = repo.DisplayConfig(ctx)
 		require.NoError(t, err, "DisplayConfig after saving %+v", want)
 		require.Equal(t, want, got, "DisplayConfig after save")
 	}
+}
+
+func TestLegacyDisplayConfigMasksUnknownErrorsUntilExplicitlyDisabled(t *testing.T) {
+	pool := pgtest.NewTestPool(t)
+	repo := settings.New(pool)
+	_, err := pool.Exec(t.Context(), `INSERT INTO settings (key, value, updated_at) VALUES ('display', '{"costs_visible":true}'::jsonb, now())`)
+	require.NoError(t, err)
+	config, err := repo.DisplayConfig(t.Context())
+	require.NoError(t, err)
+	require.True(t, config.MaskUnknownErrors)
+	require.True(t, config.CostsVisible)
+	require.NoError(t, repo.SetDisplayConfig(t.Context(), app.DisplayConfig{CostsVisible: true, MaskUnknownErrors: false}, uuid.Nil, time.Now()))
+	reloaded, err := settings.New(pool).DisplayConfig(t.Context())
+	require.NoError(t, err)
+	require.False(t, reloaded.MaskUnknownErrors)
+	require.True(t, reloaded.CostsVisible)
 }

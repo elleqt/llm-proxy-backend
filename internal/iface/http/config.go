@@ -3,7 +3,7 @@ package http
 import (
 	"net/http"
 
-	"github.com/elleqt/llm-proxy-backend/internal/app"
+	"github.com/elleqt/llm-proxy-backend/internal/app/display"
 	"github.com/elleqt/llm-proxy-backend/internal/iface/http/api"
 )
 
@@ -25,23 +25,25 @@ func (rt *router) getAdminConfig(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	writeJSON(rw, http.StatusOK, api.AdminConfig{CostsVisible: cfg.CostsVisible})
+	writeJSON(rw, http.StatusOK, api.AdminConfig{CostsVisible: cfg.CostsVisible, MaskUnknownErrors: cfg.MaskUnknownErrors})
 }
 
 func (rt *router) replaceAdminConfig(rw http.ResponseWriter, req *http.Request) {
 	actor, _ := callerFrom(req.Context())
 
-	var body api.AdminConfig
+	var body api.AdminConfigUpdate
 	if !decodeJSON(rw, req, &body) {
 		return
 	}
 
-	cfg, err := rt.Display.Set(req.Context(), actor.user, app.DisplayConfig{CostsVisible: body.CostsVisible})
+	cfg, err := rt.Display.Set(req.Context(), actor.user, display.Patch{
+		CostsVisible: body.CostsVisible, MaskUnknownErrors: body.MaskUnknownErrors,
+	})
 	if err != nil {
 		rt.adminFailure(rw, req, err)
 
 		return
 	}
 
-	writeJSON(rw, http.StatusOK, api.AdminConfig{CostsVisible: cfg.CostsVisible})
+	writeJSON(rw, http.StatusOK, api.AdminConfig{CostsVisible: cfg.CostsVisible, MaskUnknownErrors: cfg.MaskUnknownErrors})
 }

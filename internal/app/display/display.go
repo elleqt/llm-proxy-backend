@@ -1,6 +1,5 @@
-// Package display keeps what administrators let users see of the deployment
-// (app.DisplayConfig): it holds the setting in memory for every request that
-// reads it, and serves the administrators' view and edit of it.
+// Package display keeps the deployment's response-visibility preferences in memory
+// and serves their administrator-only updates.
 package display
 
 import (
@@ -35,11 +34,10 @@ type Service struct {
 
 var _ app.CostVisibility = (*Service)(nil)
 
-// New returns the service showing the least (the zero app.DisplayConfig) until
-// Load reads the stored settings.
+// New hides costs and masks unknown upstream errors until Load reads saved preferences.
 func New(settings app.SettingsRepo, audit app.AuditSink, clock app.Clock) *Service {
 	s := &Service{settings: settings, audit: audit, clock: clock}
-	s.current.Store(&app.DisplayConfig{})
+	s.current.Store(&app.DisplayConfig{MaskUnknownErrors: true})
 
 	return s
 }
@@ -60,6 +58,9 @@ func (s *Service) Load(ctx context.Context) error {
 // dollars.
 func (s *Service) CostsVisible() bool { return s.current.Load().CostsVisible }
 
+// MaskUnknownErrors reports whether unclassified upstream 5xx details are hidden.
+func (s *Service) MaskUnknownErrors() bool { return s.current.Load().MaskUnknownErrors }
+
 // CostsVisibleTo is CostsVisible for user: an administrator sees every cost in
 // the admin panel anyway, so their own cabinet shows it whatever the setting.
 func (s *Service) CostsVisibleTo(user identity.User) bool {
@@ -75,15 +76,33 @@ func (s *Service) Get(actor identity.User) (app.DisplayConfig, error) {
 	return *s.current.Load(), nil
 }
 
-// Set replaces the settings: stored first, then swapped into memory, then
-// audited. A failed audit reports the change as applied but not audited.
-func (s *Service) Set(ctx context.Context, actor identity.User, cfg app.DisplayConfig) (app.DisplayConfig, error) {
+// Patch changes only explicitly supplied preferences.
+type Patch struct {
+	CostsVisible      *bool
+	MaskUnknownErrors *bool
+}
+
+// Set persists supplied preferences before publishing them to request handlers.
+func (s *Service) Set(ctx context.Context, actor identity.User, patch Patch) (app.DisplayConfig, error) {
 	if err := app.RequireAdmin(actor); err != nil {
 		return app.DisplayConfig{}, err
 	}
 
+	if patch.CostsVisible == nil && patch.MaskUnknownErrors == nil {
+		return app.DisplayConfig{}, &app.InvalidInputError{Field: "fields"}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	cfg := *s.current.Load()
+	if patch.CostsVisible != nil {
+		cfg.CostsVisible = *patch.CostsVisible
+	}
+
+	if patch.MaskUnknownErrors != nil {
+		cfg.MaskUnknownErrors = *patch.MaskUnknownErrors
+	}
 
 	now := s.clock.Now().UTC()
 	if err := s.settings.SetDisplayConfig(ctx, cfg, actor.ID, now); err != nil {
@@ -95,7 +114,7 @@ func (s *Service) Set(ctx context.Context, actor identity.User, cfg app.DisplayC
 
 	if err := s.audit.Record(ctx, app.AuditEvent{
 		At: now, ActorID: actor.ID, Action: actionUpdate, Target: targetConfig,
-		Detail: map[string]any{detailCostsVisible: cfg.CostsVisible},
+		Detail: map[string]any{detailCostsVisible: cfg.CostsVisible, "mask_unknown_errors": cfg.MaskUnknownErrors},
 	}); err != nil {
 		return app.DisplayConfig{}, fmt.Errorf("app: %s on %s applied but not audited: %w", actionUpdate, targetConfig, err)
 	}

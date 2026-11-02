@@ -319,7 +319,7 @@ func TestConfigNamesThePublicAPIAndCostVisibility(t *testing.T) {
 	require.Equal(t, api.Config{ApiBaseURL: testAPIURL, CostsVisible: false}, config(person("p@example.com")), "a user by default")
 	require.Equal(t, api.Config{ApiBaseURL: testAPIURL, CostsVisible: true}, config(admin()), "an administrator")
 
-	env.settings.EXPECT().SetDisplayConfig(mock.Anything, app.DisplayConfig{CostsVisible: true}, mock.Anything, env.clock.Now()).Return(nil)
+	env.settings.EXPECT().SetDisplayConfig(mock.Anything, app.DisplayConfig{CostsVisible: true, MaskUnknownErrors: true}, mock.Anything, env.clock.Now()).Return(nil)
 
 	var saved api.AdminConfig
 	decodeBody(t, env.do(http.MethodPut, "/api/admin/config", `{"costsVisible":true}`, withCookie(env.signedIn(admin()))), http.StatusOK, &saved)

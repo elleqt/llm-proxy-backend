@@ -247,7 +247,7 @@ func newEnv(t *testing.T, opts ...envOption) *testEnv {
 // costs, as boot's Load reads them.
 func (e *testEnv) withCostsVisible() {
 	e.t.Helper()
-	e.settings.EXPECT().DisplayConfig(mock.Anything).Return(app.DisplayConfig{CostsVisible: true}, nil).Once()
+	e.settings.EXPECT().DisplayConfig(mock.Anything).Return(app.DisplayConfig{CostsVisible: true, MaskUnknownErrors: true}, nil).Once()
 	require.NoError(e.t, e.deps.Display.Load(e.t.Context()), "Load")
 }
 
