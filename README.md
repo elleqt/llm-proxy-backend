@@ -364,6 +364,14 @@ With `LLMPROXY_OIDC_GROUP_POLICY` set, a linked account's model rules come from 
 
 If a migration fails, the backend does not start; `docker compose logs backend` shows why. Release notes are on the [releases page](https://github.com/elleqt/llm-proxy-backend/releases). A newer compose file is not required for an upgrade unless the release notes say so.
 
+### Explicit reasoning levels are validated by the SDK
+
+With CLIProxyAPI v8.0.53, OpenAI-compatible requests to an administrator-managed provider return HTTP 400 when an explicit reasoning level is outside the model's configured list. Previously, standard unsupported levels could be replaced with the nearest listed level: `max` against `none/high` became `high`. Clients must now request a supported level, or administrators must include it only when the vendor accepts it.
+
+The **Reasoning levels** setting declares supported model capabilities to CLIProxyAPI; it does not select the effort for a request, enable a vendor feature, or define a numeric thinking budget. Clients choose `reasoning_effort`. The gateway declares its default set, including `max`, when no custom list is saved, so leaving the setting untouched does not enable unrestricted passthrough. A custom value is useful only if the vendor already accepts it. Other protocols and special modes follow the SDK's translation rules; built-in subscription providers keep the SDK's model-specific behavior.
+
+This list is not discovered automatically from the vendor and is not advertised by the ordinary OpenAI `/v1/models` response. The SDK can include supported levels in its separate Codex-client catalog, subject to that client's supported vocabulary. Declaring a custom name does not teach the SDK how to translate it into a numeric budget.
+
 ### CLIProxyAPI v8 drops the Codex `identity-confuse` setting
 
 The embedded CLIProxyAPI moves to v8, which removes the `identity-confuse` key of the `codex:` section. Before upgrading, remove it from the settings document in the admin panel (**Admin → Settings**) if the document sets it: the backend refuses a document with a key upstream does not know, so one that still sets it stops the backend at start.
@@ -868,6 +876,8 @@ All settings are environment variables, set in the backend's `environment` in th
 ## Development
 
 - **Go**: the version in `go.mod`. The `Dockerfile` builds with the matching `golang` alpine image, cross-compiling for the target platform.
+- **Embedded SDK compatibility**: CLIProxyAPI v8.0.53 captures usage identity through Gin's `Context.Get(string)` interface. Keep Gin at v1.10.1 until the SDK supports the `Get(any)` interface in newer Gin releases; otherwise served requests lose their owner and do not charge spend limits. Dependency upgrades must pass the real gateway usage and spend-limit tests, not only compile.
+- The gateway filters model listings after decoding negotiated gzip or zstd responses, then restores that encoding.
 - To run the whole stack from your checkouts, see [Building from source](#building-from-source).
 - `scripts/check-readme-compose.sh` fails when the compose file shown in this README drifts from `docker-compose.minimal.yml` (CI runs it). Releases and repository rules: [RELEASING.md](RELEASING.md).
 - Changes reach `main` only as pull requests, squash-merged after CI passes; direct pushes to `main` are refused. The PR title becomes the commit and must follow [Conventional Commits](https://www.conventionalcommits.org) (`fix(gateway): ...`). Security issues: [SECURITY.md](SECURITY.md), never a public issue.

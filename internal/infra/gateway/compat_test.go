@@ -255,10 +255,9 @@ func TestCompatProvidersPoolAModel(t *testing.T) {
 	assert.NotEmpty(t, vb.Requests(), "the pooled model never reached the second provider")
 }
 
-// sentEffort sends a chat completion for model with reasoning_effort effort
-// ("" leaves the key out), requires it served, and returns the body vendor
-// last received.
-func sentEffort(t *testing.T, srv *running, vendor *faketest.Vendor, model, effort string) map[string]any {
+// requestEffort sends a chat completion with the explicit effort, or leaves
+// reasoning_effort out when effort is empty, and returns its HTTP status.
+func requestEffort(t *testing.T, srv *running, model, effort string) int {
 	t.Helper()
 
 	payload := map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}
@@ -278,7 +277,14 @@ func sentEffort(t *testing.T, srv *running, vendor *faketest.Vendor, model, effo
 	require.NoError(t, err)
 
 	_ = resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode, "reasoning_effort %q", effort)
+
+	return resp.StatusCode
+}
+
+// sentEffort requires a served request and returns the body the vendor received.
+func sentEffort(t *testing.T, srv *running, vendor *faketest.Vendor, model, effort string) map[string]any {
+	t.Helper()
+	require.Equal(t, http.StatusOK, requestEffort(t, srv, model, effort), "reasoning_effort %q", effort)
 
 	reqs := vendor.Requests()
 	require.NotEmpty(t, reqs)
@@ -331,8 +337,8 @@ func TestCompatProviderPassesReasoningEffort(t *testing.T) {
 }
 
 // TestCompatProviderOwnReasoningLevels: a model's own list is passed
-// unchanged, a level off it goes out as the nearest listed one, and the list
-// survives a restart; a model without one reports none.
+// unchanged, an explicit unsupported level is refused without reaching the
+// vendor, and the list survives a restart; a model without one reports none.
 func TestCompatProviderOwnReasoningLevels(t *testing.T) {
 	pool := pgtest.NewTestPool(t)
 	vendor := compatVendor()
@@ -360,7 +366,12 @@ func TestCompatProviderOwnReasoningLevels(t *testing.T) {
 			assert.Equal(t, effort, sentEffort(t, srv, vendor, model, effort)["reasoning_effort"], "sent %q", effort)
 		}
 
-		assert.Equal(t, "high", sentEffort(t, srv, vendor, model, "max")["reasoning_effort"], "sent max")
+		for _, effort := range []string{"max", "xhigh", "unsupported"} {
+			before := len(vendor.Requests())
+
+			require.Equal(t, http.StatusBadRequest, requestEffort(t, srv, model, effort), "unsupported effort %q", effort)
+			assert.Len(t, vendor.Requests(), before, "unsupported effort reached the vendor")
+		}
 	}
 
 	check(first)
@@ -392,7 +403,12 @@ func TestCompatProviderUpdateReasoningLevels(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, own, compatAccountModels(t, srv.gateway, account.ID))
 	awaitProviders(t, srv.gateway.catalog, model, []string{name})
-	assert.Equal(t, "high", sentEffort(t, srv, vendor, model, "max")["reasoning_effort"], "sent max with an own list")
+
+	before := len(vendor.Requests())
+
+	require.Equal(t, http.StatusBadRequest, requestEffort(t, srv, model, "max"), "unsupported effort with an own list")
+	assert.Len(t, vendor.Requests(), before, "unsupported effort reached the vendor")
+	assert.Equal(t, "high", sentEffort(t, srv, vendor, model, "high")["reasoning_effort"], "supported effort after update")
 
 	plain := []app.CompatModel{{Name: model}}
 	_, err = srv.gateway.UpdateCompatProvider(t.Context(), account.ID, app.CompatProviderUpdate{BaseURL: vendorSrv.URL, Models: plain})
