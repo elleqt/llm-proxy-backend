@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"maps"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/domain/identity"
 	"github.com/elleqt/llm-proxy-backend/internal/domain/limits"
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy"
 	cliproxyconfig "github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"github.com/stretchr/testify/assert"
@@ -303,6 +306,20 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 			_, _ = c.Writer.WriteString(strings.Repeat("x", maxListingBody))
 			_, _ = c.Writer.WriteString(`"}`)
 		}},
+		{"an invalid compressed response", "/v1/models", func(c *gin.Context) {
+			c.Header("Content-Encoding", "gzip")
+			c.String(http.StatusOK, "secret-model")
+		}},
+		{"a compressed list over the decoded size limit", "/v1/models", func(ginCtx *gin.Context) {
+			var compressed bytes.Buffer
+
+			encoder := gzip.NewWriter(&compressed)
+			_, err := encoder.Write([]byte(`{"data":[{"id":"secret-model"}],"pad":"` + strings.Repeat("x", maxListingBody) + `"}`))
+			require.NoError(t, err)
+			require.NoError(t, encoder.Close())
+			ginCtx.Header("Content-Encoding", "gzip")
+			ginCtx.Data(http.StatusOK, "application/json", compressed.Bytes())
+		}},
 	} {
 		engine := gateEngine(staticResolver(gateSecret, gatePrincipal, "*:*"), catalog)
 		engine.GET(strings.TrimSuffix(tc.path, "/"), tc.write)
@@ -314,6 +331,7 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 
 		assert.Equal(t, http.StatusBadGateway, rec.Code, tc.what)
 		assert.JSONEq(t, unavailable, rec.Body.String(), tc.what)
+		assert.Empty(t, rec.Header().Get("Content-Encoding"), tc.what)
 	}
 }
 
@@ -323,13 +341,58 @@ func TestListingsOfAnUnexpectedShapeAreNotSent(t *testing.T) {
 func TestListingThroughTheWire(t *testing.T) {
 	pair := startVendorPair(t)
 
-	code, body := pair.getAs(t, "/v1/models", nil)
-	require.Equal(t, http.StatusOK, code, "GET /v1/models: %s", body)
+	for _, encoding := range []string{"identity", "gzip", "zstd"} {
+		t.Run(encoding, func(t *testing.T) {
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, pair.baseURL+"/v1/models", http.NoBody)
+			require.NoError(t, err)
+			req.Header.Set("Authorization", "Bearer "+wireSecret)
 
-	ids := arrayNames("data", "id", same)(t, body)
-	require.Contains(t, ids, pair.allowedAlias, "GET /v1/models")
-	require.NotContains(t, ids, pair.otherAlias, "GET /v1/models")
-	require.NotContains(t, ids, pair.sharedAlias, "GET /v1/models")
+			accept := encoding
+			if encoding != "identity" {
+				accept += ", identity;q=0"
+			}
+
+			req.Header.Set("Accept-Encoding", accept)
+			resp, err := noRedirects.Do(req)
+			require.NoError(t, err)
+
+			defer func() { _ = resp.Body.Close() }()
+
+			var reader io.Reader = resp.Body
+
+			switch encoding {
+			case "identity":
+				require.Empty(t, resp.Header.Get("Content-Encoding"))
+			case "gzip":
+				require.Equal(t, encoding, resp.Header.Get("Content-Encoding"))
+
+				decoder, decodeErr := gzip.NewReader(reader)
+				require.NoError(t, decodeErr)
+
+				defer func() { _ = decoder.Close() }()
+
+				reader = decoder
+			case "zstd":
+				require.Equal(t, encoding, resp.Header.Get("Content-Encoding"))
+
+				decoder, decodeErr := zstd.NewReader(reader)
+				require.NoError(t, decodeErr)
+
+				defer decoder.Close()
+
+				reader = decoder
+			}
+
+			body, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusOK, resp.StatusCode, "GET /v1/models: %s", body)
+
+			ids := arrayNames("data", "id", same)(t, string(body))
+			require.Contains(t, ids, pair.allowedAlias, "GET /v1/models")
+			require.NotContains(t, ids, pair.otherAlias, "GET /v1/models")
+			require.NotContains(t, ids, pair.sharedAlias, "GET /v1/models")
+		})
+	}
 }
 
 // TestCabinetListsWhatTheListingLists: the cabinet's list of a user's models

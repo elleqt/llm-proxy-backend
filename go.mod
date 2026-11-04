@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/gin-gonic/gin v1.12.0
+	github.com/gin-gonic/gin v1.10.1 // CLIProxyAPI usage snapshots require Context.Get(string), not Get(any).
 	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
@@ -16,7 +16,7 @@ require (
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/prometheus/common v0.73.0
-	github.com/router-for-me/CLIProxyAPI/v8 v8.0.38
+	github.com/router-for-me/CLIProxyAPI/v8 v8.0.53
 	github.com/sirupsen/logrus v1.10.2
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.44.0
@@ -34,6 +34,7 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20261006220739-8c912ac31dd4 // indirect
 	github.com/Microsoft/go-winio v0.6.3 // indirect
+	github.com/MoeForge/moego v0.1.0-alpha.1 // indirect
 	github.com/andybalholm/brotli v1.2.6 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
@@ -63,7 +64,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.30.1 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
@@ -93,7 +93,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pandatix/go-abnf v0.5.1 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+	github.com/pelletier/go-toml/v2 v2.4.3-0.20260624044523-35f78d5908f1 // indirect
 	github.com/pierrec/xxHash v0.1.5 // indirect
 	github.com/pion/datachannel v1.6.2 // indirect
 	github.com/pion/dtls/v3 v3.1.5 // indirect
@@ -113,8 +113,6 @@ require (
 	github.com/pion/webrtc/v4 v4.2.17 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
-	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/redis/go-redis/v9 v9.19.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
 	github.com/sethvargo/go-retry v0.5.0 // indirect
@@ -130,7 +128,6 @@ require (
 	github.com/ugorji/go/codec v1.3.1 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	go.mongodb.org/mongo-driver/v2 v2.5.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.72.0 // indirect
 	go.opentelemetry.io/otel v1.47.0 // indirect

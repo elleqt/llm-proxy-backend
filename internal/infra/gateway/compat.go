@@ -268,11 +268,10 @@ func compatEntry(auth *coreauth.Auth) cliproxyconfig.OpenAICompatibility {
 // compatModelEntry is m as upstream's configuration entry, with its reasoning
 // levels — the model's own list, else the default set — declared. Without a
 // declaration upstream registers a compat model as low/medium/high
-// (sdk/cliproxy/service_models.go) and rewrites every other reasoning_effort
-// to the nearest of those (internal/thinking/validate.go): "none" reached
-// Ollama as "low", "max" as "high". Upstream's ThinkingSupport type is
-// internal, so the tagged thinking field is decoded rather than the type
-// named, and each call gets a fresh value.
+// (sdk/cliproxy/service_models.go), so other explicit OpenAI reasoning levels
+// would be refused even when the vendor accepts them. Upstream's
+// ThinkingSupport type is internal, so the tagged thinking field is decoded
+// rather than the type named, and each call gets a fresh value.
 func compatModelEntry(m app.CompatModel) cliproxyconfig.OpenAICompatibilityModel {
 	entry := cliproxyconfig.OpenAICompatibilityModel{Name: m.Name, Alias: m.Alias}
 

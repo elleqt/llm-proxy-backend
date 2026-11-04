@@ -2,13 +2,16 @@ package gateway
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/klauspost/compress/zstd"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -264,6 +267,48 @@ type bufferedWriter struct {
 
 var errListingTooLarge = errors.New("gateway: model list too large")
 
+const (
+	listingIdentity = "identity"
+	listingZstd     = "zstd"
+)
+
+// encodeListingBody preserves upstream's negotiated content coding after the
+// gate changes a listing. No compressed bytes are sent before encoding succeeds.
+func encodeListingBody(body []byte, encoding string) ([]byte, error) {
+	var out bytes.Buffer
+
+	var encoder io.WriteCloser
+
+	switch encoding {
+	case "", listingIdentity:
+		return body, nil
+	case "gzip":
+		encoder = gzip.NewWriter(&out)
+	case listingZstd:
+		var err error
+
+		encoder, err = zstd.NewWriter(&out, zstd.WithEncoderConcurrency(1), zstd.WithWindowSize(1<<20))
+		if err != nil {
+			return nil, fmt.Errorf("gateway: start listing zstd encoder: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("%w: unsupported listing encoding %q", errListingShape, encoding)
+	}
+
+	_, writeErr := encoder.Write(body)
+	closeErr := encoder.Close()
+
+	if writeErr != nil {
+		return nil, fmt.Errorf("gateway: encode listing: %w", writeErr)
+	}
+
+	if closeErr != nil {
+		return nil, fmt.Errorf("gateway: finish listing encoding: %w", closeErr)
+	}
+
+	return out.Bytes(), nil
+}
+
 func (w *bufferedWriter) WriteHeader(code int) {
 	if code > 0 {
 		w.status = code
@@ -304,3 +349,38 @@ func (w *bufferedWriter) Size() int {
 func (w *bufferedWriter) Written() bool { return w.wrote }
 
 func (w *bufferedWriter) Flush() {}
+
+// decodedBody undoes upstream's response compression before filtering, with
+// the same bound on decoded bytes as on the buffered wire representation.
+func (w *bufferedWriter) decodedBody() ([]byte, error) {
+	if w.overflow {
+		return nil, errListingTooLarge
+	}
+
+	body := w.body.Bytes()
+	switch encoding := w.Header().Get("Content-Encoding"); encoding {
+	case "", listingIdentity:
+		return body, nil
+	case listingZstd:
+		return decodeZstd(body, int64(w.limit))
+	case "gzip":
+		decoder, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("gateway: start listing gzip decoder: %w", err)
+		}
+		defer func() { _ = decoder.Close() }()
+
+		decoded, err := io.ReadAll(io.LimitReader(decoder, int64(w.limit)+1))
+		if err != nil {
+			return nil, fmt.Errorf("gateway: decode listing gzip: %w", err)
+		}
+
+		if len(decoded) > w.limit {
+			return nil, errListingTooLarge
+		}
+
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported listing encoding %q", errListingShape, encoding)
+	}
+}

@@ -379,14 +379,22 @@ func serveListing(ginCtx *gin.Context, list listing, admitted func(string) bool,
 	ginCtx.Next()
 	ginCtx.Writer = held.ResponseWriter
 
-	status, body, err := list(ginCtx, held.status, held.body.Bytes(), admitted)
-	if held.overflow {
-		err = errListingTooLarge
+	body, err := held.decodedBody()
+
+	status := held.status
+
+	if err == nil {
+		status, body, err = list(ginCtx, status, body, admitted)
+	}
+
+	if err == nil {
+		body, err = encodeListingBody(body, ginCtx.Writer.Header().Get("Content-Encoding"))
 	}
 
 	ginCtx.Writer.Header().Del("Content-Length")
 
 	if err != nil {
+		ginCtx.Writer.Header().Del("Content-Encoding")
 		log.LogAttrs(ginCtx.Request.Context(), slog.LevelError, "policy gate: filtering a listing failed",
 			slog.String("route", ginCtx.FullPath()), slog.Any("err", err))
 		abortWithError(ginCtx, http.StatusBadGateway, "server_error", "model list unavailable")
