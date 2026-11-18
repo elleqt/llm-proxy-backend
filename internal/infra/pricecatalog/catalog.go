@@ -23,12 +23,12 @@ import (
 	"github.com/elleqt/llm-proxy-backend/internal/app"
 )
 
-// MaxBody is the largest catalog accepted. The catalog is about 11 MiB.
+// MaxBody is the largest catalog accepted, including uncompressed custom catalogs.
 const MaxBody = 64 << 20
 
 // parserVersion changes whenever Parse or sections would read the same document
 // into different prices, so validators stored by an older build are not sent.
-const parserVersion = 3
+const parserVersion = 4
 
 // The sentinels below carry the fixed part of each error message; where a call
 // site appends detail, the full text still reads as one sentence. The messages
@@ -170,12 +170,14 @@ func (s *Source) Fetch(ctx context.Context, since app.CatalogValidators) (app.Ca
 // entry is the part of a catalog model this package reads. Input and Output are
 // pointers so a cost that lacks either is told from one that is zero.
 type entry struct {
-	Cost *struct {
-		Input      *float64 `json:"input"`
-		Output     *float64 `json:"output"`
-		CacheRead  float64  `json:"cacheRead"`
-		CacheWrite float64  `json:"cacheWrite"`
-	} `json:"cost"`
+	Cost *tokenCost `json:"cost"`
+}
+
+type tokenCost struct {
+	Input      *float64 `json:"input"`
+	Output     *float64 `json:"output"`
+	CacheRead  float64  `json:"cacheRead"`
+	CacheWrite float64  `json:"cacheWrite"`
 }
 
 // Parse maps a catalog document onto our prices, ordered by provider then model.
@@ -190,6 +192,11 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 		return nil, errNotObject
 	}
 
+	catalog, err := decodeCatalog(top)
+	if err != nil {
+		return nil, err
+	}
+
 	type key struct{ provider, model string }
 
 	seen := make(map[key]bool)
@@ -197,28 +204,17 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 	var out []app.ModelPrice
 
 	for _, sec := range sections {
-		raw, ok := top[sec.section]
-		if !ok {
-			continue
-		}
-
-		var models map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &models); err != nil {
-			return nil, fmt.Errorf("%w %s section is not a JSON object", errSection, sec.section)
-		}
-
-		for model, rawEntry := range models {
+		for model, modelEntry := range catalog[sec.section] {
 			entryKey := key{sec.provider, model}
 			if seen[entryKey] || !modelID(model) {
 				continue
 			}
 
-			var e entry
-			if json.Unmarshal(rawEntry, &e) != nil || e.Cost == nil || e.Cost.Input == nil || e.Cost.Output == nil {
+			if modelEntry.Cost == nil || modelEntry.Cost.Input == nil || modelEntry.Cost.Output == nil {
 				continue
 			}
 
-			cost := e.Cost
+			cost := modelEntry.Cost
 			if !rate(*cost.Input) || !rate(*cost.Output) || !rate(cost.CacheRead) || !rate(cost.CacheWrite) {
 				continue
 			}
@@ -242,6 +238,38 @@ func Parse(doc []byte) ([]app.ModelPrice, error) {
 	})
 
 	return out, nil
+}
+
+// Custom catalog URLs may still serve the expanded provider-to-model object.
+func decodeCatalog(top map[string]json.RawMessage) (map[string]map[string]entry, error) {
+	if _, compact := top["version"]; compact {
+		return decodeCompact(top)
+	}
+
+	catalog := make(map[string]map[string]entry, len(sections))
+	for _, sec := range sections {
+		raw, ok := top[sec.section]
+		if !ok {
+			continue
+		}
+
+		var models map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &models); err != nil {
+			return nil, fmt.Errorf("%w %s section is not a JSON object", errSection, sec.section)
+		}
+
+		decoded := make(map[string]entry, len(models))
+		for model, rawEntry := range models {
+			var e entry
+			if json.Unmarshal(rawEntry, &e) == nil {
+				decoded[model] = e
+			}
+		}
+
+		catalog[sec.section] = decoded
+	}
+
+	return catalog, nil
 }
 
 func rate(v float64) bool { return v >= 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
