@@ -877,7 +877,7 @@ All settings are environment variables, set in the backend's `environment` in th
 ## Development
 
 - **Go**: the version in `go.mod`. The `Dockerfile` builds with the matching `golang` alpine image, cross-compiling for the target platform.
-- **Embedded SDK compatibility**: CLIProxyAPI v8.0.53 captures usage identity through Gin's `Context.Get(string)` interface. Keep Gin at v1.10.1 until the SDK supports the `Get(any)` interface in newer Gin releases; otherwise served requests lose their owner and do not charge spend limits. Dependency upgrades must pass the real gateway usage and spend-limit tests, not only compile.
+- **Embedded SDK compatibility**: CLIProxyAPI captures usage identity through Gin's `Context.Get(string)` interface. Keep Gin at v1.10.1 until the SDK supports the `Get(any)` interface in newer Gin releases; otherwise served requests lose their owner and do not charge spend limits. Dependency upgrades must pass the real gateway usage and spend-limit tests, not only compile. New upstream routes, such as the WebSocket tunnel and Muse Code side routes, remain denied unless they are deliberately integrated with the gateway's access and accounting rules.
 - The gateway filters model listings after decoding negotiated gzip or zstd responses, then restores that encoding.
 - To run the whole stack from your checkouts, see [Building from source](#building-from-source).
 - `scripts/check-readme-compose.sh` fails when the compose file shown in this README drifts from `docker-compose.minimal.yml` (CI runs it). Releases and repository rules: [RELEASING.md](RELEASING.md).

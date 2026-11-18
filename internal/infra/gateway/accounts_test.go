@@ -542,14 +542,6 @@ func TestRunRefusesAManagementEnvironment(t *testing.T) {
 	require.ErrorIs(t, gw.WaitReload(ctx), ErrManagementEnv, "WaitReload after the refused Run")
 }
 
-// claudeBaselineUserAgent is the Claude CLI identity upstream presents for a
-// Claude OAuth account when the client is not Claude Code itself
-// (internal/runtime/executor/helps/claude_device_profile.go
-// defaultClaudeFingerprintUserAgent). Before v7.3.15 the baseline was older
-// than the vendor accepts, and only a claude-header-defaults user-agent in the
-// configuration kept Claude accounts usable.
-const claudeBaselineUserAgent = "claude-cli/2.1.280 (external, cli)"
-
 // TestClaudeRequestCarriesTheCLIBaseline: with no claude-header-defaults in
 // the configuration, a request a non-Claude-Code client sends through a Claude
 // OAuth account reaches the vendor under upstream's CLI baseline User-Agent,
@@ -608,5 +600,6 @@ func TestClaudeRequestCarriesTheCLIBaseline(t *testing.T) {
 	// The account's token, so the request went through upstream's Claude
 	// executor for this account and not some other route to the vendor.
 	require.Equal(t, "Bearer "+oauthToken, reqs[0].Header.Get("Authorization"), "vendor Authorization must be the Claude account's token")
-	require.Equal(t, claudeBaselineUserAgent, reqs[0].Header.Get("User-Agent"), "vendor User-Agent must be upstream's baseline")
+	require.Regexp(t, `^claude-cli/[0-9]+\.[0-9]+\.[0-9]+ \(external, cli\)$`, reqs[0].Header.Get("User-Agent"),
+		"vendor User-Agent must be the versioned Claude CLI identity, not the client's")
 }

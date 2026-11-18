@@ -109,6 +109,21 @@ var routes = map[string]route{
 	// other users' requests.
 	"GET /v1/ws": {kind: routeDenied},
 
+	// Denied: the upstream WebSocket tunnel and Muse Code side routes.
+	// They are not part of the gateway's model, policy and usage contract.
+	"GET /v1/tunnel":               {kind: routeDenied},
+	"HEAD /v1/tunnel":              {kind: routeDenied},
+	"POST /v1/tunnel":              {kind: routeDenied},
+	"PUT /v1/tunnel":               {kind: routeDenied},
+	"PATCH /v1/tunnel":             {kind: routeDenied},
+	"DELETE /v1/tunnel":            {kind: routeDenied},
+	"TRACE /v1/tunnel":             {kind: routeDenied},
+	"CONNECT /v1/tunnel":           {kind: routeDenied},
+	"GET /muse-code/models":        {kind: routeDenied},
+	"GET /muse-code/config":        {kind: routeDenied},
+	"POST /muse-code/search":       {kind: routeDenied},
+	"POST /muse-code/browser_open": {kind: routeDenied},
+
 	// Denied: Responses over a websocket. Each message names its own model
 	// after the upgrade, where the gate cannot see it.
 	"GET /v1/responses":                {kind: routeDenied},
