@@ -188,8 +188,19 @@ func TestFetchFailuresAreShortAndBodyless(t *testing.T) {
 // Through the real price table: once a check has applied the catalog, a request is
 // priced for a model only the catalog prices.
 func TestACheckedCatalogPricesUsage(t *testing.T) {
+	t.Run("expanded", func(t *testing.T) {
+		checkedCatalogPricesUsage(t, catalogDoc, "claude-sonnet-5")
+	})
+	t.Run("compact", func(t *testing.T) {
+		checkedCatalogPricesUsage(t, compactDoc, "claude-sonnet")
+	})
+}
+
+func checkedCatalogPricesUsage(t *testing.T, doc, model string) {
+	t.Helper()
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(catalogDoc))
+		_, _ = w.Write([]byte(doc))
 	}))
 	defer srv.Close()
 
@@ -214,7 +225,7 @@ func TestACheckedCatalogPricesUsage(t *testing.T) {
 	prices := appprices.New(manual, catalog, pricecatalog.New(srv.URL, ""), table, m, audit, clock{}, quiet{})
 	require.NoError(t, prices.Load(context.Background()), "Load")
 
-	usage := app.UsageEvent{Provider: "claude", Model: "claude-sonnet-5", TokensInput: 1_000_000, TokensTotal: 1_000_000}
+	usage := app.UsageEvent{Provider: "claude", Model: model, TokensInput: 1_000_000, TokensTotal: 1_000_000}
 
 	cost := func() app.UsageCost {
 		p, ok := table.Price(usage.Provider, usage.Model)

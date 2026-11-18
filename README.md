@@ -696,6 +696,7 @@ The preference is stored with response-visibility settings, separate from upstre
 The price list (US dollars per million tokens: input, output, cache read, cache write) is used only for cost estimates.
 
 - **Catalog prices** come from the [oh-my-pi model catalog](https://github.com/can1357/oh-my-pi) (`LLMPROXY_PRICES_CATALOG_URL`). It is checked at start and then every 6 h by default (`LLMPROXY_PRICES_CATALOG_INTERVAL`). Its `anthropic` section maps to `claude`, and `openai-codex` (then `openai`) maps to `chatgpt`. A `claude` cache write is priced at Anthropic's 1-hour rate, 2× input, not the catalog's 5-minute rate (see [How cost is computed](#how-cost-is-computed)).
+- Both the compact v1 catalog (`version`, `keys`, `nodes`, `providers`) and expanded provider-to-model objects are supported. Unsupported compact versions or damaged price references fail the check without replacing stored prices.
 - **Manual prices** set by an administrator always win over the catalog. Removing one falls back to the catalog price.
 - **Refresh** checks the catalog immediately. A failed check keeps the prices in force and shows the error in the admin panel.
 - Set `LLMPROXY_PRICES_CATALOG_URL=off` to use manual prices only.
