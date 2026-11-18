@@ -355,6 +355,16 @@ func TestAdmitForcesCooldownFilesAndRequestLogOff(t *testing.T) {
 	assert.False(t, current.RequestLog, "pushed configuration: request-log survived admission")
 }
 
+func TestGatewayDoesNotCreateLocalReplayStore(t *testing.T) {
+	srv := start(t, &cliproxyconfig.Config{})
+	assert.NoFileExists(t, filepath.Join(srv.gateway.AuthDir(), "kv.db"), "startup opened a disk-backed replay store")
+
+	pushed := srv.emptyPush()
+	pushed.KVStore.Path = filepath.Join(t.TempDir(), "replay.db")
+	require.NoError(t, srv.gateway.PushConfig(pushed), "push config with a new replay path")
+	assert.NoFileExists(t, pushed.KVStore.Path, "reload opened a disk-backed replay store")
+}
+
 // fakeVendor wires the fake executor into a real upstream auth manager, for
 // conductor-level tests only. No HTTP request reaches this path: a request
 // resolves its provider from the global model registry by model name, and every

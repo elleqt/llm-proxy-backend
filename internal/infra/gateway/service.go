@@ -278,6 +278,9 @@ func checkManagementEnv() error {
 // openai/openai_responses_websocket.go); New installs none (noRequestLogger),
 // so nothing would ever consume them.
 //
+// The SDK otherwise opens a local KV database under AuthDir for request-derived
+// state, including Codex replay items. Disabling it keeps that state in memory.
+//
 // Every forced flag is set on cfg itself, as upstream's own home mode does
 // (service_config.go forceHomeRuntimeConfig), because upstream keeps the
 // pointer; each is written only when it differs from the forced value, so
@@ -327,6 +330,10 @@ func admit(cfg *cliproxyconfig.Config) error {
 
 	if cfg.RequestLog {
 		cfg.RequestLog = false
+	}
+
+	if !cfg.KVStore.Disabled {
+		cfg.KVStore.Disabled = true
 	}
 
 	return nil
@@ -620,7 +627,7 @@ func (g *Gateway) Shutdown(ctx context.Context) error {
 // would enable the management API and one carrying api-keys. On error the
 // running configuration and CurrentConfig are unchanged. An accepted cfg has
 // its control panel forced off, websocket authentication forced on, and
-// cooldown files and request logging forced off (admit).
+// cooldown files, request logging and the local KV store forced off (admit).
 func (g *Gateway) PushConfig(cfg *cliproxyconfig.Config) error {
 	if cfg == nil {
 		return errNilConfig

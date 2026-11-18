@@ -59,6 +59,8 @@ import (
 //     gateway. gateway.admit forces save-cooldown-status and request-log off
 //     (cooldown state stays in memory, and no request logger is installed), and
 //     error-logs-max-files bounds error log files nothing writes.
+//   - kv-store: gateway.admit disables the upstream disk cache so request replay
+//     state stays in memory, including after a configuration reload.
 //   - models: the sources of upstream's model catalogues, an absolute path on
 //     this host or any http(s) URL, fetched at start and every three hours.
 //     The process picks between the published catalogues and the ones compiled
@@ -71,7 +73,7 @@ var ownedKeys = []string{
 	"host", "port", "tls", "trusted-proxies", "pprof", "discovery", "debug", "auth-dir",
 	"logging-to-file", "logs-max-total-size-mb",
 	"remote-management", "api-keys", "plugins", "ws-auth", "openai-compatibility",
-	"save-cooldown-status", "request-log", "error-logs-max-files", "models",
+	"save-cooldown-status", "request-log", "error-logs-max-files", "kv-store", "models",
 }
 
 // isOwnedKey reports whether a top-level key is gateway-owned. Any key ending in

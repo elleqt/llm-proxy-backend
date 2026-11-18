@@ -94,6 +94,7 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 		"plugins":                "plugins:\n  enabled: true",
 		"ws-auth":                "ws-auth: false",
 		"home":                   "home:\n  enabled: true",
+		"kv-store":               "kv-store:\n  disabled: false",
 		"claude-api-key":         "claude-api-key:\n  - api-key: sk-test",
 		"openai-compatibility":   "openai-compatibility:\n  - name: extra\n    base-url: http://x.test",
 		"future-api-key":         "future-api-key: []",
@@ -123,7 +124,11 @@ func TestSettingsRefusesGatewayOwnedFields(t *testing.T) {
 
 	// A document an earlier release stored stops the boot too, the formerly
 	// tolerated inert keys included.
-	for field, doc := range map[string]string{"api-keys": "api-keys: [master]\n", "request-log": "request-log: true\n"} {
+	for field, doc := range map[string]string{
+		"api-keys":    "api-keys: [master]\n",
+		"request-log": "request-log: true\n",
+		"kv-store":    "kv-store:\n  disabled: false\n",
+	} {
 		t.Run("stored document at boot sets "+field, func(t *testing.T) {
 			repo := mocks.NewSettingsRepo(t)
 			repo.EXPECT().UpstreamDocument(mock.Anything).Return(doc, nil)
