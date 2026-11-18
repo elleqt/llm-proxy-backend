@@ -681,7 +681,7 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 
 - **Sticky sessions** (`routing.session-affinity`) keep a conversation on one vendor account while it is available, which helps the vendors' prompt caches. They are **on** unless the document sets `session-affinity: false`, and apply to every provider, subscription accounts included.
 - **`proxy-url`** sends outbound vendor traffic through an HTTP or SOCKS proxy. A changed `proxy-url` reaches the vendor sign-in code exchange only after a restart.
-- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `models`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. Listeners, credentials, management and debug logging cannot be changed from the admin panel; OpenAI-compatible providers are added in **Admin → Providers**; where the model catalogs come from (`models`) is `LLMPROXY_MODEL_CATALOG_UPDATES`. Cooldowns stay in memory and CLIProxyAPI writes no request or error log files, so the last three would have no effect.
+- The gateway **owns** these top-level keys and refuses a document that sets them: `host`, `port`, `tls`, `trusted-proxies`, `pprof`, `discovery`, `debug`, `auth-dir`, `remote-management`, `api-keys`, `plugins`, `ws-auth`, `openai-compatibility`, `home`, `models`, `kv-store`, `save-cooldown-status`, `request-log`, `error-logs-max-files`, and every key ending in `-api-key`. OpenAI-compatible providers are added in **Admin → Providers**; `LLMPROXY_MODEL_CATALOG_UPDATES` selects where the model catalogs come from (`models`). Cooldowns and replay caches stay in memory, and upstream request and error log files are disabled.
 
 #### Unknown upstream errors
 
@@ -871,6 +871,7 @@ All settings are environment variables, set in the backend's `environment` in th
   - The audit log records admin and auth actions.
   - The process log never contains passwords, keys, session ids or configuration secrets. The bootstrap password bypasses the logger.
   - CLIProxyAPI's debug logging is forced off, and so are its request and error log files: nothing is written to `LLMPROXY_RUNTIME_DIR`. Vendor errors show in the metrics, the usage ledger and the process log.
+  - CLIProxyAPI's local KV database is disabled at startup and on configuration reload. Codex replay state stays in memory; the gateway does not create `kv.db` in the auth directory.
   - Every vendor sign-in prints `Saving credentials to /tmp/llmproxy-credential-…/credential.json` on standard output. CLIProxyAPI prints it; it names only the temporary file the fresh credential passes through on its way into the database (removed at once) and carries no secret.
 - The web API and metrics listeners have no protection of their own against the outside world. Keep them private (see [Production deployment](#production-deployment)).
 
