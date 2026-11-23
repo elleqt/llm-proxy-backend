@@ -257,7 +257,8 @@ func recognizedUpstreamError(detail upstreamErrorDetail, status int) bool {
 
 func recognizedErrorKind(kind string) bool {
 	switch kind {
-	case "overloaded_error", "rate_limit_error", "rate_limit_exceeded", "quota_exceeded", "usage_limit_reached", "insufficient_quota",
+	case "overloaded_error", "server_is_overloaded", "service_unavailable_error",
+		"rate_limit_error", "rate_limit_exceeded", "quota_exceeded", "usage_limit_reached", "insufficient_quota",
 		"context_length_exceeded", "context_too_large", "invalid_request_error", "authentication_error", "permission_error", "invalid_api_key",
 		upstreamAuthUnavailable, upstreamAuthNotFound, "upstream_authentication_required",
 		"model_cooldown", "model_not_found", "model_not_supported",
