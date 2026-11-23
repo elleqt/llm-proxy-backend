@@ -547,7 +547,9 @@ func answerCodexExchange(t *testing.T, email, accessToken string) {
 			"refresh_token": "fresh-refresh-token",
 			"id_token":      "e30." + base64.RawURLEncoding.EncodeToString(claims) + ".c2ln",
 			"token_type":    "Bearer",
-			"expires_in":    int((48 * time.Hour).Seconds()),
+			// Keep this grant outside the SDK's refresh window. This test
+			// exercises the code exchange, not the background token refresh.
+			"expires_in": int((coreauth.CodexOuterRefreshLead + 24*time.Hour).Seconds()),
 		})
 	}))
 	t.Cleanup(vendor.Close)
