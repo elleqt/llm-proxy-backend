@@ -163,6 +163,7 @@ func TestCodexResponsesCooldownPreservesTurnLimit(t *testing.T) {
 
 	status, headers, body = codexErrorProbe(t, wire, "/backend-api/codex/responses")
 	require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
+
 	remaining, err := strconv.Atoi(headers.Get("Retry-After"))
 	require.NoError(t, err)
 	require.InDelta(t, 479, remaining, 5)
@@ -220,6 +221,7 @@ func codexErrorProbe(t *testing.T, wire *running, path string) (int, http.Header
 
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
+
 	return response.StatusCode, response.Header, body
 }
 
