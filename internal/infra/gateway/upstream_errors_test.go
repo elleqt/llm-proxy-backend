@@ -120,12 +120,69 @@ func TestMaskingCanBeDisabledForOriginalDiagnostics(t *testing.T) {
 	require.Equal(t, `<html>original diagnostics</html>`, response.Error.Message)
 }
 
+const codexOverload = `{"type":"error","error":{"message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error","param":null,"code":"server_is_overloaded","headers":{"retry-after":"339","retry-after-ms":"339000"}},"sequence_number":4}`
+
 func TestRecognizedServerErrorRemainsIntactOnTheWire(t *testing.T) {
-	original := `{"error":{"type":"overloaded_error","code":"rate_limit_exceeded","message":"Retry after the provider recovers","retry_after_ms":39000,"retryable":true}}`
-	wire := startOnTheWire(t, &faketest.Vendor{FailStatus: http.StatusServiceUnavailable, FailBody: []byte(original)})
-	status, _, body := errorProbe(t, wire, "/v1/chat/completions")
-	require.Equal(t, http.StatusServiceUnavailable, status)
-	require.JSONEq(t, original, string(body))
+	for _, test := range []struct {
+		name, body string
+	}{
+		{"rate limit", `{"error":{"type":"overloaded_error","code":"rate_limit_exceeded","message":"Retry after the provider recovers","retry_after_ms":39000,"retryable":true}}`},
+		{"Codex overload", codexOverload},
+		{"Codex overload code", `{"error":{"type":"server_error","code":"server_is_overloaded","message":"Try again later."}}`},
+		{"Codex overload type", `{"error":{"type":"service_unavailable_error","message":"Try again later."}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			wire := startOnTheWire(t, &faketest.Vendor{FailStatus: http.StatusServiceUnavailable, FailBody: []byte(test.body)})
+			status, _, body := errorProbe(t, wire, "/v1/chat/completions")
+			require.Equal(t, http.StatusServiceUnavailable, status)
+			require.JSONEq(t, test.body, string(body))
+		})
+	}
+}
+
+func TestCodexResponsesOverloadPreservesRetryAfter(t *testing.T) {
+	vendor := &faketest.Vendor{Chunks: [][]byte{
+		[]byte(`{"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}`),
+		[]byte(codexOverload),
+	}}
+	upstream := faketest.Start(t, vendor)
+	cfg, err := cliproxyconfig.ParseConfigBytes(fmt.Appendf(nil, `
+codex-api-key:
+  - api-key: %q
+    base-url: %q
+    models:
+      - name: example-model
+        alias: codex-overload-test
+upstream:
+  codex:
+    stream-bootstrap-buffering: true
+routing:
+  retry:
+    request-retry: 0
+`, vendorKey, upstream.URL))
+	require.NoError(t, err)
+	wire := start(t, cfg)
+	awaitProviders(t, wire.gateway.catalog, "codex-overload-test", []string{"chatgpt"})
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, wire.baseURL+"/v1/responses",
+		strings.NewReader(`{"model":"codex-overload-test","input":"hello","stream":true}`))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+wireSecret)
+	response, err := http.DefaultClient.Do(request)
+	require.NoError(t, err)
+
+	defer func() { _ = response.Body.Close() }()
+
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode, "%s", body)
+	require.Equal(t, "339", response.Header.Get("Retry-After"))
+
+	var envelope upstreamErrorEnvelope
+
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	require.Equal(t, "server_is_overloaded", envelope.Error.Code)
 }
 
 func TestMaskingUsesStatusAndMachineCodesNotResponseText(t *testing.T) {
