@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -120,6 +121,8 @@ func TestMaskingCanBeDisabledForOriginalDiagnostics(t *testing.T) {
 	require.Equal(t, `<html>original diagnostics</html>`, response.Error.Message)
 }
 
+const codexTurnLimit = `{"type":"error","error":{"type":"rate_limit_error","code":"turn_rate_limit_exceeded","message":"Codex is at capacity, please try again later. Private diagnostic.","headers":{"retry-after":"479"}}}`
+
 const codexOverload = `{"type":"error","error":{"message":"Our servers are currently overloaded. Please try again later.","type":"service_unavailable_error","param":null,"code":"server_is_overloaded","headers":{"retry-after":"339","retry-after-ms":"339000"}},"sequence_number":4}`
 
 func TestRecognizedServerErrorRemainsIntactOnTheWire(t *testing.T) {
@@ -141,9 +144,45 @@ func TestRecognizedServerErrorRemainsIntactOnTheWire(t *testing.T) {
 }
 
 func TestCodexResponsesOverloadPreservesRetryAfter(t *testing.T) {
+	wire, _ := startCodexErrorVendor(t, codexOverload)
+	status, headers, body := codexErrorProbe(t, wire, "/v1/responses")
+	require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
+	require.Equal(t, "339", headers.Get("Retry-After"))
+
+	var envelope upstreamErrorEnvelope
+
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	require.Equal(t, "server_is_overloaded", envelope.Error.Code)
+}
+
+func TestCodexResponsesCooldownPreservesTurnLimit(t *testing.T) {
+	wire, vendor := startCodexErrorVendor(t, codexTurnLimit)
+	status, headers, body := codexErrorProbe(t, wire, "/backend-api/codex/responses")
+	require.Equal(t, http.StatusTooManyRequests, status, "%s", body)
+	require.Equal(t, "479", headers.Get("Retry-After"))
+
+	status, headers, body = codexErrorProbe(t, wire, "/backend-api/codex/responses")
+	require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
+
+	remaining, err := strconv.Atoi(headers.Get("Retry-After"))
+	require.NoError(t, err)
+	require.InDelta(t, 479, remaining, 5)
+	require.Len(t, vendor.Requests(), 1, "a request inside the cooldown must not reach Codex")
+
+	var envelope upstreamErrorEnvelope
+
+	require.NoError(t, json.Unmarshal(body, &envelope))
+	require.Equal(t, "turn_rate_limit_exceeded", envelope.Error.Code, "%s", body)
+	require.Equal(t, "rate_limit_error", envelope.Error.Type)
+	require.NotContains(t, string(body), "Private diagnostic")
+}
+
+func startCodexErrorVendor(t *testing.T, event string) (*running, *faketest.Vendor) {
+	t.Helper()
+
 	vendor := &faketest.Vendor{Chunks: [][]byte{
 		[]byte(`{"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}`),
-		[]byte(codexOverload),
+		[]byte(event),
 	}}
 	upstream := faketest.Start(t, vendor)
 	cfg, err := cliproxyconfig.ParseConfigBytes(fmt.Appendf(nil, `
@@ -164,7 +203,13 @@ routing:
 	wire := start(t, cfg)
 	awaitProviders(t, wire.gateway.catalog, "codex-overload-test", []string{"chatgpt"})
 
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, wire.baseURL+"/v1/responses",
+	return wire, vendor
+}
+
+func codexErrorProbe(t *testing.T, wire *running, path string) (int, http.Header, []byte) {
+	t.Helper()
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, wire.baseURL+path,
 		strings.NewReader(`{"model":"codex-overload-test","input":"hello","stream":true}`))
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
@@ -176,13 +221,8 @@ routing:
 
 	body, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode, "%s", body)
-	require.Equal(t, "339", response.Header.Get("Retry-After"))
 
-	var envelope upstreamErrorEnvelope
-
-	require.NoError(t, json.Unmarshal(body, &envelope))
-	require.Equal(t, "server_is_overloaded", envelope.Error.Code)
+	return response.StatusCode, response.Header, body
 }
 
 func TestMaskingUsesStatusAndMachineCodesNotResponseText(t *testing.T) {
@@ -319,7 +359,7 @@ func TestSelectionTypeDoesNotLeakNestedDiagnostics(t *testing.T) {
 	engine.GET("/failure", func(ginCtx *gin.Context) {
 		ginCtx.Header("Retry-After", "39")
 		ginCtx.Data(http.StatusServiceUnavailable, "application/json",
-			[]byte(`{"error":{"type":"auth_unavailable","message":"private nested diagnostics","retry_after_ms":39000}}`))
+			[]byte(`{"error":{"type":"auth_unavailable","message":"private nested diagnostics mentioning turn_rate_limit_exceeded","retry_after_ms":39000}}`))
 	})
 
 	response := httptest.NewRecorder()
