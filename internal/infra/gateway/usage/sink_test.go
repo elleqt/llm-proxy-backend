@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1070,6 +1071,35 @@ func TestSinkClampsQuotaRatio(t *testing.T) {
 
 	want := map[quotaSeries]float64{{"claude-1.json", "claude", "5h"}: 1, {"codex-1.json", "chatgpt", "5h"}: 1}
 	require.Equal(t, want, quotaGauge(t, reg, "llmproxy_vendor_quota_used_ratio"), "used ratio series")
+}
+
+func TestCodexDisabledSecondaryWindowDoesNotOverwriteWeeklyQuota(t *testing.T) {
+	sink, reg := quotaSink(t)
+	at := time.Date(2026, 11, 24, 7, 0, 0, 0, time.UTC)
+	reset := at.Add(22 * time.Hour)
+
+	sink.HandleUsage(context.Background(), cliproxyusage.Record{
+		Provider: "codex", Model: "m", APIKey: sinkKey, AuthID: "weekly.json", RequestedAt: at,
+		ResponseHeaders: headers(
+			"X-Codex-Primary-Used-Percent", "41",
+			"X-Codex-Primary-Window-Minutes", "10080",
+			"X-Codex-Primary-Reset-At", strconv.FormatInt(reset.Unix(), 10),
+			"X-Codex-Secondary-Used-Percent", "0",
+			"X-Codex-Secondary-Window-Minutes", "0",
+			"X-Codex-Secondary-Reset-After-Seconds", "0",
+		),
+	})
+	flushed(t, sink)
+
+	require.Equal(t, []app.QuotaSignal{
+		{Account: "weekly.json", Provider: "chatgpt", Window: "7d", UsedRatio: 0.41, ResetAt: reset, ObservedAt: at},
+	}, sink.QuotaSignals())
+	require.Equal(t, map[quotaSeries]float64{
+		{"weekly.json", "chatgpt", "7d"}: 0.41,
+	}, quotaGauge(t, reg, "llmproxy_vendor_quota_used_ratio"))
+	require.Equal(t, map[quotaSeries]float64{
+		{"weekly.json", "chatgpt", "7d"}: float64(reset.Unix()),
+	}, quotaGauge(t, reg, "llmproxy_vendor_quota_reset_timestamp_seconds"))
 }
 
 // TestSinkQuotaSnapshotReplacesWindows: each response carrying quota signals

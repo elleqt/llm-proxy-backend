@@ -633,6 +633,8 @@ An administrator caps how many US dollars of estimated cost (the usage ledger's 
 
 **Admin → Providers** lists the vendor accounts: status, last error, last refresh, and the quota the vendor reports in its response headers (share used and reset time per window, e.g. `5h` and `7d`). **Add provider** opens the sign-in wizard described in [Quick start](#7-add-a-vendor-account). At most 8 sign-ins can be pending at once. An account can be **disabled** (its models stop routing) or **removed**.
 
+Codex quota windows with a zero duration are disabled and omitted, so an unused secondary window cannot replace a weekly-only plan's actual usage with `0%`.
+
 Every account, including Claude and ChatGPT subscriptions, has a **Usage role** saved immediately from its row: **Preferred** (`1`), **Normal** (`0`, the default for new accounts), or **Reserve** (`-1`). For the same model, the highest available tier is selected; equal-tier accounts use the configured routing strategy (round-robin by default). With sticky sessions, new conversations are distributed while established conversations keep their available account. A second ChatGPT identity is Normal by default and shares new conversations with other Normal identities. The account editor also offers a custom signed integer priority; existing custom values are preserved.
 
 **Sticky sessions** are controlled once in **Admin → Settings**, and save immediately. They are on by default for all providers; a deliberate off setting survives restarts and unrelated edits. Changing an account's role does not enable it, reset its cooldown, replace its proxy or tokens, or move an established session.

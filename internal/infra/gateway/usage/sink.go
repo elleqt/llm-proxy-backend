@@ -641,6 +641,9 @@ func (s *Sink) observeQuota(record cliproxyusage.Record, provider string, observ
 			}
 
 			window := windowOf(headers.Get(prefix+"Window-Minutes"), pos.fallback)
+			if window == "" {
+				continue
+			}
 
 			reset, ok := parseEpochOrRFC3339(headers.Get(prefix + "Reset-At"))
 			if !ok {
@@ -722,11 +725,14 @@ func afterSeconds(raw string, from time.Time) time.Time {
 
 // windowOf names a Codex window from its length in minutes: whole days as
 // "<n>d", whole hours as "<n>h", else "<n>m"; fallback when absent or invalid.
+// An explicitly non-positive length disables the window.
 func windowOf(raw, fallback string) string {
 	minutes, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
 	switch {
-	case err != nil || minutes <= 0:
+	case err != nil:
 		return fallback
+	case minutes <= 0:
+		return ""
 	case minutes%(24*60) == 0:
 		return strconv.FormatInt(minutes/(24*60), 10) + "d"
 	case minutes%60 == 0:
