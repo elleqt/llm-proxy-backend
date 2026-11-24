@@ -689,7 +689,7 @@ New sessions prefer available Go capacity. Go authentication/access failures, ex
 
 Recognition uses concrete machine-readable error codes/types, not merely a generic `server_error`/`api_error` wrapper. Structured Codex overload errors (`server_is_overloaded` / `service_unavailable_error`) pass through with their original body. Auth-selection wrappers (`auth_unavailable` / `auth_not_found`) retain their classification with a canonical message instead of copying nested upstream diagnostics. More specific authentication classifications take precedence. Existing `Retry-After` headers and structured retry timing/flags are preserved; masking does not invent a retry delay.
 
-During a Codex turn-capacity cooldown, an HTTP `503` auth-selection response with `Retry-After` exposes `turn_rate_limit_exceeded` if the SDK retained that exact reason. The gateway does not forward the underlying diagnostic text or change the retry deadline.
+During a Codex overload cooldown, an HTTP `503` auth-selection response with `Retry-After` exposes `server_is_overloaded` or `turn_rate_limit_exceeded` if the SDK retained that exact reason. The gateway does not forward the underlying diagnostic text or change the retry deadline.
 
 The preference is stored with response-visibility settings, separate from upstream YAML. A missing preference in an older installation enables masking; an explicitly saved **off** survives restart. Turn it off only when inspecting original diagnostics, which may expose provider internals. Admin config updates apply only supplied fields, so changing cost visibility does not reset this preference.
 

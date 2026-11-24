@@ -17,9 +17,11 @@ const maxUpstreamErrorBody = 64 << 10
 const upstreamErrorEnvelopeType = "error"
 
 const (
-	upstreamAuthUnavailable = "auth_unavailable"
-	upstreamAuthNotFound    = "auth_not_found"
-	upstreamCodexTurnLimit  = "turn_rate_limit_exceeded"
+	upstreamOverloadedErrorType = "overloaded_error"
+	upstreamAuthUnavailable     = "auth_unavailable"
+	upstreamAuthNotFound        = "auth_not_found"
+	upstreamCodexTurnLimit      = "turn_rate_limit_exceeded"
+	upstreamCodexServerOverload = "server_is_overloaded"
 )
 
 func maskUnknownUpstreamErrors(visibility app.ErrorVisibility) gin.HandlerFunc {
@@ -198,12 +200,24 @@ func normalizedUpstreamError(body []byte, status int, anthropic, overflow, hasRe
 		payload.Error.Type = errorType
 	}
 
+	overload := ""
+	if selection == upstreamAuthUnavailable && status == http.StatusServiceUnavailable && hasRetryAfter {
+		overload = codexSelectionOverloadCode(payload.Error.Message)
+	}
+
 	switch {
-	case selection == upstreamAuthUnavailable && status == http.StatusServiceUnavailable &&
-		hasRetryAfter && codexSelectionTurnLimited(payload.Error.Message):
-		payload.Error.Code = upstreamCodexTurnLimit
+	case overload == upstreamCodexTurnLimit:
+		payload.Error.Code = overload
 		payload.Error.Type = "rate_limit_error"
 		payload.Error.Message = "Codex is temporarily at capacity. Please try again later."
+	case overload == upstreamCodexServerOverload:
+		payload.Error.Code = overload
+		payload.Error.Type = "service_unavailable_error"
+		payload.Error.Message = "Codex servers are currently overloaded. Please try again later."
+
+		if anthropic {
+			payload.Error.Type = upstreamOverloadedErrorType
+		}
 	case selection != "":
 		payload.Error.Code = selection
 		payload.Error.Message = "No upstream account is currently available."
@@ -252,20 +266,29 @@ func authSelectionErrorCode(detail upstreamErrorDetail) string {
 // The SDK serializes the cooldown cause into its enriched selection message.
 // Match only the exact last-error code in the Codex selection wrapper and never
 // copy any of the diagnostic text into the public response.
-func codexSelectionTurnLimited(message string) bool {
+func codexSelectionOverloadCode(message string) string {
 	detail, ok := strings.CutPrefix(message, upstreamAuthUnavailable+": no auth available (providers=codex, model=")
 	if !ok {
-		return false
+		return ""
 	}
 
 	detail, ok = strings.CutSuffix(detail, ")")
 	if !ok {
-		return false
+		return ""
 	}
 
 	_, cause, ok := strings.Cut(detail, "; last upstream error: ")
+	if !ok {
+		return ""
+	}
 
-	return ok && (cause == upstreamCodexTurnLimit || strings.HasPrefix(cause, upstreamCodexTurnLimit+": "))
+	code, _, _ := strings.Cut(cause, ": ")
+	switch code {
+	case upstreamCodexTurnLimit, upstreamCodexServerOverload:
+		return code
+	default:
+		return ""
+	}
 }
 
 // Generic status-derived types do not prove that upstream classified its body.
@@ -276,7 +299,7 @@ func recognizedUpstreamError(detail upstreamErrorDetail, status int) bool {
 	}
 
 	if status == http.StatusGatewayTimeout && detail.Type == "timeout_error" ||
-		status == 529 && detail.Type == "overloaded_error" {
+		status == 529 && detail.Type == upstreamOverloadedErrorType {
 		return false
 	}
 
@@ -285,7 +308,7 @@ func recognizedUpstreamError(detail upstreamErrorDetail, status int) bool {
 
 func recognizedErrorKind(kind string) bool {
 	switch kind {
-	case "overloaded_error", "server_is_overloaded", "service_unavailable_error",
+	case upstreamOverloadedErrorType, upstreamCodexServerOverload, "service_unavailable_error",
 		"rate_limit_error", "rate_limit_exceeded", upstreamCodexTurnLimit, "quota_exceeded", "usage_limit_reached", "insufficient_quota",
 		"context_length_exceeded", "context_too_large", "invalid_request_error", "authentication_error", "permission_error", "invalid_api_key",
 		upstreamAuthUnavailable, upstreamAuthNotFound, "upstream_authentication_required",

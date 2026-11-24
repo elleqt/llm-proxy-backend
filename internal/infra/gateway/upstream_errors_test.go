@@ -144,7 +144,7 @@ func TestRecognizedServerErrorRemainsIntactOnTheWire(t *testing.T) {
 }
 
 func TestCodexResponsesOverloadPreservesRetryAfter(t *testing.T) {
-	wire, _ := startCodexErrorVendor(t, codexOverload)
+	wire, _ := startCodexErrorVendor(t, codexOverload, true)
 	status, headers, body := codexErrorProbe(t, wire, "/v1/responses")
 	require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
 	require.Equal(t, "339", headers.Get("Retry-After"))
@@ -155,29 +155,46 @@ func TestCodexResponsesOverloadPreservesRetryAfter(t *testing.T) {
 	require.Equal(t, "server_is_overloaded", envelope.Error.Code)
 }
 
-func TestCodexResponsesCooldownPreservesTurnLimit(t *testing.T) {
-	wire, vendor := startCodexErrorVendor(t, codexTurnLimit)
-	status, headers, body := codexErrorProbe(t, wire, "/backend-api/codex/responses")
-	require.Equal(t, http.StatusTooManyRequests, status, "%s", body)
-	require.Equal(t, "479", headers.Get("Retry-After"))
+func TestCodexResponsesCooldownPreservesOverloadCause(t *testing.T) {
+	for _, test := range []struct {
+		name, event, code, errorType string
+		firstStatus, retryAfter      int
+		bufferBootstrap              bool
+	}{
+		{"turn admission", codexTurnLimit, "turn_rate_limit_exceeded", "rate_limit_error", http.StatusTooManyRequests, 479, true},
+		{"already started stream", codexOverload, "server_is_overloaded", "service_unavailable_error", http.StatusOK, 339, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const path = "/backend-api/codex/responses"
 
-	status, headers, body = codexErrorProbe(t, wire, "/backend-api/codex/responses")
-	require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
+			wire, vendor := startCodexErrorVendor(t, test.event, test.bufferBootstrap)
+			status, headers, body := codexErrorProbe(t, wire, path)
+			require.Equal(t, test.firstStatus, status, "%s", body)
+			require.Contains(t, string(body), test.code)
 
-	remaining, err := strconv.Atoi(headers.Get("Retry-After"))
-	require.NoError(t, err)
-	require.InDelta(t, 479, remaining, 5)
-	require.Len(t, vendor.Requests(), 1, "a request inside the cooldown must not reach Codex")
+			if test.bufferBootstrap {
+				require.Equal(t, strconv.Itoa(test.retryAfter), headers.Get("Retry-After"))
+			}
 
-	var envelope upstreamErrorEnvelope
+			status, headers, body = codexErrorProbe(t, wire, path)
+			require.Equal(t, http.StatusServiceUnavailable, status, "%s", body)
 
-	require.NoError(t, json.Unmarshal(body, &envelope))
-	require.Equal(t, "turn_rate_limit_exceeded", envelope.Error.Code, "%s", body)
-	require.Equal(t, "rate_limit_error", envelope.Error.Type)
-	require.NotContains(t, string(body), "Private diagnostic")
+			remaining, err := strconv.Atoi(headers.Get("Retry-After"))
+			require.NoError(t, err)
+			require.InDelta(t, test.retryAfter, remaining, 5)
+			require.Len(t, vendor.Requests(), 1, "a request inside the cooldown must not reach Codex")
+
+			var envelope upstreamErrorEnvelope
+
+			require.NoError(t, json.Unmarshal(body, &envelope))
+			require.Equal(t, test.code, envelope.Error.Code, "%s", body)
+			require.Equal(t, test.errorType, envelope.Error.Type)
+			require.NotContains(t, string(body), "Private diagnostic")
+		})
+	}
 }
 
-func startCodexErrorVendor(t *testing.T, event string) (*running, *faketest.Vendor) {
+func startCodexErrorVendor(t *testing.T, event string, bufferBootstrap bool) (*running, *faketest.Vendor) {
 	t.Helper()
 
 	vendor := &faketest.Vendor{Chunks: [][]byte{
@@ -194,11 +211,11 @@ codex-api-key:
         alias: codex-overload-test
 upstream:
   codex:
-    stream-bootstrap-buffering: true
+    stream-bootstrap-buffering: %t
 routing:
   retry:
     request-retry: 0
-`, vendorKey, upstream.URL))
+`, vendorKey, upstream.URL, bufferBootstrap))
 	require.NoError(t, err)
 	wire := start(t, cfg)
 	awaitProviders(t, wire.gateway.catalog, "codex-overload-test", []string{"chatgpt"})
